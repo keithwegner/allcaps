@@ -10,7 +10,7 @@ import streamlit.components.v1 as components
 
 from .backtesting import BacktestService
 from .config import AppSettings
-from .contracts import ModelRunConfig
+from .contracts import MANUAL_OVERRIDE_COLUMNS, ModelRunConfig
 from .discovery import DiscoveryService
 from .enrichment import LLMEnrichmentService
 from .experiments import ExperimentStore
@@ -106,17 +106,8 @@ def _refresh_datasets(
     store.save_frame("sp500_daily", sp500, metadata={"row_count": int(len(sp500))})
     store.save_frame("spy_daily", spy, metadata={"row_count": int(len(spy))})
 
-    tracked_existing = store.read_frame("tracked_accounts")
     as_of = posts["post_timestamp"].max() if not posts.empty else pd.Timestamp.now(tz=settings.timezone)
-    tracked_accounts, ranking_history = discovery_service.refresh_accounts(posts, tracked_existing, as_of=as_of)
-    store.save_frame("tracked_accounts", tracked_accounts, metadata={"row_count": int(len(tracked_accounts))})
-    if not ranking_history.empty:
-        store.append_frame(
-            "account_rankings",
-            ranking_history,
-            dedupe_on=["author_account_id", "ranked_at"],
-            metadata={"row_count": int(len(ranking_history))},
-        )
+    tracked_accounts, ranking_history = _rebuild_discovery_state(store, discovery_service, posts, as_of)
     return {
         "posts": posts,
         "source_manifest": source_manifest,
@@ -146,6 +137,28 @@ def _ensure_bootstrap(
         )
 
 
+def _rebuild_discovery_state(
+    store: DuckDBStore,
+    discovery_service: DiscoveryService,
+    posts: pd.DataFrame,
+    as_of: pd.Timestamp,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    overrides = store.read_frame("manual_account_overrides")
+    normalized_overrides = discovery_service.normalize_manual_overrides(overrides)
+    if normalized_overrides.empty:
+        normalized_overrides = pd.DataFrame(columns=MANUAL_OVERRIDE_COLUMNS)
+    tracked_accounts, ranking_history = discovery_service.refresh_accounts(
+        posts=posts,
+        existing_accounts=pd.DataFrame(),
+        as_of=as_of,
+        manual_overrides=normalized_overrides,
+    )
+    store.save_frame("manual_account_overrides", normalized_overrides, metadata={"row_count": int(len(normalized_overrides))})
+    store.save_frame("tracked_accounts", tracked_accounts, metadata={"row_count": int(len(tracked_accounts))})
+    store.save_frame("account_rankings", ranking_history, metadata={"row_count": int(len(ranking_history))})
+    return tracked_accounts, ranking_history
+
+
 def _metric_row(metrics: dict[str, Any]) -> None:
     cols = st.columns(6)
     cols[0].metric("Total return", f"{metrics.get('total_return', 0.0):+.2%}")
@@ -173,6 +186,23 @@ def _render_equity_curve(trades: pd.DataFrame, title: str) -> None:
             name="Strategy equity",
         ),
     )
+    fig.update_layout(title=title, xaxis_title="Trade date", yaxis_title="Equity", margin={"l": 20, "r": 20, "t": 60, "b": 20})
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _render_equity_curve_comparison(curves_by_run: dict[str, pd.DataFrame], title: str) -> None:
+    fig = go.Figure()
+    for run_id, curve in curves_by_run.items():
+        if curve.empty:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=curve["next_session_date"],
+                y=curve["equity_curve"],
+                mode="lines",
+                name=run_id,
+            ),
+        )
     fig.update_layout(title=title, xaxis_title="Trade date", yaxis_title="Equity", margin={"l": 20, "r": 20, "t": 60, "b": 20})
     st.plotly_chart(fig, use_container_width=True)
 
@@ -254,14 +284,16 @@ def render_datasets_view(
 
 
 def render_discovery_view(
+    settings: AppSettings,
     store: DuckDBStore,
     discovery_service: DiscoveryService,
 ) -> None:
     st.subheader("Discovery")
-    st.caption("Dynamic discovery ranks X accounts mentioning Trump and auto-includes the top candidates into the tracked universe.")
+    st.caption("Dynamic discovery ranks X accounts mentioning Trump, auto-includes the strongest candidates, and lets you pin or suppress accounts manually.")
     posts = store.read_frame("normalized_posts")
     tracked_accounts = store.read_frame("tracked_accounts")
     ranking_history = store.read_frame("account_rankings")
+    overrides = discovery_service.normalize_manual_overrides(store.read_frame("manual_account_overrides"))
 
     if posts.empty:
         st.info("Refresh datasets first so the workbench has posts to analyze.")
@@ -276,6 +308,7 @@ def render_discovery_view(
         keep = [
             "handle",
             "display_name",
+            "status",
             "discovery_score",
             "mention_count",
             "engagement_mean",
@@ -299,12 +332,74 @@ def render_discovery_view(
             "engagement_mean",
             "active_days",
             "ranked_at",
+            "selected_status",
+            "suppressed_by_override",
+            "pinned_by_override",
         ]
         st.dataframe(
             latest_rankings[keep].sort_values("discovery_score", ascending=False),
             use_container_width=True,
             hide_index=True,
         )
+
+        st.markdown("**Manual overrides**")
+        override_cols = st.columns([3, 2, 2, 2])
+        option_rows = latest_rankings[["author_account_id", "author_handle", "author_display_name"]].drop_duplicates().copy()
+        option_rows["label"] = option_rows.apply(
+            lambda row: f"@{row['author_handle'] or '[unknown]'} | {row['author_display_name'] or row['author_account_id']}",
+            axis=1,
+        )
+        selected_label = override_cols[0].selectbox("Account", options=option_rows["label"].tolist())
+        selected_row = option_rows.loc[option_rows["label"] == selected_label].iloc[0]
+        action = override_cols[1].selectbox("Action", options=["pin", "suppress"])
+        effective_from = override_cols[2].date_input(
+            "Effective from",
+            value=posts["post_timestamp"].max().tz_convert(settings.timezone).date(),
+            min_value=settings.term_start.date(),
+            max_value=posts["post_timestamp"].max().tz_convert(settings.timezone).date(),
+            key="override_effective_from",
+        )
+        note = override_cols[3].text_input("Note", value="", key="override_note")
+        no_end_date = st.checkbox("No end date", value=True)
+        effective_to = None
+        if not no_end_date:
+            effective_to = st.date_input(
+                "Effective to",
+                value=posts["post_timestamp"].max().tz_convert(settings.timezone).date(),
+                min_value=effective_from,
+                key="override_effective_to",
+            )
+        if st.button("Save override", use_container_width=True):
+            updated = discovery_service.add_manual_override(
+                overrides=overrides,
+                account_id=str(selected_row["author_account_id"]),
+                handle=str(selected_row["author_handle"]),
+                display_name=str(selected_row["author_display_name"]),
+                action=action,
+                effective_from=pd.Timestamp(effective_from),
+                effective_to=pd.Timestamp(effective_to) if effective_to is not None else None,
+                note=note,
+            )
+            store.save_frame("manual_account_overrides", updated, metadata={"row_count": int(len(updated))})
+            _rebuild_discovery_state(store, discovery_service, posts, posts["post_timestamp"].max())
+            st.success(f"Saved {action} override for @{selected_row['author_handle']}.")
+            st.rerun()
+
+    if not overrides.empty:
+        st.markdown("**Override history**")
+        st.dataframe(overrides, use_container_width=True, hide_index=True)
+        remove_options = overrides.apply(
+            lambda row: f"{row['override_id']} | {row['action']} | @{row['handle'] or row['account_id']} | from {pd.Timestamp(row['effective_from']).date()}",
+            axis=1,
+        ).tolist()
+        remove_choice = st.selectbox("Remove override", options=remove_options)
+        remove_id = remove_choice.split(" | ", 1)[0]
+        if st.button("Delete selected override", use_container_width=True):
+            updated = discovery_service.remove_manual_override(overrides, remove_id)
+            store.save_frame("manual_account_overrides", updated, metadata={"row_count": int(len(updated))})
+            _rebuild_discovery_state(store, discovery_service, posts, posts["post_timestamp"].max())
+            st.success("Removed override.")
+            st.rerun()
 
     if not ranking_history.empty:
         chart_data = latest_rankings.head(15).sort_values("discovery_score")
@@ -456,7 +551,7 @@ def render_models_view(
     experiment_store: ExperimentStore,
 ) -> None:
     st.subheader("Models & Backtests")
-    st.caption("Build the session dataset, train a next-session SPY expected-return model, and evaluate it with walk-forward backtests.")
+    st.caption("Build the session dataset, train a next-session SPY expected-return model, compare saved runs, and inspect benchmark plus leakage diagnostics.")
     posts = store.read_frame("normalized_posts")
     spy = store.read_frame("spy_daily")
     tracked_accounts = store.read_frame("tracked_accounts")
@@ -510,6 +605,10 @@ def render_models_view(
                 windows=artifacts["windows"],
                 importance=artifacts["importance"],
                 model_artifact=artifacts["model_artifact"],
+                benchmarks=artifacts["benchmarks"],
+                diagnostics=artifacts["diagnostics"],
+                benchmark_curves=artifacts["benchmark_curves"],
+                leakage_audit=artifacts["leakage_audit"],
             )
         st.success(f"Saved run `{run.run_id}`.")
 
@@ -524,6 +623,20 @@ def render_models_view(
         st.info("No experiment runs have been saved yet.")
         return
 
+    leaderboard = runs.copy()
+    leaderboard["total_return"] = leaderboard["metrics_json"].map(lambda metrics: metrics.get("total_return", 0.0))
+    leaderboard["sharpe"] = leaderboard["metrics_json"].map(lambda metrics: metrics.get("sharpe", 0.0))
+    leaderboard["sortino"] = leaderboard["metrics_json"].map(lambda metrics: metrics.get("sortino", 0.0))
+    leaderboard["max_drawdown"] = leaderboard["metrics_json"].map(lambda metrics: metrics.get("max_drawdown", 0.0))
+    leaderboard["robust_score"] = leaderboard["metrics_json"].map(lambda metrics: metrics.get("robust_score", 0.0))
+    keep = ["run_id", "run_name", "created_at", "total_return", "sharpe", "sortino", "max_drawdown", "robust_score"]
+    st.markdown("**Run leaderboard**")
+    st.dataframe(
+        leaderboard[keep].sort_values("robust_score", ascending=False),
+        use_container_width=True,
+        hide_index=True,
+    )
+
     selected_run_id = st.selectbox("Saved runs", options=runs["run_id"].tolist())
     loaded = experiment_store.load_run(selected_run_id)
     if loaded is None:
@@ -533,10 +646,80 @@ def render_models_view(
     _metric_row(loaded["metrics"])
     _render_equity_curve(loaded["trades"], title="Walk-forward out-of-sample equity curve")
 
+    compare_ids = st.multiselect(
+        "Compare runs",
+        options=runs["run_id"].tolist(),
+        default=[selected_run_id],
+    )
+    if len(compare_ids) > 1:
+        comparison_rows: list[dict[str, Any]] = []
+        curves: dict[str, pd.DataFrame] = {}
+        for run_id in compare_ids:
+            run_bundle = experiment_store.load_run(run_id)
+            if run_bundle is None:
+                continue
+            metrics = run_bundle["metrics"]
+            comparison_rows.append(
+                {
+                    "run_id": run_id,
+                    "total_return": metrics.get("total_return", 0.0),
+                    "sharpe": metrics.get("sharpe", 0.0),
+                    "sortino": metrics.get("sortino", 0.0),
+                    "max_drawdown": metrics.get("max_drawdown", 0.0),
+                    "robust_score": metrics.get("robust_score", 0.0),
+                },
+            )
+            curves[run_id] = run_bundle["trades"][["next_session_date", "equity_curve"]].copy()
+        if comparison_rows:
+            st.markdown("**Run comparison**")
+            st.dataframe(pd.DataFrame(comparison_rows).sort_values("robust_score", ascending=False), use_container_width=True, hide_index=True)
+            _render_equity_curve_comparison(curves, title="Selected run equity curves")
+
+    if not loaded["benchmarks"].empty:
+        st.markdown("**Benchmark suite**")
+        st.dataframe(loaded["benchmarks"], use_container_width=True, hide_index=True)
+    if not loaded["benchmark_curves"].empty:
+        curve_fig = go.Figure()
+        curves = loaded["benchmark_curves"].copy()
+        for column in curves.columns:
+            if column == "next_session_date":
+                continue
+            curve_fig.add_trace(go.Scatter(x=curves["next_session_date"], y=curves[column], mode="lines", name=column))
+        curve_fig.update_layout(title="Strategy vs. benchmark equity curves", xaxis_title="Trade date", yaxis_title="Equity")
+        st.plotly_chart(curve_fig, use_container_width=True)
+
+    if loaded["leakage_audit"]:
+        st.markdown("**Leakage audit**")
+        st.json(loaded["leakage_audit"])
+
     st.markdown("**Window summary**")
     st.dataframe(loaded["windows"], use_container_width=True, hide_index=True)
     st.markdown("**Feature importance**")
     st.dataframe(loaded["importance"].head(25), use_container_width=True, hide_index=True)
+    if not loaded["diagnostics"].empty:
+        diagnostics = loaded["diagnostics"].copy()
+        diag_fig = go.Figure()
+        diag_fig.add_trace(
+            go.Scatter(
+                x=diagnostics["expected_return_score"],
+                y=diagnostics["actual_next_session_return"],
+                mode="markers",
+                marker={"size": 8, "opacity": 0.65},
+                name="Predictions",
+            ),
+        )
+        diag_fig.update_layout(
+            title="Prediction diagnostics: expected vs actual next-session return",
+            xaxis_title="Expected return score",
+            yaxis_title="Actual next-session return",
+        )
+        st.plotly_chart(diag_fig, use_container_width=True)
+        st.markdown("**Largest prediction misses**")
+        st.dataframe(
+            diagnostics.sort_values("absolute_error", ascending=False).head(20),
+            use_container_width=True,
+            hide_index=True,
+        )
     with st.expander("Trades", expanded=False):
         st.dataframe(loaded["trades"], use_container_width=True, hide_index=True)
 
@@ -697,7 +880,7 @@ def main() -> None:
     elif page == "Datasets":
         render_datasets_view(settings, store, ingestion_service, market_service, discovery_service)
     elif page == "Discovery":
-        render_discovery_view(store, discovery_service)
+        render_discovery_view(settings, store, discovery_service)
     elif page == "Models & Backtests":
         render_models_view(settings, store, feature_service, backtest_service, experiment_store)
     else:

@@ -11,9 +11,12 @@ This project is now a modular single-user research workbench for evaluating and 
 - ingests and normalizes Truth Social and X/mention CSV data
 - stores datasets locally in **DuckDB + Parquet**
 - discovers and auto-includes influential X accounts mentioning Trump
+- supports manual `pin` / `suppress` overrides for the discovered account universe
 - builds per-session feature datasets for **next-session SPY expected-return** modeling
 - supports optional cached semantic enrichment on top of deterministic features
 - runs walk-forward backtests for a **long / flat SPY** strategy
+- compares the strategy against benchmark baselines such as always-long, Trump-only, and tracked-accounts-only
+- runs leakage-oriented diagnostics around feature cutoffs and next-session target alignment
 - saves experiment runs, trades, predictions, and model artifacts locally
 - preserves the original descriptive research view with:
   - S&P 500 close overlay

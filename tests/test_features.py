@@ -76,6 +76,7 @@ class FeatureTests(unittest.TestCase):
         first = feature_rows.iloc[0]
         expected = self.market.iloc[1]["close"] / self.market.iloc[1]["open"] - 1.0
         self.assertAlmostEqual(first["target_next_session_return"], expected)
+        self.assertTrue(bool(feature_rows.loc[feature_rows["signal_session_date"] == pd.Timestamp("2025-02-04"), "feature_cutoff_before_next_open"].iloc[0]))
 
 
 if __name__ == "__main__":
