@@ -153,6 +153,23 @@ class PipelineTests(unittest.TestCase):
         self.assertFalse(loaded["benchmarks"].empty)
         self.assertTrue(bool(loaded["leakage_audit"].get("overall_pass", False)))
 
+        replay_session = pd.Timestamp(first_dataset.loc[first_dataset["target_available"]].iloc[95]["signal_session_date"])
+        replay_bundle = self.backtests.build_historical_replay(
+            config,
+            first_dataset,
+            replay_session_date=replay_session,
+            deployment_params=run.selected_params,
+        )
+        replay_prediction = replay_bundle["prediction"].iloc[0]
+        self.assertEqual(pd.Timestamp(replay_prediction["signal_session_date"]), replay_session)
+        self.assertLess(pd.Timestamp(replay_bundle["history_end"]), replay_session)
+        self.assertEqual(
+            replay_bundle["training_rows_used"],
+            int((first_dataset["signal_session_date"] < replay_session).loc[first_dataset["target_available"]].sum()),
+        )
+        self.assertFalse(replay_bundle["feature_contributions"].empty)
+        self.assertFalse(bool(replay_prediction["future_training_leakage"]))
+
 
 if __name__ == "__main__":
     unittest.main()

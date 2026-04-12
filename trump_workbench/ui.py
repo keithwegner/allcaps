@@ -958,6 +958,69 @@ def _summarize_run_changes(base_run_id: str, run_bundles: dict[str, dict[str, An
     return notes
 
 
+def _bundle_to_run_config(run_bundle: dict[str, Any]) -> ModelRunConfig:
+    config = run_bundle.get("config", {}) or {}
+    run_meta = run_bundle.get("run", {}) or {}
+    return ModelRunConfig(
+        run_name=str(config.get("run_name") or run_meta.get("run_name") or "historical-replay"),
+        feature_version=str(config.get("feature_version", "v1")),
+        llm_enabled=bool(config.get("llm_enabled", False)),
+        train_window=int(config.get("train_window", 90) or 90),
+        validation_window=int(config.get("validation_window", 30) or 30),
+        test_window=int(config.get("test_window", 30) or 30),
+        step_size=int(config.get("step_size", 30) or 30),
+        threshold_grid=tuple(float(value) for value in config.get("threshold_grid", [0.0, 0.001, 0.0025, 0.005])),
+        minimum_signal_grid=tuple(int(value) for value in config.get("minimum_signal_grid", [1, 2, 3])),
+        account_weight_grid=tuple(float(value) for value in config.get("account_weight_grid", [0.5, 1.0, 1.5])),
+        ridge_alpha=float(config.get("ridge_alpha", 1.0) or 1.0),
+        transaction_cost_bps=float(config.get("transaction_cost_bps", 2.0) or 2.0),
+        start_date=config.get("start_date"),
+        end_date=config.get("end_date"),
+        notes=str(config.get("notes", "")),
+    )
+
+
+def _eligible_replay_sessions(feature_rows: pd.DataFrame, min_history_rows: int = 20) -> pd.DataFrame:
+    if feature_rows.empty:
+        return pd.DataFrame()
+    eligible = feature_rows.sort_values("signal_session_date").reset_index(drop=True).copy()
+    eligible["history_rows_available"] = eligible["target_available"].fillna(False).astype(int).cumsum().shift(fill_value=0)
+    eligible = eligible.loc[eligible["history_rows_available"] >= min_history_rows].copy()
+    return eligible.reset_index(drop=True)
+
+
+def _replay_option_label(row: pd.Series) -> str:
+    session_date = pd.Timestamp(row["signal_session_date"])
+    return (
+        f"{session_date:%Y-%m-%d} | posts {int(row.get('post_count', 0))} | "
+        f"prior train rows {int(row.get('history_rows_available', 0))}"
+    )
+
+
+def _build_replay_comparison_frame(replay_row: pd.Series, full_history_row: pd.Series | None) -> pd.DataFrame:
+    rows = [
+        {"metric": "Replay score", "value": float(replay_row.get("expected_return_score", 0.0))},
+        {"metric": "Replay confidence", "value": float(replay_row.get("prediction_confidence", 0.0))},
+        {"metric": "Replay threshold", "value": float(replay_row.get("deployment_threshold", 0.0))},
+        {"metric": "Replay min post count", "value": int(replay_row.get("deployment_min_post_count", 1))},
+        {"metric": "Training rows used", "value": int(replay_row.get("training_rows_used", 0))},
+    ]
+    actual = replay_row.get("target_next_session_return")
+    if pd.notna(actual):
+        rows.append({"metric": "Actual next-session return", "value": float(actual)})
+    if full_history_row is not None:
+        full_score = float(full_history_row.get("expected_return_score", 0.0) or 0.0)
+        replay_score = float(replay_row.get("expected_return_score", 0.0) or 0.0)
+        rows.extend(
+            [
+                {"metric": "Full-history score", "value": full_score},
+                {"metric": "Replay vs full-history drift", "value": replay_score - full_score},
+                {"metric": "Full-history confidence", "value": float(full_history_row.get("prediction_confidence", 0.0) or 0.0)},
+            ],
+        )
+    return pd.DataFrame(rows)
+
+
 def render_models_view(
     settings: AppSettings,
     store: DuckDBStore,
@@ -1344,6 +1407,131 @@ def render_live_monitor(
     )
 
 
+def render_historical_replay_view(
+    settings: AppSettings,
+    store: DuckDBStore,
+    feature_service: FeatureService,
+    model_service: ModelService,
+    backtest_service: BacktestService,
+    experiment_store: ExperimentStore,
+) -> None:
+    st.subheader("Historical Replay")
+    st.caption(
+        "Rebuild a signal as of a historical session using only earlier rows for training, then compare it to the saved full-history view.",
+    )
+    runs = experiment_store.list_runs()
+    if runs.empty:
+        st.info("Save at least one experiment run first so Historical Replay has a template configuration to follow.")
+        return
+
+    posts = store.read_frame("normalized_posts")
+    spy = store.read_frame("spy_daily")
+    tracked_accounts = store.read_frame("tracked_accounts")
+    if posts.empty or spy.empty:
+        st.info("Refresh datasets first so replay can rebuild historical features.")
+        return
+
+    selected_run_id = st.selectbox("Replay template run", options=runs["run_id"].tolist(), key="replay-run-id")
+    loaded = experiment_store.load_run(selected_run_id)
+    if loaded is None:
+        st.warning("The selected replay template could not be loaded.")
+        return
+
+    run_config = _bundle_to_run_config(loaded)
+    prepared_posts = feature_service.prepare_session_posts(
+        posts=posts,
+        market_calendar=spy,
+        tracked_accounts=tracked_accounts,
+        llm_enabled=run_config.llm_enabled,
+    )
+    feature_rows = feature_service.build_session_dataset(
+        posts=posts,
+        spy_market=spy,
+        tracked_accounts=tracked_accounts,
+        feature_version=run_config.feature_version,
+        llm_enabled=run_config.llm_enabled,
+        prepared_posts=prepared_posts,
+    )
+    if run_config.start_date:
+        feature_rows = feature_rows.loc[feature_rows["signal_session_date"] >= pd.Timestamp(run_config.start_date)].copy()
+    if run_config.end_date:
+        feature_rows = feature_rows.loc[feature_rows["signal_session_date"] <= pd.Timestamp(run_config.end_date)].copy()
+
+    eligible_sessions = _eligible_replay_sessions(feature_rows)
+    if eligible_sessions.empty:
+        st.info("No replay sessions are eligible yet. Historical replay needs at least 20 earlier target-available sessions.")
+        return
+
+    replay_choices = eligible_sessions.sort_values("signal_session_date", ascending=False).reset_index(drop=True)
+    replay_labels = replay_choices.apply(_replay_option_label, axis=1).tolist()
+    selected_label = st.selectbox("Historical signal session", options=replay_labels, index=0, key="replay-session-label")
+    replay_row = replay_choices.iloc[replay_labels.index(selected_label)]
+
+    with st.spinner("Rebuilding the historical signal without future-data leakage..."):
+        replay = backtest_service.build_historical_replay(
+            run_config=run_config,
+            feature_rows=feature_rows,
+            replay_session_date=pd.Timestamp(replay_row["signal_session_date"]),
+            deployment_params=loaded["selected_params"],
+        )
+
+    replay_prediction = replay["prediction"].iloc[0]
+    replay_feature_contributions = replay["feature_contributions"]
+    session_post_attribution = build_post_attribution(
+        prepared_posts.loc[
+            pd.to_datetime(prepared_posts["session_date"], errors="coerce").dt.normalize()
+            == pd.Timestamp(replay_prediction["signal_session_date"]).normalize()
+        ].copy(),
+    )
+    session_account_attribution = build_account_attribution(session_post_attribution)
+
+    full_history_match = _filter_for_session(loaded["predictions"], _normalize_session_date(replay_prediction["signal_session_date"]))
+    full_history_row = full_history_match.iloc[0] if not full_history_match.empty else None
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Replay session", f"{pd.Timestamp(replay_prediction['signal_session_date']):%Y-%m-%d}")
+    metric_cols[1].metric("Replay score", f"{float(replay_prediction['expected_return_score']):+.3%}")
+    metric_cols[2].metric("Replay confidence", f"{float(replay_prediction['prediction_confidence']):.2f}")
+    metric_cols[3].metric("Suggested stance", str(replay_prediction["suggested_stance"]))
+
+    if full_history_row is not None:
+        delta = float(replay_prediction["expected_return_score"] - full_history_row["expected_return_score"])
+        st.info(
+            "The full-history comparison below is shown for drift analysis only. "
+            "It uses a model fit with future data that would not have been available on the replay date.",
+        )
+        drift_cols = st.columns(3)
+        drift_cols[0].metric("Full-history score", f"{float(full_history_row['expected_return_score']):+.3%}")
+        drift_cols[1].metric("Replay vs full-history", f"{delta:+.3%}")
+        drift_cols[2].metric("Actual next-session return", f"{float(replay_prediction['target_next_session_return']):+.3%}" if pd.notna(replay_prediction["target_next_session_return"]) else "n/a")
+
+    st.json(
+        {
+            "template_run_id": selected_run_id,
+            "history_start": str(pd.Timestamp(replay["history_start"]).date()),
+            "history_end": str(pd.Timestamp(replay["history_end"]).date()),
+            "training_rows_used": replay["training_rows_used"],
+            "deployment_params": replay["deployment_params"],
+            "future_training_leakage": False,
+        },
+    )
+
+    comparison_frame = _build_replay_comparison_frame(replay_prediction, full_history_row)
+    st.markdown("**Replay summary**")
+    st.dataframe(comparison_frame, use_container_width=True, hide_index=True)
+
+    st.markdown("**Replay feature importance**")
+    st.dataframe(replay["importance"].head(25), use_container_width=True, hide_index=True)
+
+    _render_signal_explanation_panel(
+        prediction_row=replay_prediction,
+        feature_contributions=replay_feature_contributions,
+        post_attribution=session_post_attribution,
+        account_attribution=session_account_attribution,
+        heading="Why This Historical Signal?",
+    )
+
+
 def main() -> None:
     settings = AppSettings()
     st.set_page_config(page_title=settings.title, layout="wide")
@@ -1376,7 +1564,7 @@ def main() -> None:
 
     page = st.sidebar.radio(
         "Workbench",
-        options=["Research View", "Datasets", "Discovery", "Models & Backtests", "Live Monitor"],
+        options=["Research View", "Datasets", "Discovery", "Models & Backtests", "Historical Replay", "Live Monitor"],
     )
     st.sidebar.markdown("---")
     st.sidebar.caption("Storage: DuckDB + Parquet")
@@ -1390,6 +1578,8 @@ def main() -> None:
         render_discovery_view(settings, store, discovery_service)
     elif page == "Models & Backtests":
         render_models_view(settings, store, feature_service, model_service, backtest_service, experiment_store)
+    elif page == "Historical Replay":
+        render_historical_replay_view(settings, store, feature_service, model_service, backtest_service, experiment_store)
     else:
         render_live_monitor(
             settings,
