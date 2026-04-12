@@ -1,5 +1,10 @@
 # Trump Social Trading Research Workbench
 
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![UI: Streamlit](https://img.shields.io/badge/ui-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
+[![Storage: DuckDB + Parquet](https://img.shields.io/badge/storage-DuckDB%20%2B%20Parquet-FFF000?logo=duckdb&logoColor=black)](https://duckdb.org/)
+[![Status: Experimental](https://img.shields.io/badge/status-experimental-orange)](https://github.com/keithwegner/allcaps)
+
 This project is now a modular single-user research workbench for evaluating and optimizing **SPY trading strategies** driven by:
 
 - Donald Trump's Truth Social posts
