@@ -49,6 +49,19 @@ TRACKED_ACCOUNT_COLUMNS = [
     "active_days",
 ]
 
+MANUAL_OVERRIDE_COLUMNS = [
+    "override_id",
+    "account_id",
+    "handle",
+    "display_name",
+    "source_platform",
+    "action",
+    "effective_from",
+    "effective_to",
+    "note",
+    "created_at",
+]
+
 
 class SourceAdapter(Protocol):
     name: str
@@ -215,3 +228,7 @@ class SavedRunArtifacts:
     windows_path: Path
     importance_path: Path
     model_path: Path
+    benchmarks_path: Path
+    diagnostics_path: Path
+    benchmark_curves_path: Path
+    leakage_audit_path: Path

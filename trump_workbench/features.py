@@ -116,14 +116,18 @@ class FeatureService:
         if mapped.empty:
             mapped["is_active_tracked_account"] = pd.Series(dtype=bool)
             mapped["tracked_discovery_score"] = pd.Series(dtype=float)
+            mapped["tracked_account_status"] = pd.Series(dtype=str)
+            mapped["tracked_account_provenance"] = pd.Series(dtype=str)
             return mapped
 
         if tracked_accounts.empty:
             mapped["is_active_tracked_account"] = False
             mapped["tracked_discovery_score"] = 0.0
+            mapped["tracked_account_status"] = "none"
+            mapped["tracked_account_provenance"] = ""
             return mapped
 
-        intervals: dict[str, list[tuple[pd.Timestamp, pd.Timestamp | None, float]]] = {}
+        intervals: dict[str, list[tuple[pd.Timestamp, pd.Timestamp | None, float, str, str]]] = {}
         for _, row in tracked_accounts.iterrows():
             account_id = str(row.get("account_id", ""))
             if not account_id:
@@ -131,28 +135,54 @@ class FeatureService:
             start = pd.to_datetime(row.get("effective_from"), errors="coerce")
             end = pd.to_datetime(row.get("effective_to"), errors="coerce")
             score = float(row.get("discovery_score", 0.0) or 0.0)
+            status = str(row.get("status", "") or "")
+            provenance = str(row.get("provenance", "") or "")
             if pd.isna(start):
                 continue
-            intervals.setdefault(account_id, []).append((ensure_tz_naive_date(start), ensure_tz_naive_date(end) if pd.notna(end) else None, score))
+            intervals.setdefault(account_id, []).append(
+                (
+                    ensure_tz_naive_date(start),
+                    ensure_tz_naive_date(end) if pd.notna(end) else None,
+                    score,
+                    status,
+                    provenance,
+                ),
+            )
 
         active_flags: list[bool] = []
         active_scores: list[float] = []
+        active_statuses: list[str] = []
+        active_provenance: list[str] = []
         for _, row in mapped.iterrows():
             account_id = str(row["author_account_id"])
             session_date = ensure_tz_naive_date(row["session_date"])
             intervals_for_account = intervals.get(account_id, [])
             score = 0.0
             active = False
-            for start, end, interval_score in intervals_for_account:
+            selected_status = "none"
+            selected_provenance = ""
+            for start, end, interval_score, status, provenance in intervals_for_account:
                 if start <= session_date and (end is None or session_date < end):
-                    active = True
+                    if status == "suppressed":
+                        active = False
+                        score = 0.0
+                        selected_status = status
+                        selected_provenance = provenance
+                        break
+                    active = status in {"active", "pinned"}
                     score = max(score, interval_score)
+                    selected_status = status
+                    selected_provenance = provenance
             active_flags.append(active)
             active_scores.append(score)
+            active_statuses.append(selected_status)
+            active_provenance.append(selected_provenance)
 
         mapped = mapped.copy()
         mapped["is_active_tracked_account"] = active_flags
         mapped["tracked_discovery_score"] = active_scores
+        mapped["tracked_account_status"] = active_statuses
+        mapped["tracked_account_provenance"] = active_provenance
         return mapped
 
     def _build_session_row(
@@ -170,6 +200,10 @@ class FeatureService:
                 "next_session_close": market_row["next_session_close"],
                 "feature_version": feature_version,
                 "llm_enabled": llm_enabled,
+                "feature_source_min_ts": pd.NaT,
+                "feature_source_max_ts": pd.NaT,
+                "next_session_open_ts": pd.Timestamp(f"{pd.Timestamp(market_row['next_session_date']).date()} 09:30", tz=EASTERN) if pd.notna(market_row["next_session_date"]) else pd.NaT,
+                "feature_cutoff_before_next_open": True,
                 "has_posts": False,
                 "post_count": 0,
                 "trump_post_count": 0,
@@ -234,6 +268,10 @@ class FeatureService:
             "next_session_close": market_row["next_session_close"],
             "feature_version": feature_version,
             "llm_enabled": llm_enabled,
+            "feature_source_min_ts": group["post_timestamp"].min(),
+            "feature_source_max_ts": group["post_timestamp"].max(),
+            "next_session_open_ts": pd.Timestamp(f"{pd.Timestamp(market_row['next_session_date']).date()} 09:30", tz=EASTERN) if pd.notna(market_row["next_session_date"]) else pd.NaT,
+            "feature_cutoff_before_next_open": True,
             "has_posts": True,
             "post_count": int(len(group)),
             "trump_post_count": int(group["author_is_trump"].sum()),
@@ -283,6 +321,8 @@ class FeatureService:
             "target_next_session_return": market_row["target_next_session_return"],
             "target_available": market_row["target_available"],
         }
+        if pd.notna(row["next_session_open_ts"]) and pd.notna(row["feature_source_max_ts"]):
+            row["feature_cutoff_before_next_open"] = bool(row["feature_source_max_ts"] < row["next_session_open_ts"])
         return row
 
 

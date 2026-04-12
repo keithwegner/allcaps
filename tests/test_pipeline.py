@@ -114,6 +114,8 @@ class PipelineTests(unittest.TestCase):
         run, artifacts = self.backtests.run_walk_forward(config, first_dataset)
         self.assertGreater(len(artifacts["trades"]), 0)
         self.assertIn("robust_score", run.metrics)
+        self.assertTrue(artifacts["leakage_audit"]["overall_pass"])
+        self.assertIn("always_long", artifacts["benchmarks"]["benchmark_name"].tolist())
 
         saved = self.experiments.save_run(
             run=run,
@@ -123,10 +125,16 @@ class PipelineTests(unittest.TestCase):
             windows=artifacts["windows"],
             importance=artifacts["importance"],
             model_artifact=artifacts["model_artifact"],
+            benchmarks=artifacts["benchmarks"],
+            diagnostics=artifacts["diagnostics"],
+            benchmark_curves=artifacts["benchmark_curves"],
+            leakage_audit=artifacts["leakage_audit"],
         )
         self.assertTrue(saved.model_path.exists())
         loaded = self.experiments.load_run(run.run_id)
         self.assertIsNotNone(loaded)
+        self.assertFalse(loaded["benchmarks"].empty)
+        self.assertTrue(bool(loaded["leakage_audit"].get("overall_pass", False)))
 
 
 if __name__ == "__main__":

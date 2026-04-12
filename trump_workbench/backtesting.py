@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .contracts import BacktestRun, LinearModelArtifact, ModelRunConfig
+from .contracts import BacktestRun, ModelRunConfig
 from .modeling import ModelService
 
 
@@ -60,6 +60,27 @@ def compute_metrics(returns: pd.Series, positions: pd.Series) -> dict[str, float
     }
 
 
+def simulate_position_mask(
+    frame: pd.DataFrame,
+    signal_name: str,
+    position_mask: pd.Series,
+    transaction_cost_bps: float,
+) -> tuple[pd.DataFrame, dict[str, float]]:
+    trades = frame.copy()
+    trades = trades.dropna(subset=["next_session_open", "next_session_close"]).copy()
+    position_mask = position_mask.reindex(trades.index).fillna(False)
+    trades["trade_taken"] = position_mask.astype(bool)
+    trades["position"] = trades["trade_taken"].astype(float)
+    trades["gross_return"] = (trades["next_session_close"] / trades["next_session_open"] - 1.0).fillna(0.0)
+    round_trip_cost = (transaction_cost_bps / 10000.0) * 2.0
+    trades["net_return"] = np.where(trades["trade_taken"], trades["gross_return"] - round_trip_cost, 0.0)
+    trades["benchmark_return"] = trades["gross_return"].fillna(0.0)
+    trades["equity_curve"] = (1.0 + trades["net_return"]).cumprod()
+    trades["signal_name"] = signal_name
+    metrics = compute_metrics(trades["net_return"], trades["position"])
+    return trades.reset_index(drop=True), metrics
+
+
 def simulate_long_flat(
     predictions: pd.DataFrame,
     threshold: float,
@@ -67,24 +88,130 @@ def simulate_long_flat(
     transaction_cost_bps: float,
     account_weight: float,
 ) -> tuple[pd.DataFrame, dict[str, float]]:
-    trades = predictions.copy()
-    trades = trades.dropna(subset=["next_session_open", "next_session_close"]).copy()
-    trades["trade_taken"] = (
-        (trades["expected_return_score"] > threshold)
-        & (trades["post_count"] >= min_post_count)
-        & trades["target_available"].fillna(False)
+    signal_mask = (
+        (predictions["expected_return_score"] > threshold)
+        & (predictions["post_count"] >= min_post_count)
+        & predictions["target_available"].fillna(False)
     )
-    trades["position"] = trades["trade_taken"].astype(float)
-    trades["gross_return"] = (trades["next_session_close"] / trades["next_session_open"] - 1.0).fillna(0.0)
-    round_trip_cost = (transaction_cost_bps / 10000.0) * 2.0
-    trades["net_return"] = np.where(trades["trade_taken"], trades["gross_return"] - round_trip_cost, 0.0)
-    trades["benchmark_return"] = trades["gross_return"].fillna(0.0)
-    trades["equity_curve"] = (1.0 + trades["net_return"]).cumprod()
+    trades, metrics = simulate_position_mask(
+        predictions,
+        signal_name="strategy",
+        position_mask=signal_mask,
+        transaction_cost_bps=transaction_cost_bps,
+    )
     trades["threshold"] = threshold
     trades["min_post_count"] = min_post_count
     trades["account_weight"] = account_weight
-    metrics = compute_metrics(trades["net_return"], trades["position"])
-    return trades.reset_index(drop=True), metrics
+    return trades, metrics
+
+
+def build_leakage_audit(feature_rows: pd.DataFrame, window_rows: pd.DataFrame) -> dict[str, Any]:
+    if feature_rows.empty:
+        return {
+            "overall_pass": True,
+            "future_feature_timestamp_violations": 0,
+            "next_session_order_violations": 0,
+            "tradeable_without_target_violations": 0,
+            "window_order_violations": 0,
+        }
+    next_date = pd.to_datetime(feature_rows["next_session_date"], errors="coerce")
+    signal_date = pd.to_datetime(feature_rows["signal_session_date"], errors="coerce")
+    next_open_ts = pd.to_datetime(feature_rows["next_session_open_ts"], errors="coerce", utc=True)
+    feature_max_ts = pd.to_datetime(feature_rows["feature_source_max_ts"], errors="coerce", utc=True)
+    future_feature_violations = int(
+        (feature_max_ts.notna() & next_open_ts.notna() & (feature_max_ts >= next_open_ts)).sum(),
+    )
+    next_session_order_violations = int((next_date.notna() & signal_date.notna() & (next_date <= signal_date)).sum())
+    tradeable_without_target_violations = int((feature_rows["tradeable"].fillna(False) & ~feature_rows["target_available"].fillna(False)).sum())
+    window_order_violations = 0
+    if not window_rows.empty:
+        train_end = pd.to_datetime(window_rows["train_end"], errors="coerce")
+        validation_start = pd.to_datetime(window_rows["validation_start"], errors="coerce")
+        validation_end = pd.to_datetime(window_rows["validation_end"], errors="coerce")
+        test_start = pd.to_datetime(window_rows["test_start"], errors="coerce")
+        window_order_violations = int(((validation_start <= train_end) | (test_start <= validation_end)).sum())
+    overall_pass = all(
+        value == 0
+        for value in [
+            future_feature_violations,
+            next_session_order_violations,
+            tradeable_without_target_violations,
+            window_order_violations,
+        ]
+    )
+    return {
+        "overall_pass": overall_pass,
+        "future_feature_timestamp_violations": future_feature_violations,
+        "next_session_order_violations": next_session_order_violations,
+        "tradeable_without_target_violations": tradeable_without_target_violations,
+        "window_order_violations": window_order_violations,
+        "rows_audited": int(len(feature_rows)),
+    }
+
+
+def build_prediction_diagnostics(predictions: pd.DataFrame) -> pd.DataFrame:
+    diagnostics = predictions.copy()
+    diagnostics["actual_next_session_return"] = diagnostics["target_next_session_return"]
+    diagnostics["prediction_error"] = diagnostics["expected_return_score"] - diagnostics["actual_next_session_return"]
+    diagnostics["absolute_error"] = diagnostics["prediction_error"].abs()
+    diagnostics["direction_correct"] = (
+        np.sign(diagnostics["expected_return_score"].fillna(0.0))
+        == np.sign(diagnostics["actual_next_session_return"].fillna(0.0))
+    )
+    keep = [
+        "signal_session_date",
+        "next_session_date",
+        "expected_return_score",
+        "actual_next_session_return",
+        "prediction_error",
+        "absolute_error",
+        "direction_correct",
+        "post_count",
+        "trump_post_count",
+        "tracked_account_post_count",
+        "sentiment_avg",
+        "feature_cutoff_before_next_open",
+        "model_version",
+    ]
+    return diagnostics[keep].sort_values("signal_session_date").reset_index(drop=True)
+
+
+def build_benchmark_suite(
+    evaluation_rows: pd.DataFrame,
+    strategy_trades: pd.DataFrame,
+    strategy_metrics: dict[str, float],
+    transaction_cost_bps: float,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    benchmark_inputs = evaluation_rows.dropna(subset=["next_session_open", "next_session_close"]).copy()
+    strategies: list[tuple[str, pd.Series, dict[str, float] | None]] = [
+        ("strategy", strategy_trades["trade_taken"].astype(bool), strategy_metrics),
+        ("always_flat", pd.Series(False, index=benchmark_inputs.index), None),
+        ("always_long", benchmark_inputs["target_available"].fillna(False), None),
+        ("trump_only", (benchmark_inputs["trump_post_count"] > 0) & benchmark_inputs["target_available"].fillna(False), None),
+        (
+            "tracked_accounts_only",
+            (benchmark_inputs["tracked_account_post_count"] > 0) & benchmark_inputs["target_available"].fillna(False),
+            None,
+        ),
+    ]
+    metric_rows: list[dict[str, Any]] = []
+    curve = pd.DataFrame({"next_session_date": benchmark_inputs["next_session_date"].tolist()})
+    strategy_total_return = strategy_metrics["total_return"]
+    for name, mask, precomputed_metrics in strategies:
+        trades, metrics = simulate_position_mask(
+            benchmark_inputs,
+            signal_name=name,
+            position_mask=mask,
+            transaction_cost_bps=transaction_cost_bps,
+        )
+        if precomputed_metrics is not None:
+            metrics = precomputed_metrics
+        row = {"benchmark_name": name, **metrics}
+        row["excess_total_return_vs_strategy"] = float(metrics["total_return"] - strategy_total_return)
+        metric_rows.append(row)
+        curve[name] = trades["equity_curve"].to_numpy()
+    benchmarks = pd.DataFrame(metric_rows).sort_values("robust_score", ascending=False).reset_index(drop=True)
+    return benchmarks, curve
 
 
 class BacktestService:
@@ -116,6 +243,7 @@ class BacktestService:
             test_window = run_config.test_window
 
         all_test_trades: list[pd.DataFrame] = []
+        all_test_predictions: list[pd.DataFrame] = []
         window_rows: list[dict[str, Any]] = []
         selected_thresholds: list[float] = []
         selected_min_posts: list[int] = []
@@ -181,6 +309,7 @@ class BacktestService:
             )
             final_importance = importance
             test_predictions = self.model_service.predict(artifact, test_weighted)
+            test_predictions["window_id"] = window_id
             test_trades, test_metrics = simulate_long_flat(
                 test_predictions,
                 threshold=best_params["threshold"],
@@ -189,6 +318,7 @@ class BacktestService:
                 account_weight=best_params["account_weight"],
             )
             test_trades["window_id"] = window_id
+            all_test_predictions.append(test_predictions)
             all_test_trades.append(test_trades)
             window_rows.append(
                 {
@@ -208,6 +338,7 @@ class BacktestService:
             raise RuntimeError("Walk-forward backtest could not produce any evaluation windows.")
 
         combined_test = pd.concat(all_test_trades, ignore_index=True)
+        combined_predictions = pd.concat(all_test_predictions, ignore_index=True)
         combined_metrics = compute_metrics(combined_test["net_return"], combined_test["position"])
         deployment_params = {
             "threshold": float(np.median(selected_thresholds)) if selected_thresholds else float(run_config.threshold_grid[0]),
@@ -221,9 +352,22 @@ class BacktestService:
             feature_rows=final_training_rows,
             model_version=f"{run_config.run_name}-final",
         )
-        full_predictions = self.model_service.predict(final_model, self._apply_account_weight(feature_rows, deployment_params["account_weight"]))
+        full_predictions = self.model_service.predict(
+            final_model,
+            self._apply_account_weight(feature_rows, deployment_params["account_weight"]),
+        )
         full_predictions["deployment_threshold"] = deployment_params["threshold"]
         full_predictions["deployment_min_post_count"] = deployment_params["min_post_count"]
+
+        window_df = pd.DataFrame(window_rows)
+        diagnostics = build_prediction_diagnostics(combined_predictions)
+        benchmarks, benchmark_curves = build_benchmark_suite(
+            evaluation_rows=combined_predictions,
+            strategy_trades=combined_test,
+            strategy_metrics=combined_metrics,
+            transaction_cost_bps=run_config.transaction_cost_bps,
+        )
+        leakage_audit = build_leakage_audit(feature_rows=combined_predictions, window_rows=window_df)
 
         config_hash = hashlib.sha1(str(run_config.to_dict()).encode("utf-8")).hexdigest()[:12]
         run_id = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{config_hash}"
@@ -242,9 +386,13 @@ class BacktestService:
             "config": run_config.to_dict(),
             "trades": combined_test,
             "predictions": full_predictions,
-            "windows": pd.DataFrame(window_rows),
+            "windows": window_df,
             "importance": final_importance,
             "model_artifact": final_model.to_dict(),
+            "benchmarks": benchmarks,
+            "diagnostics": diagnostics,
+            "benchmark_curves": benchmark_curves,
+            "leakage_audit": leakage_audit,
         }
         return run, artifacts
 

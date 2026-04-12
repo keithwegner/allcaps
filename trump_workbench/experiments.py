@@ -23,6 +23,10 @@ class ExperimentStore:
         windows: pd.DataFrame,
         importance: pd.DataFrame,
         model_artifact: dict[str, Any],
+        benchmarks: pd.DataFrame,
+        diagnostics: pd.DataFrame,
+        benchmark_curves: pd.DataFrame,
+        leakage_audit: dict[str, Any],
     ) -> SavedRunArtifacts:
         run_dir = self.store.artifact_path("runs", run.run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -33,6 +37,10 @@ class ExperimentStore:
         windows_path = run_dir / "windows.parquet"
         importance_path = run_dir / "importance.parquet"
         model_path = run_dir / "model.json"
+        benchmarks_path = run_dir / "benchmarks.parquet"
+        diagnostics_path = run_dir / "diagnostics.parquet"
+        benchmark_curves_path = run_dir / "benchmark_curves.parquet"
+        leakage_audit_path = run_dir / "leakage_audit.json"
 
         summary_payload = {
             "run": run.to_dict(),
@@ -44,6 +52,10 @@ class ExperimentStore:
         windows.to_parquet(windows_path, index=False)
         importance.to_parquet(importance_path, index=False)
         model_path.write_text(json.dumps(model_artifact, indent=2, default=str), encoding="utf-8")
+        benchmarks.to_parquet(benchmarks_path, index=False)
+        diagnostics.to_parquet(diagnostics_path, index=False)
+        benchmark_curves.to_parquet(benchmark_curves_path, index=False)
+        leakage_audit_path.write_text(json.dumps(leakage_audit, indent=2, default=str), encoding="utf-8")
 
         self.store.save_run_record(
             run_id=run.run_id,
@@ -67,6 +79,10 @@ class ExperimentStore:
             windows_path=windows_path,
             importance_path=importance_path,
             model_path=model_path,
+            benchmarks_path=benchmarks_path,
+            diagnostics_path=diagnostics_path,
+            benchmark_curves_path=benchmark_curves_path,
+            leakage_audit_path=leakage_audit_path,
         )
 
     def list_runs(self) -> pd.DataFrame:
@@ -89,6 +105,10 @@ class ExperimentStore:
             "model_artifact": LinearModelArtifact.from_dict(self._read_json(Path(record["model_path"]))),
             "metrics": record["metrics_json"],
             "selected_params": record["selected_params_json"],
+            "benchmarks": self._read_optional_parquet(Path(record["summary_path"]).parent / "benchmarks.parquet"),
+            "diagnostics": self._read_optional_parquet(Path(record["summary_path"]).parent / "diagnostics.parquet"),
+            "benchmark_curves": self._read_optional_parquet(Path(record["summary_path"]).parent / "benchmark_curves.parquet"),
+            "leakage_audit": self._read_optional_json(Path(record["summary_path"]).parent / "leakage_audit.json"),
         }
 
     def load_latest_model_artifact(self) -> tuple[LinearModelArtifact, dict[str, Any]] | None:
@@ -111,4 +131,16 @@ class ExperimentStore:
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any]:
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _read_optional_parquet(path: Path) -> pd.DataFrame:
+        if not path.exists():
+            return pd.DataFrame()
+        return pd.read_parquet(path)
+
+    @staticmethod
+    def _read_optional_json(path: Path) -> dict[str, Any]:
+        if not path.exists():
+            return {}
         return json.loads(path.read_text(encoding="utf-8"))
