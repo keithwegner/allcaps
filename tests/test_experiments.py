@@ -77,6 +77,8 @@ class ExperimentStoreTests(unittest.TestCase):
         assert loaded is not None
         self.assertTrue(saved.summary_path.exists())
         self.assertEqual(loaded["metrics"]["robust_score"], 1.23)
+        self.assertEqual(loaded["config"]["feature_version"], "v1")
+        self.assertEqual(loaded["run"]["run_name"], "unit-test-run")
         self.assertEqual(loaded["model_artifact"].feature_names, ["x1"])
         self.assertFalse(loaded["feature_contributions"].empty)
         self.assertFalse(loaded["post_attribution"].empty)

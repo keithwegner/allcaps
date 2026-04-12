@@ -108,8 +108,11 @@ class ExperimentStore:
         if row.empty:
             return None
         record = row.iloc[0]
+        summary_payload = self._read_json(Path(record["summary_path"]))
         return {
             "summary": Path(record["summary_path"]),
+            "run": summary_payload.get("run", {}),
+            "config": summary_payload.get("config", {}),
             "trades": pd.read_parquet(record["trades_path"]),
             "predictions": pd.read_parquet(record["predictions_path"]),
             "windows": pd.read_parquet(record["windows_path"]),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import os
 from typing import Any
 
@@ -19,7 +20,7 @@ from .experiments import ExperimentStore
 from .features import FeatureService, latest_feature_preview, map_posts_to_trade_sessions
 from .ingestion import IngestionService, TruthSocialArchiveAdapter, XCsvAdapter
 from .market import MarketDataService
-from .modeling import ModelService
+from .modeling import ModelService, classify_feature_family
 from .research import (
     aggregate_research_sessions,
     build_combined_chart,
@@ -781,6 +782,182 @@ def _render_signal_explanation_panel(
         )
 
 
+def _format_compare_value(value: Any) -> Any:
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(item) for item in value)
+    if isinstance(value, float):
+        return round(value, 6)
+    return value
+
+
+def _comparison_settings(run_bundle: dict[str, Any]) -> dict[str, Any]:
+    config = run_bundle.get("config", {}) or {}
+    selected = run_bundle.get("selected_params", {}) or {}
+    artifact = run_bundle.get("model_artifact")
+    return {
+        "feature_version": config.get("feature_version", "v1"),
+        "llm_enabled": bool(config.get("llm_enabled", getattr(artifact, "metadata", {}).get("llm_enabled", False))),
+        "train_window": config.get("train_window"),
+        "validation_window": config.get("validation_window"),
+        "test_window": config.get("test_window"),
+        "step_size": config.get("step_size"),
+        "ridge_alpha": config.get("ridge_alpha"),
+        "transaction_cost_bps": config.get("transaction_cost_bps"),
+        "threshold_grid": tuple(config.get("threshold_grid", [])),
+        "minimum_signal_grid": tuple(config.get("minimum_signal_grid", [])),
+        "account_weight_grid": tuple(config.get("account_weight_grid", [])),
+        "deploy_threshold": selected.get("threshold"),
+        "deploy_min_post_count": selected.get("min_post_count"),
+        "deploy_account_weight": selected.get("account_weight"),
+    }
+
+
+def _build_metric_comparison_table(base_run_id: str, run_bundles: dict[str, dict[str, Any]]) -> pd.DataFrame:
+    if base_run_id not in run_bundles:
+        return pd.DataFrame()
+    base_metrics = run_bundles[base_run_id].get("metrics", {}) or {}
+    rows: list[dict[str, Any]] = []
+    for run_id, bundle in run_bundles.items():
+        metrics = bundle.get("metrics", {}) or {}
+        artifact = bundle.get("model_artifact")
+        rows.append(
+            {
+                "run_id": run_id,
+                "run_name": bundle.get("run", {}).get("run_name", run_id),
+                "total_return": metrics.get("total_return", 0.0),
+                "sharpe": metrics.get("sharpe", 0.0),
+                "sortino": metrics.get("sortino", 0.0),
+                "max_drawdown": metrics.get("max_drawdown", 0.0),
+                "robust_score": metrics.get("robust_score", 0.0),
+                "trade_count": metrics.get("trade_count", 0.0),
+                "feature_count": len(getattr(artifact, "feature_names", [])),
+                "delta_total_return_vs_base": metrics.get("total_return", 0.0) - base_metrics.get("total_return", 0.0),
+                "delta_sharpe_vs_base": metrics.get("sharpe", 0.0) - base_metrics.get("sharpe", 0.0),
+                "delta_robust_score_vs_base": metrics.get("robust_score", 0.0) - base_metrics.get("robust_score", 0.0),
+            },
+        )
+    return pd.DataFrame(rows).sort_values("delta_robust_score_vs_base", ascending=False).reset_index(drop=True)
+
+
+def _build_setting_diff_table(base_run_id: str, run_bundles: dict[str, dict[str, Any]]) -> pd.DataFrame:
+    if base_run_id not in run_bundles:
+        return pd.DataFrame()
+    settings_by_run = {run_id: _comparison_settings(bundle) for run_id, bundle in run_bundles.items()}
+    base_settings = settings_by_run[base_run_id]
+    diff_rows: list[dict[str, Any]] = []
+    for key in sorted({setting for settings in settings_by_run.values() for setting in settings}):
+        row = {"setting": key}
+        base_value = base_settings.get(key)
+        is_different = False
+        for run_id, settings in settings_by_run.items():
+            value = settings.get(key)
+            row[run_id] = _format_compare_value(value)
+            if value != base_value:
+                is_different = True
+        if is_different:
+            diff_rows.append(row)
+    return pd.DataFrame(diff_rows)
+
+
+def _build_feature_diff_table(base_run_id: str, run_bundles: dict[str, dict[str, Any]]) -> pd.DataFrame:
+    if base_run_id not in run_bundles:
+        return pd.DataFrame()
+    base_features = set(run_bundles[base_run_id]["model_artifact"].feature_names)
+    rows: list[dict[str, Any]] = []
+    for run_id, bundle in run_bundles.items():
+        feature_names = list(bundle["model_artifact"].feature_names)
+        families = Counter(classify_feature_family(feature_name) for feature_name in feature_names)
+        features = set(feature_names)
+        unique_vs_base = sorted(features - base_features)
+        omitted_vs_base = sorted(base_features - features)
+        rows.append(
+            {
+                "run_id": run_id,
+                "run_name": bundle.get("run", {}).get("run_name", run_id),
+                "feature_count": len(feature_names),
+                "semantic_features": families.get("semantic", 0),
+                "policy_features": families.get("policy", 0),
+                "market_context_features": families.get("market_context", 0),
+                "social_sentiment_features": families.get("social_sentiment", 0),
+                "activity_features": families.get("activity", 0),
+                "account_structure_features": families.get("account_structure", 0),
+                "unique_vs_base_count": len(unique_vs_base),
+                "omitted_vs_base_count": len(omitted_vs_base),
+                "unique_vs_base": ", ".join(unique_vs_base[:6]),
+                "omitted_vs_base": ", ".join(omitted_vs_base[:6]),
+            },
+        )
+    return pd.DataFrame(rows).sort_values(["unique_vs_base_count", "feature_count"], ascending=[False, False]).reset_index(drop=True)
+
+
+def _build_benchmark_delta_table(base_run_id: str, run_bundles: dict[str, dict[str, Any]]) -> pd.DataFrame:
+    if base_run_id not in run_bundles:
+        return pd.DataFrame()
+    base_benchmarks = run_bundles[base_run_id].get("benchmarks", pd.DataFrame())
+    if base_benchmarks.empty or "benchmark_name" not in base_benchmarks.columns:
+        return pd.DataFrame()
+    base_lookup = base_benchmarks.set_index("benchmark_name")
+    base_strategy = float(base_lookup.loc["strategy", "total_return"]) if "strategy" in base_lookup.index else np.nan
+    rows: list[dict[str, Any]] = []
+    for run_id, bundle in run_bundles.items():
+        benchmarks = bundle.get("benchmarks", pd.DataFrame())
+        if benchmarks.empty or "benchmark_name" not in benchmarks.columns:
+            continue
+        lookup = benchmarks.set_index("benchmark_name")
+        strategy_return = float(lookup.loc["strategy", "total_return"]) if "strategy" in lookup.index else np.nan
+        for benchmark_name in sorted(set(base_lookup.index).union(set(lookup.index))):
+            current_total = float(lookup.loc[benchmark_name, "total_return"]) if benchmark_name in lookup.index else np.nan
+            base_total = float(base_lookup.loc[benchmark_name, "total_return"]) if benchmark_name in base_lookup.index else np.nan
+            current_edge = strategy_return - current_total if pd.notna(strategy_return) and pd.notna(current_total) else np.nan
+            base_edge = base_strategy - base_total if pd.notna(base_strategy) and pd.notna(base_total) else np.nan
+            rows.append(
+                {
+                    "run_id": run_id,
+                    "benchmark_name": benchmark_name,
+                    "total_return": current_total,
+                    "delta_total_return_vs_base": current_total - base_total if pd.notna(current_total) and pd.notna(base_total) else np.nan,
+                    "edge_vs_strategy": current_edge,
+                    "delta_edge_vs_base": current_edge - base_edge if pd.notna(current_edge) and pd.notna(base_edge) else np.nan,
+                },
+            )
+    return pd.DataFrame(rows).sort_values(["benchmark_name", "delta_edge_vs_base"], ascending=[True, False]).reset_index(drop=True)
+
+
+def _summarize_run_changes(base_run_id: str, run_bundles: dict[str, dict[str, Any]]) -> list[str]:
+    if base_run_id not in run_bundles:
+        return []
+    base_metrics = run_bundles[base_run_id].get("metrics", {}) or {}
+    base_settings = _comparison_settings(run_bundles[base_run_id])
+    base_features = set(run_bundles[base_run_id]["model_artifact"].feature_names)
+    notes: list[str] = []
+    for run_id, bundle in run_bundles.items():
+        if run_id == base_run_id:
+            continue
+        metrics = bundle.get("metrics", {}) or {}
+        settings = _comparison_settings(bundle)
+        features = set(bundle["model_artifact"].feature_names)
+        parts: list[str] = [
+            f"robust score {metrics.get('robust_score', 0.0) - base_metrics.get('robust_score', 0.0):+.3f}",
+            f"total return {metrics.get('total_return', 0.0) - base_metrics.get('total_return', 0.0):+.2%}",
+        ]
+        if settings.get("llm_enabled") != base_settings.get("llm_enabled"):
+            parts.append(f"LLM {'on' if settings.get('llm_enabled') else 'off'} vs {'on' if base_settings.get('llm_enabled') else 'off'}")
+        if settings.get("deploy_threshold") != base_settings.get("deploy_threshold"):
+            parts.append(f"threshold {base_settings.get('deploy_threshold')} -> {settings.get('deploy_threshold')}")
+        if settings.get("deploy_min_post_count") != base_settings.get("deploy_min_post_count"):
+            parts.append(f"min posts {base_settings.get('deploy_min_post_count')} -> {settings.get('deploy_min_post_count')}")
+        if settings.get("deploy_account_weight") != base_settings.get("deploy_account_weight"):
+            parts.append(f"account weight {base_settings.get('deploy_account_weight')} -> {settings.get('deploy_account_weight')}")
+        unique_vs_base = sorted(features - base_features)
+        omitted_vs_base = sorted(base_features - features)
+        if unique_vs_base:
+            parts.append(f"{len(unique_vs_base)} added features ({', '.join(unique_vs_base[:3])})")
+        if omitted_vs_base:
+            parts.append(f"{len(omitted_vs_base)} removed features ({', '.join(omitted_vs_base[:3])})")
+        notes.append(f"`{run_id}`: " + "; ".join(parts) + ".")
+    return notes
+
+
 def render_models_view(
     settings: AppSettings,
     store: DuckDBStore,
@@ -928,28 +1105,48 @@ def render_models_view(
         default=[selected_run_id],
     )
     if len(compare_ids) > 1:
-        comparison_rows: list[dict[str, Any]] = []
         curves: dict[str, pd.DataFrame] = {}
+        compare_bundles: dict[str, dict[str, Any]] = {}
         for run_id in compare_ids:
             run_bundle = experiment_store.load_run(run_id)
             if run_bundle is None:
                 continue
-            metrics = run_bundle["metrics"]
-            comparison_rows.append(
-                {
-                    "run_id": run_id,
-                    "total_return": metrics.get("total_return", 0.0),
-                    "sharpe": metrics.get("sharpe", 0.0),
-                    "sortino": metrics.get("sortino", 0.0),
-                    "max_drawdown": metrics.get("max_drawdown", 0.0),
-                    "robust_score": metrics.get("robust_score", 0.0),
-                },
-            )
+            compare_bundles[run_id] = run_bundle
             curves[run_id] = run_bundle["trades"][["next_session_date", "equity_curve"]].copy()
-        if comparison_rows:
-            st.markdown("**Run comparison**")
-            st.dataframe(pd.DataFrame(comparison_rows).sort_values("robust_score", ascending=False), use_container_width=True, hide_index=True)
-            _render_equity_curve_comparison(curves, title="Selected run equity curves")
+        if compare_bundles:
+            base_run_id = st.selectbox(
+                "Base run for diffs",
+                options=list(compare_bundles.keys()),
+                index=list(compare_bundles.keys()).index(selected_run_id) if selected_run_id in compare_bundles else 0,
+            )
+            st.markdown("**Run Comparison Workspace**")
+            tabs = st.tabs(["Scorecard", "Settings", "Features", "Benchmarks", "What changed"])
+            metric_table = _build_metric_comparison_table(base_run_id, compare_bundles)
+            setting_diff = _build_setting_diff_table(base_run_id, compare_bundles)
+            feature_diff = _build_feature_diff_table(base_run_id, compare_bundles)
+            benchmark_diff = _build_benchmark_delta_table(base_run_id, compare_bundles)
+            with tabs[0]:
+                st.dataframe(metric_table, use_container_width=True, hide_index=True)
+                _render_equity_curve_comparison(curves, title="Selected run equity curves")
+            with tabs[1]:
+                if setting_diff.empty:
+                    st.info("These runs are using the same saved configuration and deployment parameters.")
+                else:
+                    st.dataframe(setting_diff, use_container_width=True, hide_index=True)
+            with tabs[2]:
+                st.dataframe(feature_diff, use_container_width=True, hide_index=True)
+            with tabs[3]:
+                if benchmark_diff.empty:
+                    st.info("Benchmark deltas are not available for one or more selected runs.")
+                else:
+                    st.dataframe(benchmark_diff, use_container_width=True, hide_index=True)
+            with tabs[4]:
+                notes = _summarize_run_changes(base_run_id, compare_bundles)
+                if not notes:
+                    st.info("Choose at least one non-base run to summarize what changed.")
+                else:
+                    for note in notes:
+                        st.markdown(f"- {note}")
 
     if not loaded["benchmarks"].empty:
         st.markdown("**Benchmark suite**")
