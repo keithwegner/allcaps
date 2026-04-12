@@ -23,6 +23,9 @@ class ExperimentStore:
         windows: pd.DataFrame,
         importance: pd.DataFrame,
         model_artifact: dict[str, Any],
+        feature_contributions: pd.DataFrame,
+        post_attribution: pd.DataFrame,
+        account_attribution: pd.DataFrame,
         benchmarks: pd.DataFrame,
         diagnostics: pd.DataFrame,
         benchmark_curves: pd.DataFrame,
@@ -37,6 +40,9 @@ class ExperimentStore:
         windows_path = run_dir / "windows.parquet"
         importance_path = run_dir / "importance.parquet"
         model_path = run_dir / "model.json"
+        feature_contributions_path = run_dir / "feature_contributions.parquet"
+        post_attribution_path = run_dir / "post_attribution.parquet"
+        account_attribution_path = run_dir / "account_attribution.parquet"
         benchmarks_path = run_dir / "benchmarks.parquet"
         diagnostics_path = run_dir / "diagnostics.parquet"
         benchmark_curves_path = run_dir / "benchmark_curves.parquet"
@@ -52,6 +58,9 @@ class ExperimentStore:
         windows.to_parquet(windows_path, index=False)
         importance.to_parquet(importance_path, index=False)
         model_path.write_text(json.dumps(model_artifact, indent=2, default=str), encoding="utf-8")
+        feature_contributions.to_parquet(feature_contributions_path, index=False)
+        post_attribution.to_parquet(post_attribution_path, index=False)
+        account_attribution.to_parquet(account_attribution_path, index=False)
         benchmarks.to_parquet(benchmarks_path, index=False)
         diagnostics.to_parquet(diagnostics_path, index=False)
         benchmark_curves.to_parquet(benchmark_curves_path, index=False)
@@ -79,6 +88,9 @@ class ExperimentStore:
             windows_path=windows_path,
             importance_path=importance_path,
             model_path=model_path,
+            feature_contributions_path=feature_contributions_path,
+            post_attribution_path=post_attribution_path,
+            account_attribution_path=account_attribution_path,
             benchmarks_path=benchmarks_path,
             diagnostics_path=diagnostics_path,
             benchmark_curves_path=benchmark_curves_path,
@@ -103,6 +115,9 @@ class ExperimentStore:
             "windows": pd.read_parquet(record["windows_path"]),
             "importance": pd.read_parquet(record["importance_path"]),
             "model_artifact": LinearModelArtifact.from_dict(self._read_json(Path(record["model_path"]))),
+            "feature_contributions": self._read_optional_parquet(Path(record["summary_path"]).parent / "feature_contributions.parquet"),
+            "post_attribution": self._read_optional_parquet(Path(record["summary_path"]).parent / "post_attribution.parquet"),
+            "account_attribution": self._read_optional_parquet(Path(record["summary_path"]).parent / "account_attribution.parquet"),
             "metrics": record["metrics_json"],
             "selected_params": record["selected_params_json"],
             "benchmarks": self._read_optional_parquet(Path(record["summary_path"]).parent / "benchmarks.parquet"),

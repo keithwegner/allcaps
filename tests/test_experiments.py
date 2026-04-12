@@ -63,6 +63,9 @@ class ExperimentStoreTests(unittest.TestCase):
                 "train_rows": 10,
                 "metadata": {"source": "unit-test"},
             },
+            feature_contributions=self._sample_frame("contribution"),
+            post_attribution=self._sample_frame("post_signal_score"),
+            account_attribution=self._sample_frame("net_post_signal"),
             benchmarks=self._sample_frame("benchmark_name"),
             diagnostics=self._sample_frame("error"),
             benchmark_curves=self._sample_frame("equity"),
@@ -75,6 +78,9 @@ class ExperimentStoreTests(unittest.TestCase):
         self.assertTrue(saved.summary_path.exists())
         self.assertEqual(loaded["metrics"]["robust_score"], 1.23)
         self.assertEqual(loaded["model_artifact"].feature_names, ["x1"])
+        self.assertFalse(loaded["feature_contributions"].empty)
+        self.assertFalse(loaded["post_attribution"].empty)
+        self.assertFalse(loaded["account_attribution"].empty)
         self.assertFalse(loaded["benchmarks"].empty)
         self.assertTrue(bool(loaded["leakage_audit"]["overall_pass"]))
 
@@ -101,9 +107,15 @@ class ExperimentStoreTests(unittest.TestCase):
         saved.diagnostics_path.unlink()
         saved.benchmark_curves_path.unlink()
         saved.leakage_audit_path.unlink()
+        saved.feature_contributions_path.unlink()
+        saved.post_attribution_path.unlink()
+        saved.account_attribution_path.unlink()
 
         loaded_without_optional = self.experiments.load_run(run.run_id)
         assert loaded_without_optional is not None
+        self.assertTrue(loaded_without_optional["feature_contributions"].empty)
+        self.assertTrue(loaded_without_optional["post_attribution"].empty)
+        self.assertTrue(loaded_without_optional["account_attribution"].empty)
         self.assertTrue(loaded_without_optional["benchmarks"].empty)
         self.assertTrue(loaded_without_optional["diagnostics"].empty)
         self.assertTrue(loaded_without_optional["benchmark_curves"].empty)

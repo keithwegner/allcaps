@@ -10,6 +10,7 @@ from trump_workbench.backtesting import BacktestService
 from trump_workbench.config import AppSettings
 from trump_workbench.discovery import DiscoveryService
 from trump_workbench.enrichment import LLMEnrichmentService
+from trump_workbench.explanations import build_account_attribution, build_post_attribution
 from trump_workbench.experiments import ExperimentStore
 from trump_workbench.features import FeatureService
 from trump_workbench.ingestion import XCsvAdapter
@@ -98,7 +99,15 @@ class PipelineTests(unittest.TestCase):
         second_enriched = self.enrichment.enrich_posts(posts, enabled=True)
         self.assertTrue((second_enriched["semantic_cache_hit"].astype(bool)).any())
 
-        first_dataset = self.features.build_session_dataset(first_enriched, market, tracked, feature_version="v1", llm_enabled=True)
+        prepared_posts = self.features.prepare_session_posts(first_enriched, market, tracked, llm_enabled=True)
+        first_dataset = self.features.build_session_dataset(
+            first_enriched,
+            market,
+            tracked,
+            feature_version="v1",
+            llm_enabled=True,
+            prepared_posts=prepared_posts,
+        )
 
         config = ModelRunConfig(
             run_name="unit-test-run",
@@ -116,6 +125,10 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("robust_score", run.metrics)
         self.assertTrue(artifacts["leakage_audit"]["overall_pass"])
         self.assertIn("always_long", artifacts["benchmarks"]["benchmark_name"].tolist())
+        self.assertFalse(artifacts["feature_contributions"].empty)
+
+        post_attribution = build_post_attribution(prepared_posts)
+        account_attribution = build_account_attribution(post_attribution)
 
         saved = self.experiments.save_run(
             run=run,
@@ -125,6 +138,9 @@ class PipelineTests(unittest.TestCase):
             windows=artifacts["windows"],
             importance=artifacts["importance"],
             model_artifact=artifacts["model_artifact"],
+            feature_contributions=artifacts["feature_contributions"],
+            post_attribution=post_attribution,
+            account_attribution=account_attribution,
             benchmarks=artifacts["benchmarks"],
             diagnostics=artifacts["diagnostics"],
             benchmark_curves=artifacts["benchmark_curves"],
@@ -133,6 +149,7 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(saved.model_path.exists())
         loaded = self.experiments.load_run(run.run_id)
         self.assertIsNotNone(loaded)
+        self.assertFalse(loaded["feature_contributions"].empty)
         self.assertFalse(loaded["benchmarks"].empty)
         self.assertTrue(bool(loaded["leakage_audit"].get("overall_pass", False)))
 

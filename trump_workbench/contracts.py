@@ -245,6 +245,9 @@ class SavedRunArtifacts:
     windows_path: Path
     importance_path: Path
     model_path: Path
+    feature_contributions_path: Path
+    post_attribution_path: Path
+    account_attribution_path: Path
     benchmarks_path: Path
     diagnostics_path: Path
     benchmark_curves_path: Path

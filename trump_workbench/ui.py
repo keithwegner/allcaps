@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -13,6 +14,7 @@ from .config import AppSettings
 from .contracts import MANUAL_OVERRIDE_COLUMNS, ModelRunConfig, RANKING_HISTORY_COLUMNS
 from .discovery import DiscoveryService
 from .enrichment import LLMEnrichmentService
+from .explanations import build_account_attribution, build_post_attribution
 from .experiments import ExperimentStore
 from .features import FeatureService, latest_feature_preview, map_posts_to_trade_sessions
 from .ingestion import IngestionService, TruthSocialArchiveAdapter, XCsvAdapter
@@ -577,10 +579,213 @@ def truncate(text: str, max_chars: int = 90) -> str:
     return text if len(text) <= max_chars else text[: max_chars - 1].rstrip() + "…"
 
 
+def _normalize_session_date(value: Any) -> pd.Timestamp | None:
+    timestamp = pd.to_datetime(value, errors="coerce")
+    if pd.isna(timestamp):
+        return None
+    if getattr(timestamp, "tzinfo", None) is not None:
+        timestamp = timestamp.tz_localize(None)
+    return pd.Timestamp(timestamp).normalize()
+
+
+def _filter_for_session(frame: pd.DataFrame, session_date: pd.Timestamp | None, column: str = "signal_session_date") -> pd.DataFrame:
+    if frame.empty or session_date is None or column not in frame.columns:
+        return frame.head(0).copy()
+    values = pd.to_datetime(frame[column], errors="coerce")
+    if getattr(values.dt, "tz", None) is not None:
+        values = values.dt.tz_localize(None)
+    mask = values.dt.normalize() == session_date
+    return frame.loc[mask].copy()
+
+
+def _prediction_option_label(row: pd.Series) -> str:
+    session_date = _normalize_session_date(row.get("signal_session_date"))
+    date_label = f"{session_date:%Y-%m-%d}" if session_date is not None else "unknown session"
+    score = float(row.get("expected_return_score", 0.0) or 0.0)
+    post_count = int(row.get("post_count", 0) or 0)
+    return f"{date_label} | score {score:+.3%} | posts {post_count}"
+
+
+def _render_signal_explanation_panel(
+    prediction_row: pd.Series,
+    feature_contributions: pd.DataFrame,
+    post_attribution: pd.DataFrame,
+    account_attribution: pd.DataFrame,
+    heading: str = "Why This Signal?",
+) -> None:
+    session_date = _normalize_session_date(prediction_row.get("signal_session_date"))
+    expected_return = float(prediction_row.get("expected_return_score", 0.0) or 0.0)
+    confidence = float(prediction_row.get("prediction_confidence", 0.0) or 0.0)
+    actual_return = prediction_row.get("target_next_session_return")
+    session_contributions = _filter_for_session(feature_contributions, session_date)
+    session_posts = _filter_for_session(post_attribution, session_date)
+    session_accounts = _filter_for_session(account_attribution, session_date)
+
+    st.markdown(f"**{heading}**")
+    st.caption(
+        "Feature contributions are exact for the linear model. Post and account attribution is heuristic, "
+        "using session sentiment, engagement, and tracked-account weighting.",
+    )
+
+    dominant_driver = "n/a"
+    if not session_contributions.empty:
+        family_mix = (
+            session_contributions.groupby("feature_family", as_index=False)["abs_contribution"]
+            .sum()
+            .sort_values("abs_contribution", ascending=False)
+            .reset_index(drop=True)
+        )
+        if not family_mix.empty:
+            lead = family_mix.iloc[0]
+            share = float(lead["abs_contribution"] / family_mix["abs_contribution"].sum()) if family_mix["abs_contribution"].sum() else 0.0
+            dominant_driver = f"{lead['feature_family']} ({share:.0%})"
+    else:
+        family_mix = pd.DataFrame(columns=["feature_family", "abs_contribution"])
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Signal session", f"{session_date:%Y-%m-%d}" if session_date is not None else "n/a")
+    metric_cols[1].metric("Expected return", f"{expected_return:+.3%}")
+    metric_cols[2].metric("Confidence", f"{confidence:.2f}")
+    metric_cols[3].metric(
+        "Dominant driver",
+        dominant_driver,
+        delta=f"Actual {float(actual_return):+.3%}" if pd.notna(actual_return) else None,
+    )
+
+    if not family_mix.empty:
+        mix_display = family_mix.copy()
+        mix_display["share"] = (
+            mix_display["abs_contribution"] / mix_display["abs_contribution"].sum()
+        ).fillna(0.0)
+        st.dataframe(
+            mix_display.rename(
+                columns={
+                    "feature_family": "Driver family",
+                    "abs_contribution": "Absolute contribution",
+                    "share": "Share of model move",
+                },
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    driver_cols = st.columns(2)
+    positive = (
+        session_contributions.loc[session_contributions["contribution"] > 0.0, ["feature_name", "raw_value", "coefficient", "contribution", "contribution_share"]]
+        .sort_values("contribution", ascending=False)
+        .head(6)
+        .rename(
+            columns={
+                "feature_name": "Feature",
+                "raw_value": "Value",
+                "coefficient": "Coef",
+                "contribution": "Contribution",
+                "contribution_share": "Share",
+            },
+        )
+    )
+    negative = (
+        session_contributions.loc[session_contributions["contribution"] < 0.0, ["feature_name", "raw_value", "coefficient", "contribution", "contribution_share"]]
+        .sort_values("contribution", ascending=True)
+        .head(6)
+        .rename(
+            columns={
+                "feature_name": "Feature",
+                "raw_value": "Value",
+                "coefficient": "Coef",
+                "contribution": "Contribution",
+                "contribution_share": "Share",
+            },
+        )
+    )
+    with driver_cols[0]:
+        st.markdown("**Positive feature drivers**")
+        if positive.empty:
+            st.info("No positive feature contributions for this session.")
+        else:
+            st.dataframe(positive, use_container_width=True, hide_index=True)
+    with driver_cols[1]:
+        st.markdown("**Negative feature drivers**")
+        if negative.empty:
+            st.info("No negative feature contributions for this session.")
+        else:
+            st.dataframe(negative, use_container_width=True, hide_index=True)
+
+    direction = 1.0 if expected_return >= 0.0 else -1.0
+    if not session_accounts.empty:
+        account_view = session_accounts.copy()
+        account_view["role"] = np.where(
+            account_view["author_is_trump"],
+            "Trump",
+            np.where(account_view["is_active_tracked_account"], "Tracked", "Mention account"),
+        )
+        account_view["alignment_score"] = account_view["net_post_signal"] * direction
+        account_view = account_view.sort_values(["alignment_score", "abs_net_post_signal"], ascending=[False, False]).head(8)
+        st.markdown("**Most aligned accounts**")
+        st.dataframe(
+            account_view[
+                [
+                    "author_handle",
+                    "role",
+                    "post_count",
+                    "avg_sentiment",
+                    "net_post_signal",
+                    "total_engagement",
+                ]
+            ].rename(
+                columns={
+                    "author_handle": "Handle",
+                    "post_count": "Posts",
+                    "avg_sentiment": "Avg sentiment",
+                    "net_post_signal": "Signal score",
+                    "total_engagement": "Engagement",
+                },
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if not session_posts.empty:
+        post_view = session_posts.copy()
+        post_view["role"] = np.where(
+            post_view["author_is_trump"],
+            "Trump",
+            np.where(post_view["is_active_tracked_account"], "Tracked", "Mention account"),
+        )
+        post_view["alignment_score"] = post_view["post_signal_score"] * direction
+        post_view = post_view.sort_values(["alignment_score", "abs_post_signal_score"], ascending=[False, False]).head(8)
+        st.markdown("**Most aligned posts**")
+        st.dataframe(
+            post_view[
+                [
+                    "post_timestamp",
+                    "author_handle",
+                    "role",
+                    "sentiment_score",
+                    "engagement_score",
+                    "post_signal_score",
+                    "post_preview",
+                ]
+            ].rename(
+                columns={
+                    "post_timestamp": "Timestamp",
+                    "author_handle": "Handle",
+                    "sentiment_score": "Sentiment",
+                    "engagement_score": "Engagement",
+                    "post_signal_score": "Signal score",
+                    "post_preview": "Post",
+                },
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
 def render_models_view(
     settings: AppSettings,
     store: DuckDBStore,
     feature_service: FeatureService,
+    model_service: ModelService,
     backtest_service: BacktestService,
     experiment_store: ExperimentStore,
 ) -> None:
@@ -609,12 +814,19 @@ def render_models_view(
 
     if st.button("Build dataset and run walk-forward backtest", use_container_width=True):
         with st.spinner("Building session features and running walk-forward optimization..."):
+            prepared_posts = feature_service.prepare_session_posts(
+                posts=posts,
+                market_calendar=spy,
+                tracked_accounts=tracked_accounts,
+                llm_enabled=llm_enabled,
+            )
             feature_rows = feature_service.build_session_dataset(
                 posts=posts,
                 spy_market=spy,
                 tracked_accounts=tracked_accounts,
                 feature_version="v1",
                 llm_enabled=llm_enabled,
+                prepared_posts=prepared_posts,
             )
             store.save_frame("session_features_latest", feature_rows, metadata={"llm_enabled": llm_enabled, "row_count": int(len(feature_rows))})
             config = ModelRunConfig(
@@ -631,6 +843,18 @@ def render_models_view(
                 transaction_cost_bps=float(transaction_cost_bps),
             )
             run, artifacts = backtest_service.run_walk_forward(config, feature_rows)
+            post_attribution = build_post_attribution(prepared_posts)
+            account_attribution = build_account_attribution(post_attribution)
+            predicted_sessions = {
+                session_date
+                for session_date in pd.to_datetime(artifacts["predictions"]["signal_session_date"], errors="coerce").dropna().dt.normalize().tolist()
+            }
+            post_attribution = post_attribution.loc[
+                pd.to_datetime(post_attribution["signal_session_date"], errors="coerce").dt.normalize().isin(predicted_sessions)
+            ].reset_index(drop=True)
+            account_attribution = account_attribution.loc[
+                pd.to_datetime(account_attribution["signal_session_date"], errors="coerce").dt.normalize().isin(predicted_sessions)
+            ].reset_index(drop=True)
             experiment_store.save_run(
                 run=run,
                 config=artifacts["config"],
@@ -639,6 +863,9 @@ def render_models_view(
                 windows=artifacts["windows"],
                 importance=artifacts["importance"],
                 model_artifact=artifacts["model_artifact"],
+                feature_contributions=artifacts["feature_contributions"],
+                post_attribution=post_attribution,
+                account_attribution=account_attribution,
                 benchmarks=artifacts["benchmarks"],
                 diagnostics=artifacts["diagnostics"],
                 benchmark_curves=artifacts["benchmark_curves"],
@@ -676,6 +903,21 @@ def render_models_view(
     if loaded is None:
         st.warning("The selected run could not be loaded.")
         return
+
+    feature_contributions = loaded["feature_contributions"]
+    if feature_contributions.empty:
+        feature_contributions = model_service.explain_predictions(loaded["model_artifact"], loaded["predictions"])
+    post_attribution = loaded["post_attribution"]
+    account_attribution = loaded["account_attribution"]
+    if post_attribution.empty or account_attribution.empty:
+        fallback_posts = feature_service.prepare_session_posts(
+            posts=posts,
+            market_calendar=spy,
+            tracked_accounts=tracked_accounts,
+            llm_enabled=bool(loaded["model_artifact"].metadata.get("llm_enabled", False)),
+        )
+        post_attribution = build_post_attribution(fallback_posts)
+        account_attribution = build_account_attribution(post_attribution)
 
     _metric_row(loaded["metrics"])
     _render_equity_curve(loaded["trades"], title="Walk-forward out-of-sample equity curve")
@@ -730,6 +972,22 @@ def render_models_view(
     st.dataframe(loaded["windows"], use_container_width=True, hide_index=True)
     st.markdown("**Feature importance**")
     st.dataframe(loaded["importance"].head(25), use_container_width=True, hide_index=True)
+    prediction_rows = loaded["predictions"].sort_values("signal_session_date", ascending=False).reset_index(drop=True)
+    if not prediction_rows.empty:
+        labels = prediction_rows.apply(_prediction_option_label, axis=1).tolist()
+        selected_label = st.selectbox(
+            "Explain session",
+            options=labels,
+            index=0,
+            key=f"explain-session-{selected_run_id}",
+        )
+        selected_prediction = prediction_rows.iloc[labels.index(selected_label)]
+        _render_signal_explanation_panel(
+            prediction_row=selected_prediction,
+            feature_contributions=feature_contributions,
+            post_attribution=post_attribution,
+            account_attribution=account_attribution,
+        )
     if not loaded["diagnostics"].empty:
         diagnostics = loaded["diagnostics"].copy()
         diag_fig = go.Figure()
@@ -812,14 +1070,24 @@ def render_live_monitor(
     posts = store.read_frame("normalized_posts")
     spy = store.read_frame("spy_daily")
     tracked_accounts = store.read_frame("tracked_accounts")
+    prepared_posts = feature_service.prepare_session_posts(
+        posts=posts,
+        market_calendar=spy,
+        tracked_accounts=tracked_accounts,
+        llm_enabled=bool(artifact.metadata.get("llm_enabled", False)),
+    )
     feature_rows = feature_service.build_session_dataset(
         posts=posts,
         spy_market=spy,
         tracked_accounts=tracked_accounts,
         feature_version="v1",
         llm_enabled=bool(artifact.metadata.get("llm_enabled", False)),
+        prepared_posts=prepared_posts,
     )
     predictions = model_service.predict(artifact, feature_rows)
+    feature_contributions = model_service.explain_predictions(artifact, predictions)
+    post_attribution = build_post_attribution(prepared_posts)
+    account_attribution = build_account_attribution(post_attribution)
     latest = predictions.sort_values("signal_session_date").iloc[-1]
     threshold = float(deployment_params.get("threshold", 0.0))
     min_post_count = int(deployment_params.get("min_post_count", 1))
@@ -870,6 +1138,14 @@ def render_live_monitor(
         st.plotly_chart(fig, use_container_width=True)
         st.dataframe(history.tail(25), use_container_width=True, hide_index=True)
 
+    _render_signal_explanation_panel(
+        prediction_row=latest,
+        feature_contributions=feature_contributions,
+        post_attribution=post_attribution,
+        account_attribution=account_attribution,
+        heading="Why This Live Signal?",
+    )
+
 
 def main() -> None:
     settings = AppSettings()
@@ -916,7 +1192,7 @@ def main() -> None:
     elif page == "Discovery":
         render_discovery_view(settings, store, discovery_service)
     elif page == "Models & Backtests":
-        render_models_view(settings, store, feature_service, backtest_service, experiment_store)
+        render_models_view(settings, store, feature_service, model_service, backtest_service, experiment_store)
     else:
         render_live_monitor(
             settings,

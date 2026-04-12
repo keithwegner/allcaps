@@ -358,6 +358,7 @@ class BacktestService:
         )
         full_predictions["deployment_threshold"] = deployment_params["threshold"]
         full_predictions["deployment_min_post_count"] = deployment_params["min_post_count"]
+        feature_contributions = self.model_service.explain_predictions(final_model, full_predictions)
 
         window_df = pd.DataFrame(window_rows)
         diagnostics = build_prediction_diagnostics(combined_predictions)
@@ -389,6 +390,7 @@ class BacktestService:
             "windows": window_df,
             "importance": final_importance,
             "model_artifact": final_model.to_dict(),
+            "feature_contributions": feature_contributions,
             "benchmarks": benchmarks,
             "diagnostics": diagnostics,
             "benchmark_curves": benchmark_curves,

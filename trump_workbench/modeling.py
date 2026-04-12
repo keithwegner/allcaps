@@ -20,6 +20,40 @@ META_COLUMNS = {
     "tradeable",
 }
 
+EXPLANATION_COLUMNS = [
+    "signal_session_date",
+    "next_session_date",
+    "model_version",
+    "expected_return_score",
+    "prediction_confidence",
+    "feature_name",
+    "feature_family",
+    "raw_value",
+    "standardized_value",
+    "coefficient",
+    "contribution",
+    "abs_contribution",
+    "contribution_share",
+]
+
+
+def classify_feature_family(feature_name: str) -> str:
+    if feature_name.startswith("semantic_"):
+        return "semantic"
+    if feature_name.startswith("policy_"):
+        return "policy"
+    if feature_name.startswith("prev_") or feature_name in {"session_return", "rolling_vol_5d", "close_vs_ma_5", "volume_z_5"}:
+        return "market_context"
+    if "sentiment" in feature_name:
+        return "social_sentiment"
+    if "engagement" in feature_name:
+        return "social_engagement"
+    if "tracked" in feature_name or "author" in feature_name:
+        return "account_structure"
+    if "post" in feature_name or "mention" in feature_name:
+        return "activity"
+    return "other"
+
 
 @dataclass
 class LinearReturnModel:
@@ -136,3 +170,74 @@ class ModelService:
         output["prediction_confidence"] = 1.0 / (1.0 + artifact.residual_std * 100.0 + np.abs(predictions) * 25.0)
         output["model_version"] = artifact.model_version
         return output
+
+    def explain_predictions(
+        self,
+        artifact: LinearModelArtifact,
+        feature_rows: pd.DataFrame,
+    ) -> pd.DataFrame:
+        rows = feature_rows.copy()
+        if rows.empty:
+            return pd.DataFrame(columns=EXPLANATION_COLUMNS)
+        if "expected_return_score" not in rows.columns or "prediction_confidence" not in rows.columns:
+            rows = self.predict(artifact, rows)
+
+        for column in artifact.feature_names:
+            if column not in rows.columns:
+                rows[column] = 0.0
+
+        X_clean = rows[artifact.feature_names].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        X_np = np.nan_to_num(X_clean.to_numpy(dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+        means = np.asarray(artifact.means, dtype=float)
+        stds = np.asarray(artifact.stds, dtype=float)
+        coefs = np.asarray(artifact.coefficients, dtype=float)
+        X_scaled = np.clip((X_np - means) / stds, -8.0, 8.0)
+        contributions = X_scaled * coefs
+
+        raw_frame = pd.DataFrame(X_np, columns=artifact.feature_names)
+        scaled_frame = pd.DataFrame(X_scaled, columns=artifact.feature_names)
+        contribution_frame = pd.DataFrame(contributions, columns=artifact.feature_names)
+
+        meta = rows[
+            [
+                "signal_session_date",
+                "next_session_date",
+                "model_version",
+                "expected_return_score",
+                "prediction_confidence",
+            ]
+        ].copy()
+        meta["row_id"] = np.arange(len(meta))
+
+        raw_long = raw_frame.assign(row_id=meta["row_id"]).melt(
+            id_vars="row_id",
+            var_name="feature_name",
+            value_name="raw_value",
+        )
+        scaled_long = scaled_frame.assign(row_id=meta["row_id"]).melt(
+            id_vars="row_id",
+            var_name="feature_name",
+            value_name="standardized_value",
+        )
+        contribution_long = contribution_frame.assign(row_id=meta["row_id"]).melt(
+            id_vars="row_id",
+            var_name="feature_name",
+            value_name="contribution",
+        )
+
+        explanation = contribution_long.merge(raw_long, on=["row_id", "feature_name"]).merge(
+            scaled_long,
+            on=["row_id", "feature_name"],
+        )
+        explanation = explanation.merge(meta, on="row_id", how="left")
+        coef_map = dict(zip(artifact.feature_names, artifact.coefficients))
+        explanation["coefficient"] = explanation["feature_name"].map(coef_map).astype(float)
+        explanation["feature_family"] = explanation["feature_name"].map(classify_feature_family)
+        explanation["abs_contribution"] = explanation["contribution"].abs()
+        total_abs = explanation.groupby("row_id")["abs_contribution"].transform("sum").replace(0.0, np.nan)
+        explanation["contribution_share"] = (explanation["abs_contribution"] / total_abs).fillna(0.0)
+        explanation = explanation[EXPLANATION_COLUMNS].sort_values(
+            ["signal_session_date", "abs_contribution", "feature_name"],
+            ascending=[True, False, True],
+        )
+        return explanation.reset_index(drop=True)

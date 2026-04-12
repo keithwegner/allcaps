@@ -70,6 +70,21 @@ class FeatureService:
     def __init__(self, enrichment_service: LLMEnrichmentService) -> None:
         self.enrichment_service = enrichment_service
 
+    def prepare_session_posts(
+        self,
+        posts: pd.DataFrame,
+        market_calendar: pd.DataFrame,
+        tracked_accounts: pd.DataFrame,
+        llm_enabled: bool,
+    ) -> pd.DataFrame:
+        if market_calendar.empty:
+            return posts.head(0).copy()
+        market = market_calendar.sort_values("trade_date").reset_index(drop=True).copy()
+        mapped = map_posts_to_trade_sessions(posts, market[["trade_date"]])
+        mapped = self.enrichment_service.enrich_posts(mapped, enabled=llm_enabled)
+        mapped = self._flag_tracked_posts(mapped, tracked_accounts)
+        return mapped
+
     def build_session_dataset(
         self,
         posts: pd.DataFrame,
@@ -77,14 +92,17 @@ class FeatureService:
         tracked_accounts: pd.DataFrame,
         feature_version: str,
         llm_enabled: bool,
+        prepared_posts: pd.DataFrame | None = None,
     ) -> pd.DataFrame:
         if spy_market.empty:
             return pd.DataFrame()
 
         market = spy_market.sort_values("trade_date").reset_index(drop=True).copy()
-        mapped = map_posts_to_trade_sessions(posts, market[["trade_date"]])
-        mapped = self.enrichment_service.enrich_posts(mapped, enabled=llm_enabled)
-        mapped = self._flag_tracked_posts(mapped, tracked_accounts)
+        mapped = (
+            prepared_posts.copy()
+            if prepared_posts is not None
+            else self.prepare_session_posts(posts, market, tracked_accounts, llm_enabled)
+        )
 
         market["session_return"] = market["close"].pct_change().fillna(0.0)
         market["prev_return_1d"] = market["close"].pct_change(1).fillna(0.0)
