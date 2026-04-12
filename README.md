@@ -5,45 +5,34 @@
 [![Storage: DuckDB + Parquet](https://img.shields.io/badge/storage-DuckDB%20%2B%20Parquet-FFF000?logo=duckdb&logoColor=black)](https://duckdb.org/)
 [![Status: Experimental](https://img.shields.io/badge/status-experimental-orange)](https://github.com/keithwegner/allcaps)
 
-This project is now a modular single-user research workbench for evaluating and optimizing **SPY trading strategies** driven by:
+This is a local Streamlit workbench for researching whether President Donald Trump's social posts, plus posts from influential X accounts that mention him, help predict the **next trading session's SPY return**.
 
-- Donald Trump's Truth Social posts
-- X accounts that mention him
-- a dynamic universe of influential mention accounts
+In plain English, the app helps you:
 
-## What the app does
+- collect Trump-related social data
+- decide which X accounts matter enough to track
+- turn that data into trading features
+- backtest a simple **long / flat SPY** strategy
+- compare saved runs and inspect why a run did or did not work
 
-- ingests and normalizes Truth Social and X/mention CSV data
-- stores datasets locally in **DuckDB + Parquet**
-- discovers and auto-includes influential X accounts mentioning Trump
-- supports manual `pin` / `suppress` overrides for the discovered account universe
-- builds per-session feature datasets for **next-session SPY expected-return** modeling
-- supports optional cached semantic enrichment on top of deterministic features
-- runs walk-forward backtests for a **long / flat SPY** strategy
-- compares the strategy against benchmark baselines such as always-long, Trump-only, and tracked-accounts-only
-- runs leakage-oriented diagnostics around feature cutoffs and next-session target alignment
-- saves experiment runs, trades, predictions, and model artifacts locally
-- preserves the original descriptive research view with:
-  - S&P 500 close overlay
-  - sentiment candlesticks
-  - post and session tables
-  - optional Alpha Vantage intraday SPY drill-down
+## What The App Is For
 
-## Architecture
+Use this app when you want to answer questions like:
 
-The old single-file app has been split into a modular monolith under `trump_workbench/`:
+- "Did Trump-related posting activity cluster around certain market moves?"
+- "Which X accounts consistently mention Trump and seem worth tracking?"
+- "If I turn these posts into features, can I predict next-session SPY returns at all?"
+- "How does this strategy compare with simple baselines like always-long SPY?"
 
-- `ingestion.py` for source adapters and post normalization
-- `discovery.py` for influential-account ranking and tracked-universe history
-- `enrichment.py` for optional cached semantic enrichment
-- `features.py` for session mapping and feature engineering
-- `modeling.py` for expected-return model training and prediction
-- `backtesting.py` for walk-forward evaluation and strategy simulation
-- `experiments.py` for saved runs and artifacts
-- `research.py` for the preserved visualization workflow
-- `ui.py` for the Streamlit workbench
+## What You Need Before You Start
 
-## Run locally
+- Python and a virtual environment
+- Internet access for the built-in Truth Social and market-data loaders
+- Optional X CSVs if you want richer discovery and mention-account analysis
+
+The app can start with just Truth Social plus market data, but the **Discovery** page is most useful when you also supply X/mention CSVs.
+
+## Quick Start
 
 ```bash
 python -m venv .venv
@@ -51,6 +40,231 @@ source .venv/bin/activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+On the first launch, the app may take a little longer because it can bootstrap local working datasets automatically.
+
+The app opens as a multi-page Streamlit workbench with these sections:
+
+- `Research View`
+- `Datasets`
+- `Discovery`
+- `Models & Backtests`
+- `Live Monitor`
+
+## Recommended First Run
+
+If you are new to the app, follow this order:
+
+1. Open `Datasets`.
+2. Click `Refresh full datasets`.
+3. If you have X data, upload CSVs or point the app at a remote CSV URL.
+4. Open `Discovery` and review the tracked-account universe.
+5. Open `Research View` to inspect mapped posts and market context.
+6. Open `Models & Backtests` and run a baseline walk-forward backtest.
+7. Open `Live Monitor` only after you have at least one saved model run.
+
+## How To Work With Each Page
+
+### `Datasets`
+
+This is the best place to start.
+
+Use it to:
+
+- refresh Truth Social, X CSV, and market datasets
+- upload local CSVs for X posts or influential mentions
+- set a remote CSV URL
+- inspect the local dataset registry and source manifest
+- preview the normalized post table the rest of the app uses
+
+Buttons:
+
+- `Refresh full datasets`: rebuilds the local working datasets from scratch
+- `Incremental refresh`: polls for newer rows and appends them when possible
+
+## `Discovery`
+
+This page ranks X accounts that mention Trump and decides which ones belong in the active tracked universe.
+
+Use it to:
+
+- review the current active tracked accounts
+- inspect the latest ranking snapshot
+- manually `pin` an account so it stays included
+- manually `suppress` an account so it stays excluded
+- review and delete override history
+
+Important note:
+
+- If you do not provide X/mention data, the page may have little or nothing to rank
+- The page uses historical effective dates, so overrides and account inclusion can be evaluated without lookahead leakage
+
+## `Research View`
+
+This is the descriptive analysis page.
+
+Use it to:
+
+- filter by date range, platform, keyword, and reshare behavior
+- see S&P 500 price history with post-session markers
+- inspect sentiment candlesticks built from mapped post sessions
+- review session-level and post-level tables
+- drill into an intraday SPY reaction window for a selected post
+
+Important note:
+
+- The research page is for exploration, not proof of causality
+- Intraday drill-down depends on Alpha Vantage data and is optional
+
+## `Models & Backtests`
+
+This page turns the dataset into features, trains a model, and evaluates the trading idea.
+
+Use it to:
+
+- build the latest session-feature dataset
+- train a next-session expected-return model
+- run walk-forward optimization
+- compare saved runs
+- inspect strategy metrics, benchmark tables, leakage audits, and prediction misses
+
+Inputs you can tune here include:
+
+- run name
+- whether semantic enrichment is enabled
+- train / validation / test window sizes
+- step size
+- transaction costs
+- ridge regularization
+- threshold grid
+- minimum-post-count grid
+- tracked-account-weight grid
+
+## `Live Monitor`
+
+This page gives you a lightweight, polling-style live view after you already have a saved model.
+
+Use it to:
+
+- poll sources for new rows
+- see the latest signal session and expected next-session return
+- inspect the current suggested stance
+- review prediction snapshot history over time
+
+Important note:
+
+- This page will not do much until you have already created at least one saved run in `Models & Backtests`
+
+## Data Inputs
+
+The app supports:
+
+- built-in Truth Social historical archive loading
+- local X CSV files
+- local influential-mentions CSV files
+- uploaded CSV files
+- remote CSV URLs
+
+Default local file locations:
+
+- `data/realDonaldTrump_x_current_term.csv`
+- `data/influential_x_mentions.csv`
+
+Templates:
+
+- `templates/x_posts_template.csv`
+- `templates/x_mentions_template.csv`
+
+## CSV Expectations
+
+The parser is flexible, but the easiest path is to match the templates.
+
+Typical X-post CSV columns:
+
+- `timestamp`
+- `text`
+- `url`
+- `is_retweet`
+- `author_handle`
+- `author_name`
+- `author_id`
+- `replies_count`
+- `reblogs_count`
+- `favourites_count`
+
+Typical mention-account CSV columns:
+
+- the same columns as above
+- plus `mentions_trump`
+
+## What Gets Stored Locally
+
+The app stores working data in:
+
+- `.workbench/workbench.duckdb`
+- `.workbench/lake/*.parquet`
+- `.workbench/artifacts/runs/*`
+
+Truth Social raw archive caching uses:
+
+- `.cache/truth_archive.csv`
+
+## Typical User Workflow
+
+Here is the most common way to use the app from start to finish:
+
+1. Refresh data in `Datasets`.
+2. Add X or mention CSVs if you want account discovery.
+3. Review the `Discovery` page and pin or suppress accounts you care about.
+4. Explore `Research View` to sanity-check whether the mapped posts look reasonable.
+5. Run a default experiment in `Models & Backtests`.
+6. Compare the strategy against the built-in baselines.
+7. If one run looks promising, use `Live Monitor` to watch the latest score from the most recent saved model.
+
+## Troubleshooting
+
+If `Discovery` is empty:
+
+- make sure you loaded X mention data, not only Truth Social data
+- refresh datasets again after adding CSVs
+
+If `Research View` says it has no source data:
+
+- open `Datasets` and run a full refresh
+
+If `Models & Backtests` says there is no data:
+
+- make sure both normalized posts and SPY daily data were loaded successfully
+
+If `Live Monitor` says there is no saved model:
+
+- create and save a run in `Models & Backtests` first
+
+If the intraday drill-down fails:
+
+- verify your Alpha Vantage setup or skip the intraday section
+
+## Current Limits
+
+- `SPY` is the only traded instrument in v1
+- the strategy is `long / flat` only in v1
+- semantic enrichment is optional and heuristic-backed by default
+- the app is single-user and local-first
+- the current research layer is exploratory, not production trading infrastructure
+
+## Architecture
+
+The code is organized as a modular monolith under `trump_workbench/`:
+
+- `ingestion.py` for source adapters and post normalization
+- `discovery.py` for influential-account ranking and tracked-universe history
+- `enrichment.py` for optional semantic enrichment
+- `features.py` for session mapping and feature engineering
+- `modeling.py` for expected-return model training and prediction
+- `backtesting.py` for walk-forward evaluation and strategy simulation
+- `experiments.py` for saved runs and artifacts
+- `research.py` for descriptive visualization helpers
+- `ui.py` for the Streamlit app shell
 
 ## Testing
 
@@ -66,49 +280,9 @@ Run the full test suite:
 python -m unittest discover -s tests -v
 ```
 
-Generate a source-only coverage report for the workbench package:
+Run the configured coverage report:
 
 ```bash
 python -m coverage run -m unittest discover -s tests
 python -m coverage report -m
 ```
-
-## Local storage
-
-The workbench stores data in:
-
-- `.workbench/workbench.duckdb`
-- `.workbench/lake/*.parquet`
-- `.workbench/artifacts/runs/*`
-
-Truth Social raw archive caching still uses:
-
-- `.cache/truth_archive.csv`
-
-## Data inputs
-
-The app supports:
-
-- Truth Social historical archive via built-in source adapter
-- local X CSVs
-- local influential-mentions CSVs
-- uploaded CSVs
-- remote CSV URLs
-
-The default local files are:
-
-- `data/realDonaldTrump_x_current_term.csv`
-- `data/influential_x_mentions.csv`
-
-Templates are included in:
-
-- `templates/x_posts_template.csv`
-- `templates/x_mentions_template.csv`
-
-## Notes
-
-- `SPY` is the only traded instrument in v1.
-- The strategy is `long / flat` only in v1.
-- Semantic enrichment is optional and cached; the full system works with it disabled.
-- The current semantic enrichment layer is local and heuristic-backed, with a pluggable interface for richer providers later.
-- The research view remains descriptive; it is not a claim of causality.

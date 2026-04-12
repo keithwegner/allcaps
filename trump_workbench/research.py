@@ -112,102 +112,165 @@ def build_event_frame(sp500_market: pd.DataFrame, sessions: pd.DataFrame) -> pd.
 
 
 def build_combined_chart(events: pd.DataFrame, scale_markers: bool) -> go.Figure:
+    plot_events = events.sort_values("trade_date").reset_index(drop=True).copy()
     fig = make_subplots(
         rows=2,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.07,
-        row_heights=[0.68, 0.32],
+        vertical_spacing=0.08,
+        row_heights=[0.62, 0.38],
+        specs=[[{"secondary_y": True}], [{}]],
         subplot_titles=(
-            "S&P 500 close with Trump and influential-account activity",
-            "Session sentiment OHLC derived from mapped posts",
+            "S&P 500 close with post activity overlay",
+            "Session sentiment range and average",
         ),
     )
     fig.add_trace(
         go.Scatter(
-            x=events["trade_date"],
-            y=events["close"],
+            x=plot_events["trade_date"],
+            y=plot_events["close"],
             mode="lines",
             name="S&P 500 close",
-            customdata=events["daily_return_pct"],
+            line={"color": "#8ecae6", "width": 3},
+            customdata=plot_events["daily_return_pct"],
             hovertemplate="<b>%{x|%Y-%m-%d}</b><br>Close: %{y:,.2f}<br>Daily return: %{customdata:.2%}<extra></extra>",
         ),
         row=1,
         col=1,
+        secondary_y=False,
     )
 
-    marker_events = events.loc[events["has_posts"]].copy()
-    if not marker_events.empty:
-        marker_size = (
-            8 + np.log1p(marker_events["post_count"].to_numpy()) * 7
+    activity_events = plot_events.copy()
+    if not activity_events.empty:
+        raw_activity = (
+            activity_events["post_count"].clip(lower=0).astype(float)
             if scale_markers
-            else np.full(len(marker_events), 10.0)
+            else activity_events["has_posts"].astype(int).astype(float)
         )
-        marker_events["hover_text"] = marker_events.apply(
+        activity_events["activity_signal"] = raw_activity.rolling(7, min_periods=1).mean()
+        activity_events["hover_text"] = activity_events.apply(
             lambda row: (
                 f"<b>{pd.Timestamp(row['trade_date']):%Y-%m-%d}</b><br>"
                 f"Posts mapped to session: {int(row['post_count'])}<br>"
                 f"Truth Social: {int(row['truth_posts'])} | X: {int(row['x_posts'])}<br>"
                 f"Tracked accounts: {int(row.get('tracked_account_posts', 0))}<br>"
                 f"Avg sentiment: {fmt_score(row.get('sentiment_avg', np.nan))}<br>"
+                f"Smoothed activity: {float(row['activity_signal']):.1f}<br>"
                 f"Sample posts: {html.escape(str(row.get('sample_posts', '')))}"
             ),
             axis=1,
         )
         fig.add_trace(
             go.Scatter(
-                x=marker_events["trade_date"],
-                y=marker_events["close"],
-                mode="markers",
-                name="Post session",
-                marker={"size": marker_size},
-                text=marker_events["hover_text"],
+                x=activity_events["trade_date"],
+                y=activity_events["activity_signal"],
+                mode="lines",
+                name="Post activity",
+                line={"color": "rgba(59, 130, 246, 0.8)", "width": 1.4},
+                fill="tozeroy",
+                fillcolor="rgba(37, 99, 235, 0.14)",
+                text=activity_events["hover_text"],
                 hovertemplate="%{text}<extra></extra>",
             ),
             row=1,
             col=1,
+            secondary_y=True,
         )
 
     sentiment_events = events.loc[events["has_posts"]].copy()
     if not sentiment_events.empty:
+        sentiment_events["marker_color"] = np.where(
+            sentiment_events["sentiment_avg"] >= 0.0,
+            "#86efac",
+            "#fda4af",
+        )
         sentiment_events["hover_text"] = sentiment_events.apply(
             lambda row: (
                 f"<b>{pd.Timestamp(row['trade_date']):%Y-%m-%d}</b><br>"
+                f"Posts mapped: {int(row['post_count'])}<br>"
                 f"Open: {fmt_score(row['sentiment_open'])}<br>"
                 f"High: {fmt_score(row['sentiment_high'])}<br>"
                 f"Low: {fmt_score(row['sentiment_low'])}<br>"
                 f"Close: {fmt_score(row['sentiment_close'])}<br>"
+                f"Average: {fmt_score(row['sentiment_avg'])}<br>"
                 f"First post: {html.escape(str(row.get('first_post_summary', '')))}<br>"
                 f"Last post: {html.escape(str(row.get('last_post_summary', '')))}"
             ),
             axis=1,
         )
         fig.add_trace(
-            go.Candlestick(
+            go.Scatter(
                 x=sentiment_events["trade_date"],
-                open=sentiment_events["sentiment_open"],
-                high=sentiment_events["sentiment_high"],
-                low=sentiment_events["sentiment_low"],
-                close=sentiment_events["sentiment_close"],
-                name="Sentiment OHLC",
+                y=sentiment_events["sentiment_high"],
+                mode="lines",
+                line={"color": "rgba(0,0,0,0)", "width": 0},
+                showlegend=False,
+                hoverinfo="skip",
+            ),
+            row=2,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=sentiment_events["trade_date"],
+                y=sentiment_events["sentiment_low"],
+                mode="lines",
+                name="Sentiment range",
+                line={"color": "rgba(148, 163, 184, 0.2)", "width": 1},
+                fill="tonexty",
+                fillcolor="rgba(148, 163, 184, 0.18)",
                 text=sentiment_events["hover_text"],
                 hovertemplate="%{text}<extra></extra>",
             ),
             row=2,
             col=1,
         )
-        fig.add_hline(y=0.0, line_dash="dot", line_width=1, row=2, col=1)
+        fig.add_trace(
+            go.Scatter(
+                x=sentiment_events["trade_date"],
+                y=sentiment_events["sentiment_avg"],
+                mode="lines+markers",
+                name="Avg sentiment",
+                line={"color": "rgba(226, 232, 240, 0.95)", "width": 1.9},
+                marker={
+                    "size": 6,
+                    "color": sentiment_events["marker_color"],
+                    "line": {"color": "rgba(15, 23, 42, 0.8)", "width": 0.6},
+                },
+                text=sentiment_events["hover_text"],
+                hovertemplate="%{text}<extra></extra>",
+            ),
+            row=2,
+            col=1,
+        )
+        fig.add_hline(y=0.0, line_dash="dot", line_width=1, line_color="rgba(148, 163, 184, 0.9)", row=2, col=1)
 
     fig.update_yaxes(title_text="S&P 500 close", row=1, col=1)
+    fig.update_yaxes(
+        title_text="Posts mapped",
+        showgrid=False,
+        rangemode="tozero",
+        secondary_y=True,
+        row=1,
+        col=1,
+    )
     fig.update_yaxes(title_text="Sentiment score", range=[-1.05, 1.05], row=2, col=1)
-    fig.update_xaxes(title_text="Trading session", row=2, col=1)
+    fig.update_xaxes(title_text="Trading session", dtick="M3", tickformat="%b %Y", row=2, col=1)
     fig.update_xaxes(rangeslider_visible=False, row=1, col=1)
     fig.update_xaxes(rangeslider_visible=False, row=2, col=1)
     fig.update_layout(
         title="Research View: social activity vs. market baseline",
         hovermode="x unified",
-        legend_title_text="Series",
-        margin={"l": 20, "r": 20, "t": 70, "b": 20},
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.05,
+            "xanchor": "left",
+            "x": 0.0,
+        },
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        margin={"l": 20, "r": 20, "t": 100, "b": 20},
     )
     return fig
 
