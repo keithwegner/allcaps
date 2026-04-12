@@ -271,6 +271,7 @@ def make_post_table(mapped_posts: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_intraday_chart(intraday: pd.DataFrame, anchor_ts: pd.Timestamp, title: str) -> go.Figure:
+    anchor_dt = pd.Timestamp(anchor_ts).to_pydatetime()
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
@@ -281,7 +282,25 @@ def build_intraday_chart(intraday: pd.DataFrame, anchor_ts: pd.Timestamp, title:
             hovertemplate="<b>%{x|%Y-%m-%d %H:%M}</b><br>Close: %{y:,.2f}<extra></extra>",
         ),
     )
-    fig.add_vline(x=anchor_ts, line_dash="dash", annotation_text="reaction anchor", annotation_position="top")
+    fig.add_shape(
+        type="line",
+        x0=anchor_dt,
+        x1=anchor_dt,
+        y0=0,
+        y1=1,
+        xref="x",
+        yref="paper",
+        line={"dash": "dash"},
+    )
+    fig.add_annotation(
+        x=anchor_dt,
+        y=1,
+        xref="x",
+        yref="paper",
+        text="reaction anchor",
+        showarrow=False,
+        yanchor="bottom",
+    )
     fig.update_layout(
         title=title,
         xaxis_title="Time (ET)",

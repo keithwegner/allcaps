@@ -7,8 +7,26 @@ import numpy as np
 import pandas as pd
 
 from .config import EASTERN
-from .contracts import MANUAL_OVERRIDE_COLUMNS, TRACKED_ACCOUNT_COLUMNS, TrackedAccount
+from .contracts import (
+    MANUAL_OVERRIDE_COLUMNS,
+    RANKING_HISTORY_COLUMNS,
+    TRACKED_ACCOUNT_COLUMNS,
+    TrackedAccount,
+)
 from .utils import ensure_tz_naive_date, stable_text_id
+
+DISCOVERY_POST_COLUMNS = [
+    "source_platform",
+    "mentions_trump",
+    "author_is_trump",
+    "author_account_id",
+    "author_handle",
+    "author_display_name",
+    "post_id",
+    "post_timestamp",
+    "engagement_score",
+    "sentiment_score",
+]
 
 
 class DiscoveryService:
@@ -92,6 +110,8 @@ class DiscoveryService:
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
         del existing_accounts
         overrides = self.normalize_manual_overrides(manual_overrides)
+        if posts.empty:
+            posts = posts.reindex(columns=DISCOVERY_POST_COLUMNS)
         candidates = posts.loc[
             (posts["source_platform"] == "X")
             & posts["mentions_trump"]
@@ -101,7 +121,10 @@ class DiscoveryService:
         as_of_date = ensure_tz_naive_date(as_of_et)
 
         if candidates.empty and overrides.empty:
-            return pd.DataFrame(columns=TRACKED_ACCOUNT_COLUMNS), pd.DataFrame()
+            return (
+                pd.DataFrame(columns=TRACKED_ACCOUNT_COLUMNS),
+                pd.DataFrame(columns=RANKING_HISTORY_COLUMNS),
+            )
 
         candidate_dates = (
             candidates.loc[candidates["post_timestamp"] <= as_of_et, "post_timestamp"]
@@ -213,7 +236,7 @@ class DiscoveryService:
         if tracked.empty:
             tracked = pd.DataFrame(columns=TRACKED_ACCOUNT_COLUMNS)
         if ranking_history.empty:
-            ranking_history = pd.DataFrame()
+            ranking_history = pd.DataFrame(columns=RANKING_HISTORY_COLUMNS)
         return tracked, ranking_history
 
     def current_active_accounts(self, tracked_accounts: pd.DataFrame, as_of: pd.Timestamp) -> pd.DataFrame:

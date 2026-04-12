@@ -52,6 +52,27 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+## Testing
+
+Install dev tooling:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+Run the full test suite:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Generate a source-only coverage report for the workbench package:
+
+```bash
+python -m coverage run -m unittest discover -s tests
+python -m coverage report -m
+```
+
 ## Local storage
 
 The workbench stores data in:

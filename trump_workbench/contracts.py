@@ -62,6 +62,23 @@ MANUAL_OVERRIDE_COLUMNS = [
     "created_at",
 ]
 
+RANKING_HISTORY_COLUMNS = [
+    "author_account_id",
+    "author_handle",
+    "author_display_name",
+    "source_platform",
+    "discovery_score",
+    "mention_count",
+    "engagement_mean",
+    "active_days",
+    "ranked_at",
+    "discovery_rank",
+    "final_selected",
+    "selected_status",
+    "suppressed_by_override",
+    "pinned_by_override",
+]
+
 
 class SourceAdapter(Protocol):
     name: str

@@ -10,7 +10,7 @@ import streamlit.components.v1 as components
 
 from .backtesting import BacktestService
 from .config import AppSettings
-from .contracts import MANUAL_OVERRIDE_COLUMNS, ModelRunConfig
+from .contracts import MANUAL_OVERRIDE_COLUMNS, ModelRunConfig, RANKING_HISTORY_COLUMNS
 from .discovery import DiscoveryService
 from .enrichment import LLMEnrichmentService
 from .experiments import ExperimentStore
@@ -173,6 +173,23 @@ def _series_or_false(df: pd.DataFrame, column: str) -> pd.Series:
     return df[column] if column in df.columns else pd.Series(False, index=df.index)
 
 
+def _latest_ranking_snapshot(ranking_history: pd.DataFrame) -> pd.DataFrame:
+    required = {"author_account_id", "ranked_at"}
+    if ranking_history.empty or not required.issubset(ranking_history.columns):
+        return pd.DataFrame(columns=RANKING_HISTORY_COLUMNS)
+
+    snapshot = ranking_history.copy()
+    snapshot["ranked_at"] = pd.to_datetime(snapshot["ranked_at"], errors="coerce")
+    snapshot = snapshot.dropna(subset=["ranked_at"]).copy()
+    if snapshot.empty:
+        return pd.DataFrame(columns=RANKING_HISTORY_COLUMNS)
+    return (
+        snapshot.sort_values("ranked_at", ascending=False)
+        .drop_duplicates("author_account_id")
+        .reset_index(drop=True)
+    )
+
+
 def _render_equity_curve(trades: pd.DataFrame, title: str) -> None:
     if trades.empty:
         st.info("No trade data is available.")
@@ -299,6 +316,21 @@ def render_discovery_view(
         st.info("Refresh datasets first so the workbench has posts to analyze.")
         return
 
+    candidate_posts = posts.loc[
+        (posts["source_platform"] == "X")
+        & posts["mentions_trump"]
+        & (~posts["author_is_trump"])
+    ]
+    ranking_columns_present = {"author_account_id", "ranked_at"}.issubset(ranking_history.columns)
+    if (not candidate_posts.empty or not overrides.empty) and not ranking_columns_present:
+        tracked_accounts, ranking_history = _rebuild_discovery_state(
+            store,
+            discovery_service,
+            posts,
+            posts["post_timestamp"].max(),
+        )
+        overrides = discovery_service.normalize_manual_overrides(store.read_frame("manual_account_overrides"))
+
     active_accounts = discovery_service.current_active_accounts(
         tracked_accounts,
         as_of=posts["post_timestamp"].max(),
@@ -321,7 +353,7 @@ def render_discovery_view(
             hide_index=True,
         )
 
-    latest_rankings = ranking_history.sort_values("ranked_at", ascending=False).drop_duplicates("author_account_id")
+    latest_rankings = _latest_ranking_snapshot(ranking_history)
     if not latest_rankings.empty:
         st.markdown("**Latest ranking snapshot**")
         keep = [
@@ -384,6 +416,8 @@ def render_discovery_view(
             _rebuild_discovery_state(store, discovery_service, posts, posts["post_timestamp"].max())
             st.success(f"Saved {action} override for @{selected_row['author_handle']}.")
             st.rerun()
+    else:
+        st.info("No discovery ranking snapshot is available yet. Add or refresh X mention data to populate this view.")
 
     if not overrides.empty:
         st.markdown("**Override history**")
@@ -401,7 +435,7 @@ def render_discovery_view(
             st.success("Removed override.")
             st.rerun()
 
-    if not ranking_history.empty:
+    if not latest_rankings.empty:
         chart_data = latest_rankings.head(15).sort_values("discovery_score")
         fig = go.Figure(
             go.Bar(

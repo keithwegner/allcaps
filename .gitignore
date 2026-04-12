@@ -1,5 +1,8 @@
 .DS_Store
 .cache/
+.coverage
+.coverage.*
+htmlcov/
 .pytest_cache/
 .venv/
 .workbench/

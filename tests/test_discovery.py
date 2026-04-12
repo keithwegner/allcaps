@@ -4,6 +4,7 @@ import unittest
 
 import pandas as pd
 
+from trump_workbench.contracts import RANKING_HISTORY_COLUMNS, TRACKED_ACCOUNT_COLUMNS
 from trump_workbench.discovery import DiscoveryService
 
 
@@ -78,6 +79,77 @@ class DiscoveryTests(unittest.TestCase):
         )
         active = self.service.current_active_accounts(tracked, as_of=pd.Timestamp("2025-02-05"))
         self.assertNotIn("acct-a", active["account_id"].astype(str).tolist())
+
+    def test_normalize_and_remove_manual_overrides(self) -> None:
+        raw = pd.DataFrame(
+            [
+                {
+                    "account_id": "acct-a",
+                    "handle": "macroa",
+                    "display_name": "Macro A",
+                    "action": "PIN",
+                    "effective_from": "2025-02-03",
+                    "created_at": "2025-02-01T10:00:00Z",
+                },
+                {
+                    "account_id": "acct-b",
+                    "handle": "policyb",
+                    "display_name": "Policy B",
+                    "action": "ignore",
+                    "effective_from": "2025-02-03",
+                    "created_at": "2025-02-01T10:00:00Z",
+                },
+            ],
+        )
+
+        normalized = self.service.normalize_manual_overrides(raw)
+        self.assertEqual(len(normalized), 1)
+        self.assertTrue(bool(normalized.iloc[0]["override_id"]))
+
+        remaining = self.service.remove_manual_override(normalized, normalized.iloc[0]["override_id"])
+        self.assertTrue(remaining.empty)
+        self.assertTrue(self.service.remove_manual_override(pd.DataFrame(), "missing").empty)
+        self.assertTrue(self.service.overrides_in_effect(pd.DataFrame(), pd.Timestamp("2025-02-03")).empty)
+
+    def test_refresh_accounts_handles_empty_posts_and_pin_without_history(self) -> None:
+        overrides = self.service.add_manual_override(
+            overrides=pd.DataFrame(),
+            account_id="acct-z",
+            handle="ghost",
+            display_name="Ghost Account",
+            action="pin",
+            effective_from=pd.Timestamp("2025-02-07"),
+        )
+
+        tracked, ranking_history = self.service.refresh_accounts(
+            posts=self.posts.iloc[0:0].copy(),
+            existing_accounts=pd.DataFrame(),
+            as_of=pd.Timestamp("2025-02-07", tz="America/New_York"),
+            manual_overrides=overrides,
+            auto_include_top_n=1,
+        )
+
+        self.assertEqual(tracked.iloc[0]["status"], "pinned")
+        self.assertEqual(int(tracked.iloc[0]["mention_count"]), 0)
+        self.assertEqual(int(ranking_history.iloc[0]["discovery_rank"]), -1)
+        self.assertTrue(self.service.current_active_accounts(pd.DataFrame(), as_of=pd.Timestamp("2025-02-07")).empty)
+
+    def test_rank_candidates_returns_empty_for_non_matching_inputs(self) -> None:
+        self.assertTrue(self.service.rank_candidates(pd.DataFrame()).empty)
+
+        non_candidates = self.posts.copy()
+        non_candidates["mentions_trump"] = False
+        self.assertTrue(self.service.rank_candidates(non_candidates).empty)
+
+    def test_refresh_accounts_returns_stable_empty_schemas(self) -> None:
+        tracked, ranking_history = self.service.refresh_accounts(
+            posts=pd.DataFrame(),
+            existing_accounts=pd.DataFrame(),
+            as_of=pd.Timestamp("2025-02-07", tz="America/New_York"),
+        )
+
+        self.assertListEqual(list(tracked.columns), TRACKED_ACCOUNT_COLUMNS)
+        self.assertListEqual(list(ranking_history.columns), RANKING_HISTORY_COLUMNS)
 
 
 if __name__ == "__main__":
