@@ -1,0 +1,3 @@
+timestamp,text,url,is_retweet,author_handle,author_name,author_id,mentions_trump,replies_count,reblogs_count,favourites_count
+2025-02-03T10:15:00-05:00,Trump comments are moving market expectations again,https://x.com/example/status/2234567890,false,macrowatcher,Macro Watcher,macro-1,true,12,55,240
+2025-02-03T15:10:00-05:00,Investors are reacting to Trump's tariff rhetoric ahead of tomorrow's session,https://x.com/example/status/2234567891,false,policyalpha,Policy Alpha,policy-7,true,9,42,180

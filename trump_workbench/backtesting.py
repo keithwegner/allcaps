@@ -1,0 +1,257 @@
+from __future__ import annotations
+
+import hashlib
+from collections import Counter
+from dataclasses import asdict
+from datetime import datetime
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from .contracts import BacktestRun, LinearModelArtifact, ModelRunConfig
+from .modeling import ModelService
+
+
+def compute_metrics(returns: pd.Series, positions: pd.Series) -> dict[str, float]:
+    returns = returns.fillna(0.0)
+    positions = positions.fillna(0.0)
+    if returns.empty:
+        return {
+            "total_return": 0.0,
+            "annualized_return": 0.0,
+            "annualized_volatility": 0.0,
+            "sharpe": 0.0,
+            "sortino": 0.0,
+            "max_drawdown": 0.0,
+            "win_rate": 0.0,
+            "exposure": 0.0,
+            "trade_count": 0.0,
+            "robust_score": 0.0,
+        }
+    equity = (1.0 + returns).cumprod()
+    total_return = float(equity.iloc[-1] - 1.0)
+    avg = float(returns.mean())
+    std = float(returns.std(ddof=0))
+    downside = returns.where(returns < 0.0, 0.0)
+    downside_std = float(downside.std(ddof=0))
+    annualized_return = float((1.0 + avg) ** 252 - 1.0) if avg > -1.0 else -1.0
+    annualized_volatility = float(std * np.sqrt(252.0))
+    sharpe = float(avg / std * np.sqrt(252.0)) if std > 0 else 0.0
+    sortino = float(avg / downside_std * np.sqrt(252.0)) if downside_std > 0 else sharpe
+    drawdown = equity / equity.cummax() - 1.0
+    max_drawdown = float(drawdown.min()) if not drawdown.empty else 0.0
+    trades = positions > 0
+    trade_returns = returns.loc[trades]
+    win_rate = float((trade_returns > 0).mean()) if not trade_returns.empty else 0.0
+    exposure = float(positions.mean()) if not positions.empty else 0.0
+    robust_score = float(sharpe + 0.5 * sortino + total_return * 4.0 - abs(max_drawdown) * 6.0)
+    return {
+        "total_return": total_return,
+        "annualized_return": annualized_return,
+        "annualized_volatility": annualized_volatility,
+        "sharpe": sharpe,
+        "sortino": sortino,
+        "max_drawdown": max_drawdown,
+        "win_rate": win_rate,
+        "exposure": exposure,
+        "trade_count": float(int(trades.sum())),
+        "robust_score": robust_score,
+    }
+
+
+def simulate_long_flat(
+    predictions: pd.DataFrame,
+    threshold: float,
+    min_post_count: int,
+    transaction_cost_bps: float,
+    account_weight: float,
+) -> tuple[pd.DataFrame, dict[str, float]]:
+    trades = predictions.copy()
+    trades = trades.dropna(subset=["next_session_open", "next_session_close"]).copy()
+    trades["trade_taken"] = (
+        (trades["expected_return_score"] > threshold)
+        & (trades["post_count"] >= min_post_count)
+        & trades["target_available"].fillna(False)
+    )
+    trades["position"] = trades["trade_taken"].astype(float)
+    trades["gross_return"] = (trades["next_session_close"] / trades["next_session_open"] - 1.0).fillna(0.0)
+    round_trip_cost = (transaction_cost_bps / 10000.0) * 2.0
+    trades["net_return"] = np.where(trades["trade_taken"], trades["gross_return"] - round_trip_cost, 0.0)
+    trades["benchmark_return"] = trades["gross_return"].fillna(0.0)
+    trades["equity_curve"] = (1.0 + trades["net_return"]).cumprod()
+    trades["threshold"] = threshold
+    trades["min_post_count"] = min_post_count
+    trades["account_weight"] = account_weight
+    metrics = compute_metrics(trades["net_return"], trades["position"])
+    return trades.reset_index(drop=True), metrics
+
+
+class BacktestService:
+    def __init__(self, model_service: ModelService) -> None:
+        self.model_service = model_service
+
+    def run_walk_forward(
+        self,
+        run_config: ModelRunConfig,
+        feature_rows: pd.DataFrame,
+    ) -> tuple[BacktestRun, dict[str, Any]]:
+        usable = feature_rows.copy()
+        if run_config.start_date:
+            usable = usable.loc[usable["signal_session_date"] >= pd.Timestamp(run_config.start_date)]
+        if run_config.end_date:
+            usable = usable.loc[usable["signal_session_date"] <= pd.Timestamp(run_config.end_date)]
+        usable = usable.loc[usable["target_available"]].sort_values("signal_session_date").reset_index(drop=True)
+        if usable.empty:
+            raise RuntimeError("No feature rows with targets are available for walk-forward backtesting.")
+
+        total_needed = run_config.train_window + run_config.validation_window + run_config.test_window
+        if len(usable) < total_needed:
+            train_window = max(20, int(len(usable) * 0.5))
+            validation_window = max(10, int(len(usable) * 0.25))
+            test_window = max(10, len(usable) - train_window - validation_window)
+        else:
+            train_window = run_config.train_window
+            validation_window = run_config.validation_window
+            test_window = run_config.test_window
+
+        all_test_trades: list[pd.DataFrame] = []
+        window_rows: list[dict[str, Any]] = []
+        selected_thresholds: list[float] = []
+        selected_min_posts: list[int] = []
+        selected_weights: list[float] = []
+        final_importance = pd.DataFrame()
+
+        last_start = len(usable) - (train_window + validation_window + test_window)
+        starts = list(range(0, max(last_start, 0) + 1, max(run_config.step_size, 1)))
+        if not starts:
+            starts = [0]
+
+        for window_id, start in enumerate(starts, start=1):
+            train = usable.iloc[start : start + train_window].copy()
+            validation = usable.iloc[start + train_window : start + train_window + validation_window].copy()
+            test = usable.iloc[
+                start + train_window + validation_window : start + train_window + validation_window + test_window
+            ].copy()
+            if train.empty or validation.empty or test.empty:
+                continue
+
+            best_params: dict[str, Any] | None = None
+            best_score = -np.inf
+            for account_weight in run_config.account_weight_grid:
+                train_weighted = self._apply_account_weight(train, account_weight)
+                validation_weighted = self._apply_account_weight(validation, account_weight)
+                artifact, _ = self.model_service.train(
+                    run_config=run_config,
+                    feature_rows=train_weighted,
+                    model_version=f"{run_config.run_name}-window-{window_id}",
+                )
+                validation_predictions = self.model_service.predict(artifact, validation_weighted)
+                for threshold in run_config.threshold_grid:
+                    for min_posts in run_config.minimum_signal_grid:
+                        _, metrics = simulate_long_flat(
+                            validation_predictions,
+                            threshold=threshold,
+                            min_post_count=min_posts,
+                            transaction_cost_bps=run_config.transaction_cost_bps,
+                            account_weight=account_weight,
+                        )
+                        if metrics["robust_score"] > best_score:
+                            best_score = metrics["robust_score"]
+                            best_params = {
+                                "threshold": float(threshold),
+                                "min_post_count": int(min_posts),
+                                "account_weight": float(account_weight),
+                            }
+
+            if best_params is None:
+                continue
+
+            selected_thresholds.append(best_params["threshold"])
+            selected_min_posts.append(best_params["min_post_count"])
+            selected_weights.append(best_params["account_weight"])
+
+            combined_train = pd.concat([train, validation], ignore_index=True)
+            combined_train = self._apply_account_weight(combined_train, best_params["account_weight"])
+            test_weighted = self._apply_account_weight(test, best_params["account_weight"])
+            artifact, importance = self.model_service.train(
+                run_config=run_config,
+                feature_rows=combined_train,
+                model_version=f"{run_config.run_name}-window-{window_id}-deployment",
+            )
+            final_importance = importance
+            test_predictions = self.model_service.predict(artifact, test_weighted)
+            test_trades, test_metrics = simulate_long_flat(
+                test_predictions,
+                threshold=best_params["threshold"],
+                min_post_count=best_params["min_post_count"],
+                transaction_cost_bps=run_config.transaction_cost_bps,
+                account_weight=best_params["account_weight"],
+            )
+            test_trades["window_id"] = window_id
+            all_test_trades.append(test_trades)
+            window_rows.append(
+                {
+                    "window_id": window_id,
+                    "train_start": train["signal_session_date"].min(),
+                    "train_end": train["signal_session_date"].max(),
+                    "validation_start": validation["signal_session_date"].min(),
+                    "validation_end": validation["signal_session_date"].max(),
+                    "test_start": test["signal_session_date"].min(),
+                    "test_end": test["signal_session_date"].max(),
+                    **best_params,
+                    **test_metrics,
+                },
+            )
+
+        if not all_test_trades:
+            raise RuntimeError("Walk-forward backtest could not produce any evaluation windows.")
+
+        combined_test = pd.concat(all_test_trades, ignore_index=True)
+        combined_metrics = compute_metrics(combined_test["net_return"], combined_test["position"])
+        deployment_params = {
+            "threshold": float(np.median(selected_thresholds)) if selected_thresholds else float(run_config.threshold_grid[0]),
+            "min_post_count": Counter(selected_min_posts).most_common(1)[0][0] if selected_min_posts else int(run_config.minimum_signal_grid[0]),
+            "account_weight": float(np.median(selected_weights)) if selected_weights else float(run_config.account_weight_grid[0]),
+        }
+
+        final_training_rows = self._apply_account_weight(usable, deployment_params["account_weight"])
+        final_model, final_importance = self.model_service.train(
+            run_config=run_config,
+            feature_rows=final_training_rows,
+            model_version=f"{run_config.run_name}-final",
+        )
+        full_predictions = self.model_service.predict(final_model, self._apply_account_weight(feature_rows, deployment_params["account_weight"]))
+        full_predictions["deployment_threshold"] = deployment_params["threshold"]
+        full_predictions["deployment_min_post_count"] = deployment_params["min_post_count"]
+
+        config_hash = hashlib.sha1(str(run_config.to_dict()).encode("utf-8")).hexdigest()[:12]
+        run_id = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{config_hash}"
+        run = BacktestRun(
+            run_id=run_id,
+            run_name=run_config.run_name,
+            config_hash=config_hash,
+            train_window=train_window,
+            validation_window=validation_window,
+            test_window=test_window,
+            metrics=combined_metrics,
+            selected_params=deployment_params,
+        )
+        artifacts = {
+            "run": asdict(run),
+            "config": run_config.to_dict(),
+            "trades": combined_test,
+            "predictions": full_predictions,
+            "windows": pd.DataFrame(window_rows),
+            "importance": final_importance,
+            "model_artifact": final_model.to_dict(),
+        }
+        return run, artifacts
+
+    @staticmethod
+    def _apply_account_weight(df: pd.DataFrame, account_weight: float) -> pd.DataFrame:
+        adjusted = df.copy()
+        for column in ["tracked_weighted_mentions", "tracked_weighted_engagement", "tracked_account_post_count"]:
+            if column in adjusted.columns:
+                adjusted[column] = adjusted[column] * account_weight
+        return adjusted
