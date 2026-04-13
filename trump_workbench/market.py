@@ -18,6 +18,14 @@ ASSET_UNIVERSE_COLUMNS = ["symbol", "display_name", "asset_type", "source", "is_
 ASSET_DAILY_COLUMNS = ["symbol", "trade_date", "open", "high", "low", "close", "volume"]
 ASSET_INTRADAY_COLUMNS = ["symbol", "timestamp", "open", "high", "low", "close", "volume", "interval"]
 MARKET_MANIFEST_COLUMNS = ["symbol", "dataset_kind", "row_count", "status", "start_at", "end_at", "detail"]
+CORE_ASSET_DISPLAY_NAMES = {
+    "SPY": "SPDR S&P 500 ETF Trust",
+    "QQQ": "Invesco QQQ Trust",
+    "XLK": "Technology Select Sector SPDR Fund",
+    "XLF": "Financial Select Sector SPDR Fund",
+    "XLE": "Energy Select Sector SPDR Fund",
+    "SMH": "VanEck Semiconductor ETF",
+}
 
 
 def normalize_symbols(values: list[str] | tuple[str, ...]) -> list[str]:
@@ -52,7 +60,7 @@ def build_asset_universe(watchlist_symbols: list[str] | tuple[str, ...]) -> pd.D
         rows.append(
             {
                 "symbol": symbol,
-                "display_name": symbol,
+                "display_name": CORE_ASSET_DISPLAY_NAMES.get(symbol, symbol),
                 "asset_type": "etf",
                 "source": "core_etf",
                 "is_default": True,

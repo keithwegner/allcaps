@@ -114,6 +114,10 @@ class MarketDataTests(unittest.TestCase):
         universe = build_asset_universe(["msft", "nvda"])
         self.assertIn("SPY", universe["symbol"].tolist())
         self.assertIn("MSFT", universe["symbol"].tolist())
+        self.assertEqual(
+            universe.loc[universe["symbol"] == "SPY", "display_name"].iloc[0],
+            "SPDR S&P 500 ETF Trust",
+        )
 
         def fake_download(symbol: str, *args, **kwargs) -> pd.DataFrame:
             if kwargs.get("interval"):

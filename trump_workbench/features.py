@@ -1,16 +1,104 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from .config import EASTERN
+from .config import DEFAULT_ETF_SYMBOLS, EASTERN
 from .enrichment import LLMEnrichmentService
 from .utils import business_minutes_until_close, ensure_tz_naive_date, truncate_text
 
 REGULAR_OPEN_MINUTE = 9 * 60 + 30
 REGULAR_CLOSE_MINUTE = 16 * 60
+ASSET_POST_MAPPING_COLUMNS = [
+    "asset_symbol",
+    "asset_display_name",
+    "asset_type",
+    "asset_source",
+    "session_date",
+    "post_id",
+    "post_timestamp",
+    "author_account_id",
+    "author_handle",
+    "author_display_name",
+    "author_is_trump",
+    "source_platform",
+    "cleaned_text",
+    "mentions_trump",
+    "engagement_score",
+    "sentiment_score",
+    "sentiment_label",
+    "semantic_topic",
+    "semantic_policy_bucket",
+    "semantic_market_relevance",
+    "semantic_urgency",
+    "is_active_tracked_account",
+    "tracked_discovery_score",
+    "tracked_account_status",
+    "rule_match_score",
+    "semantic_match_score",
+    "asset_relevance_score",
+    "match_reasons",
+    "match_rank",
+    "is_primary_asset",
+]
+CORE_ASSET_ALIAS_TERMS = {
+    "SPY": ["s&p 500", "s&p", "sp500", "broad market", "stock market"],
+    "QQQ": ["nasdaq", "nasdaq 100", "big tech", "tech stocks"],
+    "XLK": ["technology sector", "tech sector", "software", "hardware"],
+    "XLF": ["financial sector", "financials", "banks", "banking"],
+    "XLE": ["energy sector", "oil", "gas", "crude", "drilling"],
+    "SMH": ["semiconductor", "semiconductors", "chip", "chips", "ai chip", "ai chips"],
+}
+SEMANTIC_TOPIC_ASSETS = {
+    "markets": {"SPY", "QQQ", "XLK"},
+    "trade": {"SPY", "XLE", "XLF"},
+    "geopolitics": {"SPY", "XLE"},
+    "immigration": {"SPY"},
+    "judiciary": {"SPY"},
+    "campaign": {"SPY", "QQQ"},
+}
+SEMANTIC_POLICY_ASSETS = {
+    "economy": {"SPY", "QQQ", "XLF"},
+    "trade": {"SPY", "XLE"},
+    "foreign_policy": {"SPY", "XLE"},
+    "immigration": {"SPY"},
+    "legal": {"SPY"},
+}
+ALIAS_TOKEN_BLACKLIST = {
+    "class",
+    "common",
+    "corp",
+    "corporation",
+    "company",
+    "fund",
+    "etf",
+    "trust",
+    "select",
+    "sector",
+    "spdr",
+    "invesco",
+    "vaneck",
+}
+
+
+def _alias_terms_for_asset(symbol: str, display_name: str) -> list[str]:
+    lowered_symbol = symbol.lower()
+    terms = {lowered_symbol}
+    normalized_name = re.sub(r"[^a-z0-9&+ ]+", " ", str(display_name or "").lower()).strip()
+    if normalized_name and normalized_name != lowered_symbol:
+        terms.add(normalized_name)
+        for token in normalized_name.split():
+            if len(token) >= 4 and token not in ALIAS_TOKEN_BLACKLIST:
+                terms.add(token)
+    terms.update(CORE_ASSET_ALIAS_TERMS.get(symbol, []))
+    return sorted(term for term in terms if term)
+
+
+def _text_contains_term(text: str, term: str) -> bool:
+    return bool(re.search(rf"(?<!\\w){re.escape(term)}(?!\\w)", text))
 
 
 def map_posts_to_trade_sessions(posts: pd.DataFrame, market: pd.DataFrame) -> pd.DataFrame:
@@ -84,6 +172,186 @@ class FeatureService:
         mapped = self.enrichment_service.enrich_posts(mapped, enabled=llm_enabled)
         mapped = self._flag_tracked_posts(mapped, tracked_accounts)
         return mapped
+
+    def build_asset_post_mappings(
+        self,
+        prepared_posts: pd.DataFrame,
+        asset_universe: pd.DataFrame,
+        llm_enabled: bool,
+    ) -> pd.DataFrame:
+        if prepared_posts.empty or asset_universe.empty:
+            return pd.DataFrame(columns=ASSET_POST_MAPPING_COLUMNS)
+
+        assets = asset_universe.copy()
+        if "display_name" not in assets.columns:
+            assets["display_name"] = assets["symbol"]
+        if "asset_type" not in assets.columns:
+            assets["asset_type"] = np.where(assets["symbol"].isin(DEFAULT_ETF_SYMBOLS), "etf", "equity")
+        if "source" not in assets.columns:
+            assets["source"] = np.where(assets["symbol"].isin(DEFAULT_ETF_SYMBOLS), "core_etf", "watchlist")
+
+        asset_terms = {
+            str(row["symbol"]): _alias_terms_for_asset(str(row["symbol"]), str(row.get("display_name", row["symbol"])))
+            for _, row in assets.iterrows()
+        }
+
+        mapping_rows: list[dict[str, Any]] = []
+        for row_idx, (_, post) in enumerate(prepared_posts.iterrows(), start=1):
+            text = str(post.get("cleaned_text", "") or "").lower()
+            semantic_topic = str(post.get("semantic_topic", "") or "")
+            semantic_policy = str(post.get("semantic_policy_bucket", "") or "")
+            market_relevance = float(post.get("semantic_market_relevance", 0.0) or 0.0)
+            post_id = str(post.get("post_id", "") or f"row-{row_idx}")
+            candidates: list[dict[str, Any]] = []
+
+            for _, asset in assets.iterrows():
+                symbol = str(asset["symbol"])
+                matched_terms = [term for term in asset_terms[symbol] if _text_contains_term(text, term)]
+                rule_score = min(1.0, 0.45 + 0.15 * len(matched_terms) + (0.15 if symbol.lower() in matched_terms else 0.0)) if matched_terms else 0.0
+
+                semantic_score = 0.0
+                semantic_reasons: list[str] = []
+                if llm_enabled:
+                    if symbol in SEMANTIC_TOPIC_ASSETS.get(semantic_topic, set()):
+                        semantic_score += 0.2 + market_relevance * 0.2
+                        semantic_reasons.append(f"topic:{semantic_topic}")
+                    if symbol in SEMANTIC_POLICY_ASSETS.get(semantic_policy, set()):
+                        semantic_score += 0.15 + market_relevance * 0.15
+                        semantic_reasons.append(f"policy:{semantic_policy}")
+                    if str(asset.get("asset_type", "")) == "equity" and rule_score > 0.0:
+                        semantic_score += market_relevance * 0.2
+                    if str(asset.get("asset_type", "")) == "equity" and rule_score <= 0.0:
+                        semantic_score = 0.0
+                        semantic_reasons = []
+
+                asset_relevance_score = min(1.0, rule_score + semantic_score)
+                if asset_relevance_score <= 0.0:
+                    continue
+
+                reasons = [f"rule:{term}" for term in matched_terms]
+                reasons.extend(semantic_reasons)
+                candidates.append(
+                    {
+                        "asset_symbol": symbol,
+                        "asset_display_name": str(asset.get("display_name", symbol)),
+                        "asset_type": str(asset.get("asset_type", "")),
+                        "asset_source": str(asset.get("source", "")),
+                        "session_date": post["session_date"],
+                        "post_id": post_id,
+                        "post_timestamp": post["post_timestamp"],
+                        "author_account_id": post["author_account_id"],
+                        "author_handle": post["author_handle"],
+                        "author_display_name": post["author_display_name"],
+                        "author_is_trump": bool(post["author_is_trump"]),
+                        "source_platform": post["source_platform"],
+                        "cleaned_text": post["cleaned_text"],
+                        "mentions_trump": bool(post["mentions_trump"]),
+                        "engagement_score": float(post["engagement_score"]),
+                        "sentiment_score": float(post["sentiment_score"]),
+                        "sentiment_label": str(post["sentiment_label"]),
+                        "semantic_topic": semantic_topic,
+                        "semantic_policy_bucket": semantic_policy,
+                        "semantic_market_relevance": market_relevance,
+                        "semantic_urgency": float(post.get("semantic_urgency", 0.0) or 0.0),
+                        "is_active_tracked_account": bool(post.get("is_active_tracked_account", False)),
+                        "tracked_discovery_score": float(post.get("tracked_discovery_score", 0.0) or 0.0),
+                        "tracked_account_status": str(post.get("tracked_account_status", "none") or "none"),
+                        "rule_match_score": float(rule_score),
+                        "semantic_match_score": float(semantic_score),
+                        "asset_relevance_score": float(asset_relevance_score),
+                        "match_reasons": ", ".join(reasons),
+                    },
+                )
+
+            candidates = sorted(
+                candidates,
+                key=lambda item: (
+                    item["asset_relevance_score"],
+                    item["rule_match_score"],
+                    item["semantic_match_score"],
+                    item["asset_symbol"] not in DEFAULT_ETF_SYMBOLS,
+                ),
+                reverse=True,
+            )
+            for match_rank, candidate in enumerate(candidates, start=1):
+                candidate["match_rank"] = match_rank
+                candidate["is_primary_asset"] = match_rank == 1
+                mapping_rows.append(candidate)
+
+        return pd.DataFrame(mapping_rows, columns=ASSET_POST_MAPPING_COLUMNS)
+
+    def build_asset_session_dataset(
+        self,
+        asset_post_mappings: pd.DataFrame,
+        asset_market: pd.DataFrame,
+        feature_version: str,
+        llm_enabled: bool,
+        asset_universe: pd.DataFrame | None = None,
+    ) -> pd.DataFrame:
+        if asset_market.empty:
+            return pd.DataFrame()
+
+        mappings = asset_post_mappings.copy() if not asset_post_mappings.empty else pd.DataFrame(columns=ASSET_POST_MAPPING_COLUMNS)
+        for column in ASSET_POST_MAPPING_COLUMNS:
+            if column not in mappings.columns:
+                mappings[column] = pd.Series(dtype=object)
+        mappings["session_date"] = pd.to_datetime(mappings["session_date"], errors="coerce").dt.normalize()
+
+        market = asset_market.sort_values(["symbol", "trade_date"]).reset_index(drop=True).copy()
+        grouped_market = market.groupby("symbol", sort=False)
+        market["session_return"] = grouped_market["close"].pct_change().fillna(0.0)
+        market["prev_return_1d"] = grouped_market["close"].pct_change(1).fillna(0.0)
+        market["prev_return_3d"] = grouped_market["close"].pct_change(3).fillna(0.0)
+        market["prev_return_5d"] = grouped_market["close"].pct_change(5).fillna(0.0)
+        market["rolling_vol_5d"] = grouped_market["close"].transform(lambda series: series.pct_change().rolling(5).std().fillna(0.0))
+        market["close_ma_5"] = grouped_market["close"].transform(lambda series: series.rolling(5).mean().bfill().fillna(series))
+        market["close_vs_ma_5"] = (market["close"] / market["close_ma_5"] - 1.0).replace([np.inf, -np.inf], 0.0).fillna(0.0)
+        market["volume_ma_5"] = grouped_market["volume"].transform(lambda series: series.rolling(5).mean().bfill().fillna(series))
+        market["volume_z_5"] = (
+            (market["volume"] - market["volume_ma_5"])
+            / grouped_market["volume"].transform(lambda series: series.rolling(5).std(ddof=0)).replace(0, np.nan)
+        ).fillna(0.0)
+        market["next_session_date"] = grouped_market["trade_date"].shift(-1)
+        market["next_session_open"] = grouped_market["open"].shift(-1)
+        market["next_session_close"] = grouped_market["close"].shift(-1)
+        market["target_next_session_return"] = (market["next_session_close"] / market["next_session_open"] - 1.0).replace([np.inf, -np.inf], np.nan)
+        market["target_available"] = market["next_session_open"].notna() & market["next_session_close"].notna()
+
+        asset_lookup = (
+            asset_universe.set_index("symbol").to_dict(orient="index")
+            if asset_universe is not None and not asset_universe.empty and "symbol" in asset_universe.columns
+            else {}
+        )
+        rows: list[dict[str, Any]] = []
+        for _, session in market.iterrows():
+            symbol = str(session["symbol"])
+            session_date = pd.Timestamp(session["trade_date"])
+            group = mappings.loc[
+                (mappings["asset_symbol"] == symbol)
+                & (mappings["session_date"] == session_date)
+            ].copy()
+            group = group.sort_values("post_timestamp").reset_index(drop=True)
+            row = self._build_session_row(group, session, feature_version, llm_enabled)
+            asset_meta = asset_lookup.get(symbol, {})
+            row.update(
+                {
+                    "asset_symbol": symbol,
+                    "asset_display_name": asset_meta.get("display_name", symbol),
+                    "asset_type": asset_meta.get("asset_type", "equity"),
+                    "asset_source": asset_meta.get("source", "watchlist"),
+                    "rule_matched_post_count": int((group["rule_match_score"] > 0.0).sum()) if not group.empty else 0,
+                    "semantic_matched_post_count": int((group["semantic_match_score"] > 0.0).sum()) if not group.empty else 0,
+                    "primary_match_post_count": int(group["is_primary_asset"].fillna(False).sum()) if not group.empty else 0,
+                    "asset_relevance_score_avg": float(group["asset_relevance_score"].mean()) if not group.empty else 0.0,
+                    "asset_rule_match_score_avg": float(group["rule_match_score"].mean()) if not group.empty else 0.0,
+                    "asset_semantic_match_score_avg": float(group["semantic_match_score"].mean()) if not group.empty else 0.0,
+                },
+            )
+            rows.append(row)
+        dataset = pd.DataFrame(rows).sort_values(["asset_symbol", "signal_session_date"]).reset_index(drop=True)
+        if not dataset.empty and "target_available" in dataset.columns:
+            dataset["tradeable"] = dataset["target_available"].fillna(False)
+        return dataset
 
     def build_session_dataset(
         self,
