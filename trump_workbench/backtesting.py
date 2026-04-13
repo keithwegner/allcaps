@@ -218,6 +218,71 @@ class BacktestService:
     def __init__(self, model_service: ModelService) -> None:
         self.model_service = model_service
 
+    def build_historical_replay(
+        self,
+        run_config: ModelRunConfig,
+        feature_rows: pd.DataFrame,
+        replay_session_date: pd.Timestamp,
+        deployment_params: dict[str, Any],
+    ) -> dict[str, Any]:
+        replay_date = pd.Timestamp(replay_session_date).normalize()
+        usable = feature_rows.copy()
+        if run_config.start_date:
+            usable = usable.loc[usable["signal_session_date"] >= pd.Timestamp(run_config.start_date)]
+        if run_config.end_date:
+            usable = usable.loc[usable["signal_session_date"] <= pd.Timestamp(run_config.end_date)]
+        usable = usable.sort_values("signal_session_date").reset_index(drop=True)
+        signal_dates = pd.to_datetime(usable["signal_session_date"], errors="coerce").dt.normalize()
+        replay_rows = usable.loc[signal_dates == replay_date].copy()
+        if replay_rows.empty:
+            raise RuntimeError("The selected replay session is not available in the session feature dataset.")
+
+        history = usable.loc[(signal_dates < replay_date) & usable["target_available"].fillna(False)].copy()
+        if len(history) < 20:
+            raise RuntimeError("Historical replay needs at least 20 earlier target-available sessions to train a model.")
+
+        account_weight = float(deployment_params.get("account_weight", 1.0) or 1.0)
+        threshold = float(deployment_params.get("threshold", 0.0) or 0.0)
+        min_post_count = int(deployment_params.get("min_post_count", 1) or 1)
+
+        weighted_history = self._apply_account_weight(history, account_weight)
+        weighted_replay = self._apply_account_weight(replay_rows, account_weight)
+        artifact, importance = self.model_service.train(
+            run_config=run_config,
+            feature_rows=weighted_history,
+            model_version=f"{run_config.run_name}-replay-{replay_date:%Y%m%d}",
+        )
+        replay_prediction = self.model_service.predict(artifact, weighted_replay).reset_index(drop=True)
+        replay_prediction["deployment_threshold"] = threshold
+        replay_prediction["deployment_min_post_count"] = min_post_count
+        replay_prediction["deployment_account_weight"] = account_weight
+        replay_prediction["historical_replay"] = True
+        replay_prediction["training_rows_used"] = int(len(weighted_history))
+        replay_prediction["history_start"] = history["signal_session_date"].min()
+        replay_prediction["history_end"] = history["signal_session_date"].max()
+        replay_prediction["suggested_stance"] = np.where(
+            (replay_prediction["expected_return_score"] > threshold) & (replay_prediction["post_count"] >= min_post_count),
+            "LONG SPY NEXT SESSION",
+            "FLAT",
+        )
+        replay_prediction["future_training_leakage"] = False
+        feature_contributions = self.model_service.explain_predictions(artifact, replay_prediction)
+        return {
+            "artifact": artifact,
+            "importance": importance,
+            "prediction": replay_prediction,
+            "feature_contributions": feature_contributions,
+            "training_rows_used": int(len(weighted_history)),
+            "history_start": history["signal_session_date"].min(),
+            "history_end": history["signal_session_date"].max(),
+            "replay_session_date": replay_date,
+            "deployment_params": {
+                "threshold": threshold,
+                "min_post_count": min_post_count,
+                "account_weight": account_weight,
+            },
+        }
+
     def run_walk_forward(
         self,
         run_config: ModelRunConfig,

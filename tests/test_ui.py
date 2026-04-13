@@ -8,10 +8,14 @@ from trump_workbench.contracts import RANKING_HISTORY_COLUMNS
 from trump_workbench.contracts import LinearModelArtifact
 from trump_workbench.ui import (
     _build_benchmark_delta_table,
+    _build_replay_comparison_frame,
     _build_feature_diff_table,
     _build_metric_comparison_table,
     _build_setting_diff_table,
+    _bundle_to_run_config,
+    _eligible_replay_sessions,
     _latest_ranking_snapshot,
+    _replay_option_label,
     _summarize_run_changes,
 )
 
@@ -187,6 +191,54 @@ class UiHelperTests(unittest.TestCase):
         self.assertEqual(len(notes), 1)
         self.assertIn("LLM on vs off", notes[0])
         self.assertIn("threshold 0.001 -> 0.0025", notes[0])
+
+    def test_replay_helpers_build_session_list_config_and_summary(self) -> None:
+        feature_rows = pd.DataFrame(
+            {
+                "signal_session_date": pd.bdate_range("2025-02-03", periods=30),
+                "target_available": [True] * 29 + [False],
+                "post_count": [idx % 5 for idx in range(30)],
+            },
+        )
+        eligible = _eligible_replay_sessions(feature_rows, min_history_rows=20)
+        self.assertEqual(pd.Timestamp(eligible.iloc[0]["signal_session_date"]), pd.Timestamp("2025-03-03"))
+        label = _replay_option_label(eligible.iloc[0])
+        self.assertIn("prior train rows 20", label)
+
+        bundle = self._run_bundle(
+            "replay-run",
+            llm_enabled=True,
+            threshold=0.0025,
+            min_post_count=1,
+            total_return=0.12,
+            robust_score=1.8,
+            features=["sentiment_avg", "semantic_market_relevance_avg"],
+        )
+        config = _bundle_to_run_config(bundle)
+        self.assertTrue(config.llm_enabled)
+        self.assertEqual(config.run_name, "replay-run")
+        self.assertEqual(config.threshold_grid, (0.0, 0.001, 0.0025))
+
+        replay_row = pd.Series(
+            {
+                "expected_return_score": 0.012,
+                "prediction_confidence": 0.61,
+                "deployment_threshold": 0.0025,
+                "deployment_min_post_count": 1,
+                "training_rows_used": 55,
+                "target_next_session_return": 0.009,
+            },
+        )
+        full_history_row = pd.Series(
+            {
+                "expected_return_score": 0.02,
+                "prediction_confidence": 0.7,
+            },
+        )
+        summary = _build_replay_comparison_frame(replay_row, full_history_row)
+        self.assertIn("Replay vs full-history drift", summary["metric"].tolist())
+        drift_value = float(summary.loc[summary["metric"] == "Replay vs full-history drift", "value"].iloc[0])
+        self.assertAlmostEqual(drift_value, -0.008)
 
 
 if __name__ == "__main__":
