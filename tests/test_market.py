@@ -7,7 +7,14 @@ from unittest import mock
 
 import pandas as pd
 
-from trump_workbench.market import MarketDataService
+from trump_workbench.market import (
+    ASSET_DAILY_COLUMNS,
+    ASSET_INTRADAY_COLUMNS,
+    build_asset_universe,
+    build_watchlist_frame,
+    normalize_symbols,
+    MarketDataService,
+)
 
 
 class _FakeResponse:
@@ -89,12 +96,64 @@ class MarketDataTests(unittest.TestCase):
             result = self.service.load_spy_daily("2025-02-01", "2025-02-05")
 
         self.assertEqual(result.iloc[0]["close"], 100.5)
+        with mock.patch.dict(sys.modules, {"yfinance": yfinance}):
+            generic = self.service.load_asset_daily("QQQ", "2025-02-01", "2025-02-05")
+        self.assertEqual(generic.iloc[0]["symbol"], "QQQ")
+        self.assertEqual(generic.iloc[0]["close"], 100.5)
 
         failing_yfinance = types.ModuleType("yfinance")
         failing_yfinance.download = mock.Mock(side_effect=RuntimeError("spy failed"))
         with mock.patch.dict(sys.modules, {"yfinance": failing_yfinance}):
             with self.assertRaises(RuntimeError):
                 self.service.load_spy_daily("2025-02-01", "2025-02-05")
+
+    def test_asset_universe_and_batch_market_loaders(self) -> None:
+        self.assertEqual(normalize_symbols([" spy ", "QQQ", "spy", "", "MSFT"]), ["SPY", "QQQ", "MSFT"])
+        watchlist = build_watchlist_frame(["msft", "nvda", "SPY"])
+        self.assertEqual(watchlist["symbol"].tolist(), ["MSFT", "NVDA"])
+        universe = build_asset_universe(["msft", "nvda"])
+        self.assertIn("SPY", universe["symbol"].tolist())
+        self.assertIn("MSFT", universe["symbol"].tolist())
+
+        def fake_download(symbol: str, *args, **kwargs) -> pd.DataFrame:
+            if kwargs.get("interval"):
+                frame = pd.DataFrame(
+                    {
+                        "Open": [100.0, 101.0],
+                        "High": [101.0, 102.0],
+                        "Low": [99.5, 100.5],
+                        "Close": [100.5, 101.5],
+                        "Volume": [1000, 1100],
+                    },
+                    index=pd.to_datetime(["2025-02-03 09:30:00", "2025-02-03 09:35:00"]),
+                )
+                frame.index.name = "Datetime"
+                return frame
+            frame = pd.DataFrame(
+                {
+                    "Open": [100.0, 101.0],
+                    "High": [101.0, 102.0],
+                    "Low": [99.0, 100.0],
+                    "Close": [100.5, 101.5],
+                    "Volume": [1_000_000, 1_200_000],
+                },
+                index=pd.to_datetime(["2025-02-03", "2025-02-04"]),
+            )
+            frame.index.name = "Date"
+            return frame
+
+        yfinance = types.ModuleType("yfinance")
+        yfinance.download = mock.Mock(side_effect=fake_download)
+        with mock.patch.dict(sys.modules, {"yfinance": yfinance}):
+            daily, daily_manifest = self.service.load_assets_daily(["SPY", "MSFT"], "2025-02-01", "2025-02-05")
+            intraday, intraday_manifest = self.service.load_assets_intraday(["SPY", "MSFT"], interval="5m", lookback_days=5)
+
+        self.assertListEqual(list(daily.columns), ASSET_DAILY_COLUMNS)
+        self.assertListEqual(list(intraday.columns), ASSET_INTRADAY_COLUMNS)
+        self.assertEqual(sorted(daily["symbol"].unique().tolist()), ["MSFT", "SPY"])
+        self.assertEqual(sorted(intraday["symbol"].unique().tolist()), ["MSFT", "SPY"])
+        self.assertTrue((daily_manifest["status"] == "ok").all())
+        self.assertTrue((intraday_manifest["status"] == "ok").all())
 
     def test_load_spy_intraday_month_handles_csv_and_error_payloads(self) -> None:
         csv_text = (

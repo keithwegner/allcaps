@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
 import pandas as pd
 
+from trump_workbench.config import AppSettings
 from trump_workbench.contracts import RANKING_HISTORY_COLUMNS
 from trump_workbench.contracts import LinearModelArtifact
+from trump_workbench.storage import DuckDBStore
 from trump_workbench.ui import (
     _build_benchmark_delta_table,
     _build_replay_comparison_frame,
@@ -16,11 +20,21 @@ from trump_workbench.ui import (
     _eligible_replay_sessions,
     _latest_ranking_snapshot,
     _replay_option_label,
+    _save_watchlist,
     _summarize_run_changes,
+    _watchlist_symbols,
+    _watchlist_text_value,
 )
 
 
 class UiHelperTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.store = DuckDBStore(AppSettings(base_dir=Path(self.temp_dir.name)))
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
     @staticmethod
     def _run_bundle(
         run_id: str,
@@ -148,6 +162,15 @@ class UiHelperTests(unittest.TestCase):
         self.assertEqual(len(snapshot), 2)
         self.assertEqual(snapshot.iloc[0]["author_account_id"], "acct-a")
         self.assertEqual(snapshot.iloc[0]["discovery_score"], 11.0)
+
+    def test_watchlist_helpers_save_symbols_and_build_text(self) -> None:
+        watchlist, asset_universe = _save_watchlist(self.store, [" msft ", "spy", "nvda", "NVDA"])
+
+        self.assertEqual(watchlist["symbol"].tolist(), ["MSFT", "NVDA"])
+        self.assertIn("SPY", asset_universe["symbol"].tolist())
+        self.assertIn("QQQ", asset_universe["symbol"].tolist())
+        self.assertEqual(_watchlist_symbols(self.store), ["MSFT", "NVDA"])
+        self.assertEqual(_watchlist_text_value(self.store), "MSFT, NVDA")
 
     def test_run_comparison_helpers_build_diffs_and_summary(self) -> None:
         bundles = {

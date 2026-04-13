@@ -8,6 +8,7 @@ import pandas as pd
 APP_TITLE = "Trump Social Trading Research Workbench"
 EASTERN = "America/New_York"
 CURRENT_TERM_START = pd.Timestamp("2025-01-20")
+DEFAULT_ETF_SYMBOLS = ("SPY", "QQQ", "XLK", "XLF", "XLE", "SMH")
 
 
 @dataclass

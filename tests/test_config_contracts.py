@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from trump_workbench.config import APP_TITLE, AppSettings, CURRENT_TERM_START, EASTERN
+from trump_workbench.config import APP_TITLE, AppSettings, CURRENT_TERM_START, DEFAULT_ETF_SYMBOLS, EASTERN
 from trump_workbench.contracts import (
     BacktestRun,
     LinearModelArtifact,
@@ -36,6 +36,7 @@ class ConfigAndContractsTests(unittest.TestCase):
             self.assertEqual(settings.local_mentions_path, settings.base_dir / "data" / "influential_x_mentions.csv")
             self.assertEqual(settings.x_template_path, settings.base_dir / "templates" / "x_posts_template.csv")
             self.assertEqual(settings.mention_template_path, settings.base_dir / "templates" / "x_mentions_template.csv")
+            self.assertEqual(DEFAULT_ETF_SYMBOLS, ("SPY", "QQQ", "XLK", "XLF", "XLE", "SMH"))
 
     def test_contracts_round_trip_to_dict_helpers(self) -> None:
         post = NormalizedPost(

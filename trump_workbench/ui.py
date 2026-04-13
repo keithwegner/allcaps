@@ -11,7 +11,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from .backtesting import BacktestService
-from .config import AppSettings
+from .config import AppSettings, DEFAULT_ETF_SYMBOLS
 from .contracts import MANUAL_OVERRIDE_COLUMNS, ModelRunConfig, RANKING_HISTORY_COLUMNS
 from .discovery import DiscoveryService
 from .enrichment import LLMEnrichmentService
@@ -19,7 +19,7 @@ from .explanations import build_account_attribution, build_post_attribution
 from .experiments import ExperimentStore
 from .features import FeatureService, latest_feature_preview, map_posts_to_trade_sessions
 from .ingestion import IngestionService, TruthSocialArchiveAdapter, XCsvAdapter
-from .market import MarketDataService
+from .market import MarketDataService, build_asset_universe, build_watchlist_frame, normalize_symbols
 from .modeling import ModelService, classify_feature_family
 from .research import (
     aggregate_research_sessions,
@@ -40,6 +40,33 @@ def _parse_grid(value: str, cast: type[float] | type[int]) -> tuple[float, ...] 
     if cast is int:
         return tuple(int(part) for part in parts)
     return tuple(float(part) for part in parts)
+
+
+def _watchlist_symbols(store: DuckDBStore) -> list[str]:
+    watchlist = store.read_frame("asset_watchlist")
+    if watchlist.empty or "symbol" not in watchlist.columns:
+        return []
+    return normalize_symbols(watchlist["symbol"].astype(str).tolist())
+
+
+def _save_watchlist(store: DuckDBStore, symbols: list[str] | tuple[str, ...]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    watchlist = build_watchlist_frame(symbols)
+    asset_universe = build_asset_universe(watchlist["symbol"].tolist() if not watchlist.empty else [])
+    store.save_frame("asset_watchlist", watchlist, metadata={"row_count": int(len(watchlist))})
+    store.save_frame(
+        "asset_universe",
+        asset_universe,
+        metadata={
+            "row_count": int(len(asset_universe)),
+            "default_etfs": list(DEFAULT_ETF_SYMBOLS),
+        },
+    )
+    return watchlist, asset_universe
+
+
+def _watchlist_text_value(store: DuckDBStore) -> str:
+    symbols = _watchlist_symbols(store)
+    return ", ".join(symbols)
 
 
 def _build_adapters(
@@ -109,6 +136,20 @@ def _refresh_datasets(
     store.save_frame("sp500_daily", sp500, metadata={"row_count": int(len(sp500))})
     store.save_frame("spy_daily", spy, metadata={"row_count": int(len(spy))})
 
+    watchlist_symbols = _watchlist_symbols(store)
+    watchlist, asset_universe = _save_watchlist(store, watchlist_symbols)
+    asset_symbols = asset_universe["symbol"].astype(str).tolist() if not asset_universe.empty else list(DEFAULT_ETF_SYMBOLS)
+    asset_daily, daily_manifest = market_service.load_assets_daily(asset_symbols, start, end)
+    asset_intraday, intraday_manifest = market_service.load_assets_intraday(asset_symbols, interval="5m", lookback_days=30)
+    asset_market_manifest = pd.concat([daily_manifest, intraday_manifest], ignore_index=True)
+    store.save_frame("asset_daily", asset_daily, metadata={"row_count": int(len(asset_daily)), "symbols": asset_symbols})
+    store.save_frame(
+        "asset_intraday",
+        asset_intraday,
+        metadata={"row_count": int(len(asset_intraday)), "symbols": asset_symbols, "interval": "5m", "lookback_days": 30},
+    )
+    store.save_frame("asset_market_manifest", asset_market_manifest, metadata={"row_count": int(len(asset_market_manifest))})
+
     as_of = posts["post_timestamp"].max() if not posts.empty else pd.Timestamp.now(tz=settings.timezone)
     tracked_accounts, ranking_history = _rebuild_discovery_state(store, discovery_service, posts, as_of)
     return {
@@ -116,6 +157,11 @@ def _refresh_datasets(
         "source_manifest": source_manifest,
         "sp500": sp500,
         "spy": spy,
+        "asset_watchlist": watchlist,
+        "asset_universe": asset_universe,
+        "asset_daily": asset_daily,
+        "asset_intraday": asset_intraday,
+        "asset_market_manifest": asset_market_manifest,
         "tracked_accounts": tracked_accounts,
     }
 
@@ -127,7 +173,15 @@ def _ensure_bootstrap(
     market_service: MarketDataService,
     discovery_service: DiscoveryService,
 ) -> None:
-    if store.read_frame("normalized_posts").empty or store.read_frame("sp500_daily").empty or store.read_frame("spy_daily").empty:
+    if store.read_frame("asset_watchlist").empty and store.read_frame("asset_universe").empty:
+        _save_watchlist(store, [])
+    if (
+        store.read_frame("normalized_posts").empty
+        or store.read_frame("sp500_daily").empty
+        or store.read_frame("spy_daily").empty
+        or store.read_frame("asset_daily").empty
+        or store.read_frame("asset_intraday").empty
+    ):
         _refresh_datasets(
             settings=settings,
             store=store,
@@ -237,6 +291,28 @@ def render_datasets_view(
     st.subheader("Datasets")
     st.caption("Refresh historical sources, store normalized datasets, and inspect the local DuckDB + Parquet catalog.")
 
+    st.markdown("**Asset universe**")
+    st.caption("Manage a small stock watchlist here. The ETF starter set is always included: `SPY`, `QQQ`, `XLK`, `XLF`, `XLE`, `SMH`.")
+    default_text = _watchlist_text_value(store)
+    watchlist_input = st.text_area(
+        "Watchlist symbols",
+        value=st.session_state.get("watchlist_symbols", default_text),
+        help="Enter a comma-separated list of stock tickers such as `AAPL, TSLA, NVDA`.",
+    )
+    st.session_state["watchlist_symbols"] = watchlist_input
+    watchlist_cols = st.columns(2)
+    if watchlist_cols[0].button("Save watchlist", use_container_width=True):
+        symbols = normalize_symbols([part.strip() for part in watchlist_input.replace("\n", ",").split(",") if part.strip()])
+        watchlist, asset_universe = _save_watchlist(store, symbols)
+        st.session_state["watchlist_symbols"] = ", ".join(watchlist["symbol"].tolist()) if not watchlist.empty else ""
+        st.success(f"Saved {len(watchlist):,} watchlist symbols and {len(asset_universe):,} total tracked assets.")
+        st.rerun()
+    if watchlist_cols[1].button("Reset watchlist", use_container_width=True):
+        _save_watchlist(store, [])
+        st.session_state["watchlist_symbols"] = ""
+        st.success("Reset the manual watchlist to the ETF starter set only.")
+        st.rerun()
+
     remote_url = st.text_input(
         "Remote X / mentions CSV URL",
         key="remote_x_url",
@@ -260,7 +336,8 @@ def render_datasets_view(
                 uploaded_files=uploaded_files or [],
             )
         st.success(
-            f"Refreshed {len(summary['posts']):,} normalized posts and {len(summary['tracked_accounts']):,} tracked account versions.",
+            f"Refreshed {len(summary['posts']):,} normalized posts, {len(summary['asset_daily']):,} daily market rows, "
+            f"and {len(summary['tracked_accounts']):,} tracked account versions.",
         )
     if action_cols[1].button("Incremental refresh", use_container_width=True):
         with st.spinner("Polling sources for new data..."):
@@ -274,7 +351,10 @@ def render_datasets_view(
                 uploaded_files=uploaded_files or [],
                 incremental=True,
             )
-        st.success(f"Incremental refresh complete. Total posts stored: {len(summary['posts']):,}.")
+        st.success(
+            f"Incremental refresh complete. Total posts stored: {len(summary['posts']):,}. "
+            f"Asset intraday rows stored: {len(summary['asset_intraday']):,}.",
+        )
 
     registry = store.dataset_registry()
     if not registry.empty:
@@ -287,6 +367,26 @@ def render_datasets_view(
     if not source_manifest.empty:
         st.markdown("**Source Manifest**")
         st.dataframe(source_manifest, use_container_width=True, hide_index=True)
+
+    asset_universe = store.read_frame("asset_universe")
+    if not asset_universe.empty:
+        st.markdown("**Tracked asset universe**")
+        st.dataframe(asset_universe, use_container_width=True, hide_index=True)
+
+    asset_market_manifest = store.read_frame("asset_market_manifest")
+    if not asset_market_manifest.empty:
+        st.markdown("**Asset market manifest**")
+        st.dataframe(asset_market_manifest, use_container_width=True, hide_index=True)
+
+    asset_daily = store.read_frame("asset_daily")
+    if not asset_daily.empty:
+        st.markdown("**Daily asset market sample**")
+        st.dataframe(asset_daily.tail(20), use_container_width=True, hide_index=True)
+
+    asset_intraday = store.read_frame("asset_intraday")
+    if not asset_intraday.empty:
+        st.markdown("**Intraday asset market sample**")
+        st.dataframe(asset_intraday.tail(20), use_container_width=True, hide_index=True)
 
     posts = store.read_frame("normalized_posts")
     if not posts.empty:
