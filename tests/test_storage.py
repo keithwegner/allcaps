@@ -52,6 +52,7 @@ class StorageTests(unittest.TestCase):
         self.store.save_run_record(
             run_id="run-1",
             run_name="coverage test",
+            target_asset="SPY",
             config_hash="hash-1",
             metrics={"sharpe": 1.2},
             selected_params={"threshold": 0.001},
@@ -67,6 +68,7 @@ class StorageTests(unittest.TestCase):
 
         records = self.store.list_run_records()
         self.assertEqual(len(records), 1)
+        self.assertEqual(records.iloc[0]["target_asset"], "SPY")
         self.assertEqual(records.iloc[0]["metrics_json"]["sharpe"], 1.2)
         self.assertEqual(records.iloc[0]["selected_params_json"]["threshold"], 0.001)
 

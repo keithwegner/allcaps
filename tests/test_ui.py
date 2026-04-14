@@ -39,6 +39,7 @@ class UiHelperTests(unittest.TestCase):
     def _run_bundle(
         run_id: str,
         *,
+        target_asset: str = "SPY",
         llm_enabled: bool,
         threshold: float,
         min_post_count: int,
@@ -47,8 +48,9 @@ class UiHelperTests(unittest.TestCase):
         features: list[str],
     ) -> dict[str, object]:
         return {
-            "run": {"run_id": run_id, "run_name": run_id},
+            "run": {"run_id": run_id, "run_name": run_id, "target_asset": target_asset},
             "config": {
+                "target_asset": target_asset,
                 "feature_version": "v1",
                 "llm_enabled": llm_enabled,
                 "train_window": 90,
@@ -83,13 +85,18 @@ class UiHelperTests(unittest.TestCase):
                 stds=[1.0 for _ in features],
                 residual_std=0.3,
                 train_rows=100,
-                metadata={"llm_enabled": llm_enabled},
+                metadata={"llm_enabled": llm_enabled, "target_asset": target_asset},
             ),
             "benchmarks": pd.DataFrame(
                 [
-                    {"benchmark_name": "strategy", "total_return": total_return, "robust_score": robust_score},
-                    {"benchmark_name": "always_long", "total_return": total_return - 0.02, "robust_score": robust_score - 0.1},
-                    {"benchmark_name": "trump_only", "total_return": total_return - 0.01, "robust_score": robust_score - 0.05},
+                    {"benchmark_name": "strategy", "target_asset": target_asset, "total_return": total_return, "robust_score": robust_score},
+                    {
+                        "benchmark_name": f"always_long_{target_asset.lower()}",
+                        "target_asset": target_asset,
+                        "total_return": total_return - 0.02,
+                        "robust_score": robust_score - 0.1,
+                    },
+                    {"benchmark_name": "trump_only", "target_asset": target_asset, "total_return": total_return - 0.01, "robust_score": robust_score - 0.05},
                 ],
             ),
         }
@@ -176,6 +183,7 @@ class UiHelperTests(unittest.TestCase):
         bundles = {
             "base-run": self._run_bundle(
                 "base-run",
+                target_asset="SPY",
                 llm_enabled=False,
                 threshold=0.001,
                 min_post_count=2,
@@ -185,6 +193,7 @@ class UiHelperTests(unittest.TestCase):
             ),
             "alt-run": self._run_bundle(
                 "alt-run",
+                target_asset="QQQ",
                 llm_enabled=True,
                 threshold=0.0025,
                 min_post_count=1,
@@ -201,17 +210,22 @@ class UiHelperTests(unittest.TestCase):
         notes = _summarize_run_changes("base-run", bundles)
 
         self.assertEqual(metric_table.iloc[0]["run_id"], "alt-run")
+        self.assertEqual(metric_table.iloc[0]["target_asset"], "QQQ")
         self.assertAlmostEqual(float(metric_table.iloc[0]["delta_robust_score_vs_base"]), 0.4)
         self.assertIn("deploy_threshold", setting_diff["setting"].tolist())
         self.assertIn("llm_enabled", setting_diff["setting"].tolist())
+        self.assertIn("target_asset", setting_diff["setting"].tolist())
         alt_feature_row = feature_diff.loc[feature_diff["run_id"] == "alt-run"].iloc[0]
+        self.assertEqual(alt_feature_row["target_asset"], "QQQ")
         self.assertEqual(int(alt_feature_row["unique_vs_base_count"]), 1)
         self.assertIn("semantic_market_relevance_avg", str(alt_feature_row["unique_vs_base"]))
         strategy_row = benchmark_diff.loc[
             (benchmark_diff["run_id"] == "alt-run") & (benchmark_diff["benchmark_name"] == "strategy")
         ].iloc[0]
+        self.assertEqual(strategy_row["target_asset"], "QQQ")
         self.assertAlmostEqual(float(strategy_row["delta_total_return_vs_base"]), 0.04)
         self.assertEqual(len(notes), 1)
+        self.assertIn("target asset SPY -> QQQ", notes[0])
         self.assertIn("LLM on vs off", notes[0])
         self.assertIn("threshold 0.001 -> 0.0025", notes[0])
 
@@ -230,6 +244,7 @@ class UiHelperTests(unittest.TestCase):
 
         bundle = self._run_bundle(
             "replay-run",
+            target_asset="QQQ",
             llm_enabled=True,
             threshold=0.0025,
             min_post_count=1,
@@ -240,6 +255,7 @@ class UiHelperTests(unittest.TestCase):
         config = _bundle_to_run_config(bundle)
         self.assertTrue(config.llm_enabled)
         self.assertEqual(config.run_name, "replay-run")
+        self.assertEqual(config.target_asset, "QQQ")
         self.assertEqual(config.threshold_grid, (0.0, 0.001, 0.0025))
 
         replay_row = pd.Series(

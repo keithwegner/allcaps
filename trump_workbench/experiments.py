@@ -69,6 +69,7 @@ class ExperimentStore:
         self.store.save_run_record(
             run_id=run.run_id,
             run_name=run.run_name,
+            target_asset=run.target_asset,
             config_hash=run.config_hash,
             metrics=run.metrics,
             selected_params=run.selected_params,
@@ -129,21 +130,37 @@ class ExperimentStore:
             "leakage_audit": self._read_optional_json(Path(record["summary_path"]).parent / "leakage_audit.json"),
         }
 
-    def load_latest_model_artifact(self) -> tuple[LinearModelArtifact, dict[str, Any]] | None:
+    def load_latest_model_artifact(self, target_asset: str | None = "SPY") -> tuple[LinearModelArtifact, dict[str, Any]] | None:
         runs = self.list_runs()
         if runs.empty:
             return None
-        row = runs.iloc[0]
-        artifact = LinearModelArtifact.from_dict(self._read_json(Path(row["model_path"])))
-        return artifact, row["selected_params_json"]
+        normalized_target = str(target_asset).upper() if target_asset else None
+        for _, row in runs.iterrows():
+            summary_payload = self._read_json(Path(row["summary_path"]))
+            config = summary_payload.get("config", {}) or {}
+            run_meta = summary_payload.get("run", {}) or {}
+            row_target = str(
+                config.get("target_asset")
+                or run_meta.get("target_asset")
+                or row.get("target_asset")
+                or "SPY",
+            ).upper()
+            if normalized_target is not None and row_target != normalized_target:
+                continue
+            artifact = LinearModelArtifact.from_dict(self._read_json(Path(row["model_path"])))
+            return artifact, row["selected_params_json"]
+        return None
 
     def save_prediction_snapshots(self, snapshots: pd.DataFrame) -> None:
         if snapshots.empty:
             return
+        normalized = snapshots.copy()
+        if "target_asset" not in normalized.columns:
+            normalized["target_asset"] = "SPY"
         self.store.append_frame(
             "prediction_snapshots",
-            snapshots,
-            dedupe_on=["signal_session_date", "generated_at"],
+            normalized,
+            dedupe_on=["signal_session_date", "generated_at", "target_asset"],
             metadata={"dataset": "prediction_snapshots"},
         )
 

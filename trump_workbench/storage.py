@@ -42,6 +42,7 @@ class DuckDBStore:
                 create table if not exists experiment_runs (
                     run_id varchar primary key,
                     run_name varchar,
+                    target_asset varchar,
                     created_at timestamp,
                     config_hash varchar,
                     metrics_json varchar,
@@ -55,6 +56,7 @@ class DuckDBStore:
                 )
                 """,
             )
+            conn.execute("alter table experiment_runs add column if not exists target_asset varchar")
 
     def dataset_path(self, dataset_name: str) -> Path:
         return self.settings.lake_dir / f"{dataset_name}.parquet"
@@ -134,6 +136,7 @@ class DuckDBStore:
         self,
         run_id: str,
         run_name: str,
+        target_asset: str,
         config_hash: str,
         metrics: dict[str, Any],
         selected_params: dict[str, Any],
@@ -144,13 +147,14 @@ class DuckDBStore:
             conn.execute(
                 """
                 insert into experiment_runs
-                (run_id, run_name, created_at, config_hash, metrics_json, selected_params_json,
+                (run_id, run_name, target_asset, created_at, config_hash, metrics_json, selected_params_json,
                  summary_path, trades_path, predictions_path, windows_path, importance_path, model_path)
-                values (?, ?, current_timestamp, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                values (?, ?, ?, current_timestamp, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     run_id,
                     run_name,
+                    target_asset,
                     config_hash,
                     json.dumps(metrics, default=str),
                     json.dumps(selected_params, default=str),

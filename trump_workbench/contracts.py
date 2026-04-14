@@ -163,6 +163,7 @@ class SessionFeatureRow:
 @dataclass(frozen=True)
 class ModelRunConfig:
     run_name: str
+    target_asset: str = "SPY"
     feature_version: str = "v1"
     llm_enabled: bool = False
     train_window: int = 90
@@ -190,6 +191,7 @@ class ModelRunConfig:
 class PredictionSnapshot:
     signal_session_date: pd.Timestamp
     next_session_date: Optional[pd.Timestamp]
+    target_asset: str
     expected_return_score: float
     feature_version: str
     model_version: str
@@ -205,6 +207,7 @@ class PredictionSnapshot:
 class BacktestRun:
     run_id: str
     run_name: str
+    target_asset: str
     config_hash: str
     train_window: int
     validation_window: int

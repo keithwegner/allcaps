@@ -59,6 +59,21 @@ class PipelineTests(unittest.TestCase):
             },
         )
 
+    def _build_asset_market(self, symbols: list[str]) -> pd.DataFrame:
+        base = self._build_market()
+        frames: list[pd.DataFrame] = []
+        for offset, symbol in enumerate(symbols, start=1):
+            frame = base.copy()
+            scale = 1.0 + offset * 0.08
+            frame["symbol"] = symbol
+            frame["open"] = frame["open"] * scale
+            frame["high"] = frame["high"] * scale
+            frame["low"] = frame["low"] * scale
+            frame["close"] = frame["close"] * scale
+            frame["volume"] = frame["volume"] + offset * 10_000
+            frames.append(frame)
+        return pd.concat(frames, ignore_index=True)
+
     def _build_x_csv(self) -> bytes:
         rows = ["timestamp,text,url,is_retweet,author_handle,author_name,author_id,mentions_trump,replies_count,reblogs_count,favourites_count"]
         dates = pd.bdate_range("2025-02-03", periods=140)
@@ -111,6 +126,7 @@ class PipelineTests(unittest.TestCase):
 
         config = ModelRunConfig(
             run_name="unit-test-run",
+            target_asset="SPY",
             llm_enabled=True,
             train_window=60,
             validation_window=20,
@@ -122,9 +138,10 @@ class PipelineTests(unittest.TestCase):
         )
         run, artifacts = self.backtests.run_walk_forward(config, first_dataset)
         self.assertGreater(len(artifacts["trades"]), 0)
+        self.assertEqual(run.target_asset, "SPY")
         self.assertIn("robust_score", run.metrics)
         self.assertTrue(artifacts["leakage_audit"]["overall_pass"])
-        self.assertIn("always_long", artifacts["benchmarks"]["benchmark_name"].tolist())
+        self.assertIn("always_long_spy", artifacts["benchmarks"]["benchmark_name"].tolist())
         self.assertFalse(artifacts["feature_contributions"].empty)
 
         post_attribution = build_post_attribution(prepared_posts)
@@ -169,6 +186,100 @@ class PipelineTests(unittest.TestCase):
         )
         self.assertFalse(replay_bundle["feature_contributions"].empty)
         self.assertFalse(bool(replay_prediction["future_training_leakage"]))
+
+    def test_asset_target_pipeline_supports_non_spy_runs(self) -> None:
+        adapter = XCsvAdapter(
+            settings=self.settings,
+            name="synthetic-x",
+            provenance="unit-test",
+            raw_bytes=self._build_x_csv(),
+        )
+        posts, _ = adapter.fetch_history()
+        posts["raw_text"] = [
+            "Trump says Nasdaq and big tech are leading the market higher." if idx % 2 == 0 else
+            "Trump trade pressure is weighing on energy and financials."
+            for idx in range(len(posts))
+        ]
+        posts["cleaned_text"] = posts["raw_text"]
+        tracked, _ = self.discovery.refresh_accounts(posts, pd.DataFrame(), as_of=posts["post_timestamp"].max(), auto_include_top_n=2)
+        spy_market = self._build_market()
+        asset_market = self._build_asset_market(["QQQ"])
+        asset_universe = pd.DataFrame(
+            [
+                {
+                    "symbol": "QQQ",
+                    "display_name": "Invesco QQQ Trust",
+                    "asset_type": "etf",
+                    "source": "core_etf",
+                },
+            ],
+        )
+
+        prepared_posts = self.features.prepare_session_posts(posts, spy_market, tracked, llm_enabled=True)
+        asset_post_mappings = self.features.build_asset_post_mappings(
+            prepared_posts,
+            asset_universe,
+            llm_enabled=True,
+        )
+        self.assertFalse(asset_post_mappings.loc[asset_post_mappings["asset_symbol"] == "QQQ"].empty)
+
+        asset_dataset = self.features.build_asset_session_dataset(
+            asset_post_mappings=asset_post_mappings,
+            asset_market=asset_market,
+            feature_version="asset-v1",
+            llm_enabled=True,
+            asset_universe=asset_universe,
+        )
+        qqq_dataset = asset_dataset.loc[asset_dataset["asset_symbol"] == "QQQ"].copy()
+        qqq_dataset["target_asset"] = "QQQ"
+        self.assertFalse(qqq_dataset.empty)
+
+        config = ModelRunConfig(
+            run_name="qqq-target-run",
+            target_asset="QQQ",
+            feature_version="asset-v1",
+            llm_enabled=True,
+            train_window=60,
+            validation_window=20,
+            test_window=20,
+            step_size=20,
+            threshold_grid=(0.0, 0.001, 0.002),
+            minimum_signal_grid=(1, 2),
+            account_weight_grid=(0.5, 1.0),
+        )
+        run, artifacts = self.backtests.run_walk_forward(config, qqq_dataset)
+        self.assertEqual(run.target_asset, "QQQ")
+        self.assertIn("always_long_qqq", artifacts["benchmarks"]["benchmark_name"].tolist())
+        self.assertTrue((artifacts["predictions"]["target_asset"].astype(str) == "QQQ").all())
+
+        post_attribution = build_post_attribution(
+            asset_post_mappings.loc[asset_post_mappings["asset_symbol"] == "QQQ"].copy(),
+        )
+        account_attribution = build_account_attribution(post_attribution)
+        self.experiments.save_run(
+            run=run,
+            config=artifacts["config"],
+            trades=artifacts["trades"],
+            predictions=artifacts["predictions"],
+            windows=artifacts["windows"],
+            importance=artifacts["importance"],
+            model_artifact=artifacts["model_artifact"],
+            feature_contributions=artifacts["feature_contributions"],
+            post_attribution=post_attribution,
+            account_attribution=account_attribution,
+            benchmarks=artifacts["benchmarks"],
+            diagnostics=artifacts["diagnostics"],
+            benchmark_curves=artifacts["benchmark_curves"],
+            leakage_audit=artifacts["leakage_audit"],
+        )
+        loaded = self.experiments.load_run(run.run_id)
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(loaded["run"]["target_asset"], "QQQ")
+        latest_qqq = self.experiments.load_latest_model_artifact(target_asset="QQQ")
+        self.assertIsNotNone(latest_qqq)
+        assert latest_qqq is not None
+        self.assertEqual(latest_qqq[0].metadata["target_asset"], "QQQ")
 
 
 if __name__ == "__main__":
