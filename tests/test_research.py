@@ -11,6 +11,10 @@ from trump_workbench.research import (
     build_asset_comparison_frame,
     build_combined_chart,
     build_event_frame,
+    build_event_study_chart,
+    build_event_study_frame,
+    build_intraday_comparison_chart,
+    build_intraday_comparison_frame,
     build_intraday_chart,
     filter_posts,
     get_intraday_window,
@@ -57,11 +61,15 @@ class ResearchTests(unittest.TestCase):
         )
         self.asset_market = pd.DataFrame(
             {
-                "symbol": ["SPY", "SPY", "SPY", "NVDA", "NVDA", "NVDA"],
+                "symbol": ["SPY", "SPY", "SPY", "NVDA", "NVDA", "NVDA", "QQQ", "QQQ", "QQQ"],
                 "trade_date": pd.to_datetime(
-                    ["2025-02-03", "2025-02-04", "2025-02-05", "2025-02-03", "2025-02-04", "2025-02-05"],
+                    [
+                        "2025-02-03", "2025-02-04", "2025-02-05",
+                        "2025-02-03", "2025-02-04", "2025-02-05",
+                        "2025-02-03", "2025-02-04", "2025-02-05",
+                    ],
                 ),
-                "close": [100.0, 101.0, 102.0, 200.0, 210.0, 205.0],
+                "close": [100.0, 101.0, 102.0, 200.0, 210.0, 205.0, 300.0, 306.0, 309.0],
             },
         )
         self.asset_session_features = pd.DataFrame(
@@ -88,6 +96,11 @@ class ResearchTests(unittest.TestCase):
                 ).tz_convert("America/New_York"),
                 "author_handle": ["macroalpha", "macrobeta"],
                 "author_display_name": ["Macro Alpha", "Macro Beta"],
+                "reaction_anchor_ts": pd.to_datetime(
+                    ["2025-02-03 10:00-05:00", "2025-02-04 11:00-05:00"],
+                    utc=True,
+                ).tz_convert("America/New_York"),
+                "mapping_reason": ["during regular hours -> same session", "during regular hours -> same session"],
                 "asset_relevance_score": [0.8, 0.55],
                 "rule_match_score": [0.6, 0.4],
                 "semantic_match_score": [0.2, 0.15],
@@ -95,6 +108,20 @@ class ResearchTests(unittest.TestCase):
                 "is_primary_asset": [True, True],
                 "match_reasons": ["rule:nvidia, topic:markets", "rule:semiconductor, policy:economy"],
                 "cleaned_text": ["NVIDIA keeps rallying after strong AI demand.", "Semiconductor policy talk is picking up."],
+            },
+        )
+        self.asset_intraday = pd.DataFrame(
+            {
+                "symbol": ["SPY", "SPY", "SPY", "NVDA", "NVDA", "NVDA", "QQQ", "QQQ", "QQQ"],
+                "timestamp": pd.to_datetime(
+                    [
+                        "2025-02-03 09:30-05:00", "2025-02-03 09:35-05:00", "2025-02-03 09:40-05:00",
+                        "2025-02-03 09:30-05:00", "2025-02-03 09:35-05:00", "2025-02-03 09:40-05:00",
+                        "2025-02-03 09:30-05:00", "2025-02-03 09:35-05:00", "2025-02-03 09:40-05:00",
+                    ],
+                    utc=True,
+                ).tz_convert("America/New_York"),
+                "close": [100.0, 100.4, 100.8, 200.0, 202.0, 204.0, 300.0, 301.5, 303.0],
             },
         )
 
@@ -152,19 +179,21 @@ class ResearchTests(unittest.TestCase):
         comparison = build_asset_comparison_frame(
             self.asset_market,
             "NVDA",
+            benchmark_symbol="QQQ",
             date_start=pd.Timestamp("2025-02-03"),
             date_end=pd.Timestamp("2025-02-05"),
         )
         self.assertEqual(len(comparison), 3)
         self.assertAlmostEqual(float(comparison.iloc[-1]["spy_normalized_return"]), 0.02)
         self.assertAlmostEqual(float(comparison.iloc[-1]["asset_normalized_return"]), 0.025)
+        self.assertAlmostEqual(float(comparison.iloc[-1]["benchmark_normalized_return"]), 0.03)
 
         price_chart = build_asset_comparison_chart(comparison, "NVDA", mode="price")
         normalized_chart = build_asset_comparison_chart(comparison, "NVDA", mode="normalized")
         self.assertEqual(price_chart.layout.title.text, "SPY vs. NVDA price overlay")
         self.assertEqual(normalized_chart.layout.title.text, "SPY vs. NVDA normalized returns")
-        self.assertEqual(len(price_chart.data), 2)
-        self.assertEqual(len(normalized_chart.data), 2)
+        self.assertEqual(len(price_chart.data), 3)
+        self.assertEqual(len(normalized_chart.data), 3)
 
         asset_session_table = make_asset_session_table(self.asset_session_features, "NVDA")
         self.assertIn("trade_date", asset_session_table.columns)
@@ -174,6 +203,7 @@ class ResearchTests(unittest.TestCase):
         asset_mapping_table = make_asset_mapping_table(self.asset_post_mappings, "NVDA")
         self.assertIn("post_text", asset_mapping_table.columns)
         self.assertIn("match_reasons", asset_mapping_table.columns)
+        self.assertIn("reaction_anchor_et", asset_mapping_table.columns)
         self.assertEqual(asset_mapping_table.iloc[0]["asset_symbol"], "NVDA")
 
     def test_intraday_helpers(self) -> None:
@@ -197,6 +227,38 @@ class ResearchTests(unittest.TestCase):
 
         self.assertEqual(len(window), 3)
         self.assertEqual(chart.layout.title.text, "Intraday")
+
+    def test_event_study_and_intraday_comparison_helpers(self) -> None:
+        event_study = build_event_study_frame(
+            asset_market=self.asset_market,
+            asset_session_features=self.asset_session_features,
+            selected_symbol="NVDA",
+            benchmark_symbol="QQQ",
+            pre_sessions=1,
+            post_sessions=1,
+        )
+        self.assertEqual(sorted(event_study["symbol"].unique().tolist()), ["NVDA", "QQQ", "SPY"])
+        self.assertEqual(sorted(event_study["relative_session"].unique().tolist()), [-1, 0, 1])
+        event_chart = build_event_study_chart(event_study, "NVDA")
+        self.assertEqual(event_chart.layout.title.text, "SPY vs. NVDA event study")
+
+        anchor = pd.Timestamp("2025-02-03 09:35:00", tz="America/New_York")
+        intraday_comparison = build_intraday_comparison_frame(
+            intraday_frame=self.asset_intraday,
+            selected_symbol="NVDA",
+            anchor_ts=anchor,
+            before_minutes=5,
+            after_minutes=5,
+            benchmark_symbol="QQQ",
+        )
+        self.assertEqual(sorted(intraday_comparison["symbol"].unique().tolist()), ["NVDA", "QQQ", "SPY"])
+        spy_anchor = intraday_comparison.loc[
+            (intraday_comparison["symbol"] == "SPY") & (intraday_comparison["timestamp"] == anchor),
+            "normalized_return",
+        ].iloc[0]
+        self.assertAlmostEqual(float(spy_anchor), 0.0)
+        intraday_chart = build_intraday_comparison_chart(intraday_comparison, "NVDA", anchor)
+        self.assertEqual(intraday_chart.layout.title.text, "SPY vs. NVDA intraday reaction")
 
 
 if __name__ == "__main__":

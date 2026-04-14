@@ -114,6 +114,7 @@ def build_event_frame(sp500_market: pd.DataFrame, sessions: pd.DataFrame) -> pd.
 def build_asset_comparison_frame(
     asset_market: pd.DataFrame,
     selected_symbol: str,
+    benchmark_symbol: str | None = None,
     date_start: pd.Timestamp | None = None,
     date_end: pd.Timestamp | None = None,
 ) -> pd.DataFrame:
@@ -140,6 +141,16 @@ def build_asset_comparison_frame(
     comparison["asset_daily_return"] = comparison["asset_close"].pct_change().fillna(0.0)
     comparison["spy_normalized_return"] = comparison["spy_close"] / comparison["spy_close"].iloc[0] - 1.0
     comparison["asset_normalized_return"] = comparison["asset_close"] / comparison["asset_close"].iloc[0] - 1.0
+
+    benchmark = str(benchmark_symbol or "").upper()
+    if benchmark and benchmark not in {"SPY", symbol}:
+        benchmark_frame = market.loc[market["symbol"] == benchmark, ["trade_date", "close"]].rename(columns={"close": "benchmark_close"})
+        comparison = comparison.merge(benchmark_frame, on="trade_date", how="left")
+        if "benchmark_close" in comparison.columns and comparison["benchmark_close"].notna().any():
+            comparison["benchmark_symbol"] = benchmark
+            comparison["benchmark_daily_return"] = comparison["benchmark_close"].pct_change().fillna(0.0)
+            base_value = comparison["benchmark_close"].dropna().iloc[0]
+            comparison["benchmark_normalized_return"] = comparison["benchmark_close"] / base_value - 1.0
     return comparison
 
 
@@ -182,6 +193,20 @@ def build_asset_comparison_chart(
             row=1,
             col=1,
         )
+        if "benchmark_normalized_return" in comparison.columns and comparison["benchmark_normalized_return"].notna().any():
+            benchmark_symbol = str(comparison.get("benchmark_symbol", pd.Series([""])).iloc[0] or "Benchmark")
+            fig.add_trace(
+                go.Scatter(
+                    x=comparison["trade_date"],
+                    y=comparison["benchmark_normalized_return"],
+                    mode="lines",
+                    name=f"{benchmark_symbol} normalized return",
+                    line={"color": "#c084fc", "width": 2, "dash": "dash"},
+                    hovertemplate=f"<b>%{{x|%Y-%m-%d}}</b><br>{benchmark_symbol}: %{{y:+.2%}}<extra></extra>",
+                ),
+                row=1,
+                col=1,
+            )
         fig.update_yaxes(title_text="Return since range start", tickformat=".0%", row=1, col=1)
         title = f"SPY vs. {symbol} normalized returns"
     else:
@@ -213,6 +238,21 @@ def build_asset_comparison_chart(
             col=1,
             secondary_y=True,
         )
+        if "benchmark_close" in comparison.columns and comparison["benchmark_close"].notna().any():
+            benchmark_symbol = str(comparison.get("benchmark_symbol", pd.Series([""])).iloc[0] or "Benchmark")
+            fig.add_trace(
+                go.Scatter(
+                    x=comparison["trade_date"],
+                    y=comparison["benchmark_close"],
+                    mode="lines",
+                    name=f"{benchmark_symbol} close",
+                    line={"color": "#c084fc", "width": 2, "dash": "dash"},
+                    hovertemplate=f"<b>%{{x|%Y-%m-%d}}</b><br>{benchmark_symbol} close: %{{y:,.2f}}<extra></extra>",
+                ),
+                row=1,
+                col=1,
+                secondary_y=True,
+            )
         fig.update_yaxes(title_text="SPY close", row=1, col=1, secondary_y=False)
         fig.update_yaxes(title_text=f"{symbol} close", row=1, col=1, secondary_y=True)
         title = f"SPY vs. {symbol} price overlay"
@@ -490,12 +530,22 @@ def make_asset_mapping_table(asset_post_mappings: pd.DataFrame, selected_symbol:
     if table.empty:
         return table
     table["post_time_et"] = pd.to_datetime(table["post_timestamp"], errors="coerce").dt.tz_convert(EASTERN).dt.strftime("%Y-%m-%d %H:%M")
+    if "reaction_anchor_ts" in table.columns:
+        anchor_series = pd.to_datetime(table["reaction_anchor_ts"], errors="coerce")
+        if getattr(anchor_series.dt, "tz", None) is None:
+            anchor_series = anchor_series.dt.tz_localize(EASTERN, nonexistent="NaT", ambiguous="NaT")
+        else:
+            anchor_series = anchor_series.dt.tz_convert(EASTERN)
+        table["reaction_anchor_et"] = anchor_series.dt.strftime("%Y-%m-%d %H:%M")
+    else:
+        table["reaction_anchor_et"] = table["post_time_et"]
     table["session_date"] = pd.to_datetime(table["session_date"], errors="coerce").dt.date
     table["preview"] = table["cleaned_text"].map(lambda x: truncate_text(str(x), max_chars=180))
     keep = [
         "asset_symbol",
         "session_date",
         "post_time_et",
+        "reaction_anchor_et",
         "author_handle",
         "author_display_name",
         "asset_relevance_score",
@@ -509,6 +559,135 @@ def make_asset_mapping_table(asset_post_mappings: pd.DataFrame, selected_symbol:
     return table.sort_values(["session_date", "match_rank", "post_time_et"], ascending=[False, True, True])[keep].rename(
         columns={"preview": "post_text"},
     )
+
+
+def build_event_study_frame(
+    asset_market: pd.DataFrame,
+    asset_session_features: pd.DataFrame,
+    selected_symbol: str,
+    benchmark_symbol: str | None = None,
+    pre_sessions: int = 3,
+    post_sessions: int = 5,
+) -> pd.DataFrame:
+    if asset_market.empty or asset_session_features.empty:
+        return pd.DataFrame()
+
+    symbol = str(selected_symbol).upper()
+    required_symbols = ["SPY", symbol]
+    benchmark = str(benchmark_symbol or "").upper()
+    if benchmark and benchmark not in required_symbols:
+        required_symbols.append(benchmark)
+
+    session_rows = asset_session_features.copy()
+    session_rows["signal_session_date"] = pd.to_datetime(session_rows["signal_session_date"], errors="coerce").dt.normalize()
+    event_dates = (
+        session_rows.loc[
+            (session_rows["asset_symbol"].astype(str).str.upper() == symbol)
+            & (pd.to_numeric(session_rows["post_count"], errors="coerce").fillna(0) > 0),
+            "signal_session_date",
+        ]
+        .dropna()
+        .drop_duplicates()
+        .sort_values()
+        .tolist()
+    )
+    if not event_dates:
+        return pd.DataFrame()
+
+    market = asset_market.copy()
+    market["symbol"] = market["symbol"].astype(str).str.upper()
+    market["trade_date"] = pd.to_datetime(market["trade_date"], errors="coerce").dt.normalize()
+    market = market.loc[market["symbol"].isin(required_symbols)].dropna(subset=["trade_date", "close"]).copy()
+    if market.empty:
+        return pd.DataFrame()
+
+    rows: list[dict[str, Any]] = []
+    for current_symbol, group in market.groupby("symbol", sort=False):
+        ordered = group.sort_values("trade_date").reset_index(drop=True)
+        date_lookup = {pd.Timestamp(value): idx for idx, value in enumerate(ordered["trade_date"])}
+        closes = ordered["close"].astype(float).tolist()
+        dates = ordered["trade_date"].tolist()
+        for event_date in event_dates:
+            event_idx = date_lookup.get(pd.Timestamp(event_date))
+            if event_idx is None:
+                continue
+            base_close = closes[event_idx]
+            if pd.isna(base_close) or float(base_close) == 0.0:
+                continue
+            for offset in range(-int(pre_sessions), int(post_sessions) + 1):
+                target_idx = event_idx + offset
+                if target_idx < 0 or target_idx >= len(ordered):
+                    continue
+                target_close = closes[target_idx]
+                rows.append(
+                    {
+                        "symbol": current_symbol,
+                        "event_date": pd.Timestamp(event_date),
+                        "relative_session": offset,
+                        "trade_date": pd.Timestamp(dates[target_idx]),
+                        "relative_return": float(target_close / base_close - 1.0),
+                    },
+                )
+
+    if not rows:
+        return pd.DataFrame()
+
+    frame = pd.DataFrame(rows)
+    summary = (
+        frame.groupby(["symbol", "relative_session"], as_index=False)
+        .agg(
+            avg_relative_return=("relative_return", "mean"),
+            median_relative_return=("relative_return", "median"),
+            event_count=("event_date", "nunique"),
+        )
+        .sort_values(["symbol", "relative_session"])
+        .reset_index(drop=True)
+    )
+    summary["selected_symbol"] = symbol
+    return summary
+
+
+def build_event_study_chart(event_study: pd.DataFrame, selected_symbol: str) -> go.Figure:
+    symbol = str(selected_symbol).upper()
+    fig = go.Figure()
+    if event_study.empty:
+        fig.update_layout(
+            title=f"SPY vs. {symbol} event study",
+            margin={"l": 20, "r": 20, "t": 60, "b": 20},
+        )
+        return fig
+
+    color_map = {
+        "SPY": "#8ecae6",
+        symbol: "#f59e0b",
+    }
+    for current_symbol, group in event_study.groupby("symbol", sort=False):
+        color = color_map.get(current_symbol, "#c084fc")
+        dash = "solid" if current_symbol in color_map else "dash"
+        fig.add_trace(
+            go.Scatter(
+                x=group["relative_session"],
+                y=group["avg_relative_return"],
+                mode="lines+markers",
+                name=current_symbol,
+                line={"color": color, "width": 2.5, "dash": dash},
+                marker={"size": 7},
+                customdata=group["event_count"],
+                hovertemplate="<b>Session %{x:+d}</b><br>Avg return: %{y:+.2%}<br>Events: %{customdata}<extra></extra>",
+            ),
+        )
+    fig.add_hline(y=0.0, line_dash="dot", line_width=1, line_color="rgba(148, 163, 184, 0.9)")
+    fig.add_vline(x=0, line_dash="dot", line_width=1, line_color="rgba(148, 163, 184, 0.9)")
+    fig.update_layout(
+        title=f"SPY vs. {symbol} event study",
+        xaxis_title="Relative trading session",
+        yaxis_title="Average return vs. event session close",
+        yaxis_tickformat=".0%",
+        hovermode="x unified",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
+        margin={"l": 20, "r": 20, "t": 80, "b": 20},
+    )
+    return fig
 
 
 def build_intraday_chart(intraday: pd.DataFrame, anchor_ts: pd.Timestamp, title: str) -> go.Figure:
@@ -563,3 +742,115 @@ def get_intraday_window(
     return intraday_month.loc[
         (intraday_month["timestamp"] >= start_ts) & (intraday_month["timestamp"] <= end_ts)
     ].reset_index(drop=True)
+
+
+def build_intraday_comparison_frame(
+    intraday_frame: pd.DataFrame,
+    selected_symbol: str,
+    anchor_ts: pd.Timestamp,
+    before_minutes: int,
+    after_minutes: int,
+    benchmark_symbol: str | None = None,
+) -> pd.DataFrame:
+    if intraday_frame.empty:
+        return pd.DataFrame()
+
+    symbol = str(selected_symbol).upper()
+    benchmark = str(benchmark_symbol or "").upper()
+    symbols = ["SPY", symbol]
+    if benchmark and benchmark not in symbols:
+        symbols.append(benchmark)
+
+    frame = intraday_frame.copy()
+    frame["symbol"] = frame["symbol"].astype(str).str.upper()
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
+    frame = frame.dropna(subset=["timestamp", "close"]).copy()
+    frame = frame.loc[frame["symbol"].isin(symbols)].copy()
+    if frame.empty:
+        return pd.DataFrame()
+
+    rows: list[pd.DataFrame] = []
+    for current_symbol, group in frame.groupby("symbol", sort=False):
+        ordered = group.sort_values("timestamp").reset_index(drop=True)
+        window = get_intraday_window(ordered, anchor_ts, before_minutes, after_minutes)
+        if window.empty:
+            continue
+        reference = window.loc[window["timestamp"] <= anchor_ts]
+        if reference.empty:
+            reference = window.iloc[[0]]
+        else:
+            reference = reference.tail(1)
+        base_close = float(reference["close"].iloc[0])
+        if base_close == 0.0:
+            continue
+        window = window.copy()
+        window["symbol"] = current_symbol
+        window["anchor_close"] = base_close
+        window["normalized_return"] = window["close"].astype(float) / base_close - 1.0
+        window["minutes_from_anchor"] = (window["timestamp"] - anchor_ts) / pd.Timedelta(minutes=1)
+        rows.append(window)
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
+def build_intraday_comparison_chart(
+    intraday_comparison: pd.DataFrame,
+    selected_symbol: str,
+    anchor_ts: pd.Timestamp,
+) -> go.Figure:
+    symbol = str(selected_symbol).upper()
+    fig = go.Figure()
+    if intraday_comparison.empty:
+        fig.update_layout(
+            title=f"SPY vs. {symbol} intraday reaction",
+            margin={"l": 20, "r": 20, "t": 60, "b": 20},
+        )
+        return fig
+
+    color_map = {
+        "SPY": "#8ecae6",
+        symbol: "#f59e0b",
+    }
+    for current_symbol, group in intraday_comparison.groupby("symbol", sort=False):
+        color = color_map.get(current_symbol, "#c084fc")
+        dash = "solid" if current_symbol in color_map else "dash"
+        fig.add_trace(
+            go.Scatter(
+                x=group["timestamp"],
+                y=group["normalized_return"],
+                mode="lines",
+                name=current_symbol,
+                line={"color": color, "width": 2.4, "dash": dash},
+                hovertemplate="<b>%{x|%Y-%m-%d %H:%M}</b><br>Return vs anchor: %{y:+.2%}<extra></extra>",
+            ),
+        )
+    anchor_dt = pd.Timestamp(anchor_ts).to_pydatetime()
+    fig.add_shape(
+        type="line",
+        x0=anchor_dt,
+        x1=anchor_dt,
+        y0=0,
+        y1=1,
+        xref="x",
+        yref="paper",
+        line={"dash": "dash"},
+    )
+    fig.add_annotation(
+        x=anchor_dt,
+        y=1,
+        xref="x",
+        yref="paper",
+        text="reaction anchor",
+        showarrow=False,
+        yanchor="bottom",
+    )
+    fig.add_hline(y=0.0, line_dash="dot", line_width=1, line_color="rgba(148, 163, 184, 0.9)")
+    fig.update_layout(
+        title=f"SPY vs. {symbol} intraday reaction",
+        xaxis_title="Time (ET)",
+        yaxis_title="Return vs. anchor",
+        yaxis_tickformat=".0%",
+        hovermode="x unified",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
+        margin={"l": 20, "r": 20, "t": 80, "b": 20},
+    )
+    return fig
