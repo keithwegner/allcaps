@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from trump_workbench.config import AppSettings
-from trump_workbench.contracts import BacktestRun
+from trump_workbench.contracts import BacktestRun, LiveMonitorConfig, LiveMonitorPinnedRun
 from trump_workbench.experiments import ExperimentStore
 from trump_workbench.storage import DuckDBStore
 
@@ -160,6 +160,73 @@ class ExperimentStoreTests(unittest.TestCase):
             ),
             0.02,
         )
+
+        live_config = LiveMonitorConfig(
+            fallback_mode="FLAT",
+            pinned_runs=[
+                LiveMonitorPinnedRun(
+                    asset_symbol="SPY",
+                    run_id="run-123",
+                    run_name="unit-test-run",
+                    model_version="linear-v1",
+                    pinned_at="2026-04-14T04:00:00",
+                ),
+            ],
+        )
+        config_path = self.experiments.save_live_monitor_config(live_config)
+        self.assertTrue(config_path.exists())
+        loaded_config = self.experiments.load_live_monitor_config()
+        self.assertIsNotNone(loaded_config)
+        assert loaded_config is not None
+        self.assertEqual(loaded_config.fallback_mode, "FLAT")
+        self.assertEqual(loaded_config.pinned_runs[0].asset_symbol, "SPY")
+
+        asset_snapshots = pd.DataFrame(
+            {
+                "generated_at": [pd.Timestamp("2025-02-03 16:00:00"), pd.Timestamp("2025-02-03 16:00:00")],
+                "signal_session_date": [pd.Timestamp("2025-02-03"), pd.Timestamp("2025-02-03")],
+                "next_session_date": [pd.Timestamp("2025-02-04"), pd.Timestamp("2025-02-04")],
+                "asset_symbol": ["SPY", "QQQ"],
+                "run_id": ["run-123", "run-qqq"],
+                "run_name": ["unit-test-run", "unit-test-run"],
+                "feature_version": ["v1", "asset-v1"],
+                "model_version": ["linear-v1", "linear-qqq-v1"],
+                "expected_return_score": [0.01, 0.02],
+                "confidence": [0.6, 0.7],
+                "threshold": [0.001, 0.001],
+                "min_post_count": [1, 1],
+                "post_count": [5, 6],
+                "qualifies": [True, True],
+                "eligible_rank": [2, 1],
+                "is_winner": [False, True],
+                "decision_source": ["eligible", "eligible"],
+                "stance": ["FLAT", "LONG QQQ NEXT SESSION"],
+            },
+        )
+        decision_snapshots = pd.DataFrame(
+            {
+                "generated_at": [pd.Timestamp("2025-02-03 16:00:00")],
+                "signal_session_date": [pd.Timestamp("2025-02-03")],
+                "winning_asset": ["QQQ"],
+                "winning_run_id": ["run-qqq"],
+                "decision_source": ["eligible"],
+                "fallback_mode": ["SPY"],
+                "stance": ["LONG QQQ NEXT SESSION"],
+                "eligible_asset_count": [2],
+                "runner_up_asset": ["SPY"],
+                "winner_score": [0.02],
+                "runner_up_score": [0.01],
+            },
+        )
+        self.experiments.save_live_asset_snapshots(asset_snapshots)
+        self.experiments.save_live_asset_snapshots(asset_snapshots)
+        self.experiments.save_live_decision_snapshots(decision_snapshots)
+        self.experiments.save_live_decision_snapshots(decision_snapshots)
+        stored_asset_snapshots = self.store.read_frame("live_asset_snapshots")
+        stored_decision_snapshots = self.store.read_frame("live_decision_snapshots")
+        self.assertEqual(len(stored_asset_snapshots), 2)
+        self.assertEqual(len(stored_decision_snapshots), 1)
+        self.assertEqual(stored_decision_snapshots.iloc[0]["winning_asset"], "QQQ")
 
         saved.benchmarks_path.unlink()
         saved.diagnostics_path.unlink()

@@ -12,7 +12,7 @@ import streamlit.components.v1 as components
 
 from .backtesting import BacktestService
 from .config import AppSettings, DEFAULT_ETF_SYMBOLS
-from .contracts import MANUAL_OVERRIDE_COLUMNS, ModelRunConfig, RANKING_HISTORY_COLUMNS
+from .contracts import LiveMonitorConfig, LiveMonitorPinnedRun, MANUAL_OVERRIDE_COLUMNS, ModelRunConfig, RANKING_HISTORY_COLUMNS
 from .discovery import DiscoveryService
 from .enrichment import LLMEnrichmentService
 from .explanations import build_account_attribution, build_post_attribution
@@ -21,6 +21,13 @@ from .features import FeatureService, latest_feature_preview, map_posts_to_trade
 from .ingestion import IngestionService, TruthSocialArchiveAdapter, XCsvAdapter
 from .market import MarketDataService, build_asset_universe, build_watchlist_frame, normalize_symbols
 from .modeling import ModelService, classify_feature_family
+from .live_monitor import (
+    LIVE_ASSET_SNAPSHOT_COLUMNS,
+    LIVE_DECISION_SNAPSHOT_COLUMNS,
+    seed_live_monitor_config,
+    rank_live_asset_snapshots,
+    validate_live_monitor_config,
+)
 from .research import (
     aggregate_research_sessions,
     build_asset_comparison_chart,
@@ -133,6 +140,162 @@ def _build_model_target_bundle(
     ].copy()
     attribution_posts["target_asset"] = normalized_target
     return feature_rows.reset_index(drop=True), attribution_posts.reset_index(drop=True)
+
+
+def _live_run_option_label(run_row: pd.Series) -> str:
+    created_at = pd.to_datetime(run_row.get("created_at"), errors="coerce")
+    created_label = f"{created_at:%Y-%m-%d %H:%M}" if pd.notna(created_at) else "unknown time"
+    run_name = str(run_row.get("run_name", run_row.get("run_id", "")) or run_row.get("run_id", ""))
+    robust_score = float((run_row.get("metrics_json") or {}).get("robust_score", 0.0) or 0.0)
+    return f"{run_name} | {created_label} | robust {robust_score:+.3f}"
+
+
+def _runs_by_asset(runs: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    if runs.empty:
+        return {}
+    normalized = runs.copy()
+    if "target_asset" not in normalized.columns:
+        normalized["target_asset"] = "SPY"
+    normalized["target_asset"] = normalized["target_asset"].fillna("SPY").astype(str).str.upper()
+    return {
+        asset_symbol: group.reset_index(drop=True)
+        for asset_symbol, group in normalized.groupby("target_asset", sort=False)
+    }
+
+
+def _build_live_monitor_state(
+    store: DuckDBStore,
+    feature_service: FeatureService,
+    model_service: ModelService,
+    experiment_store: ExperimentStore,
+    posts: pd.DataFrame,
+    spy_market: pd.DataFrame,
+    tracked_accounts: pd.DataFrame,
+    config: LiveMonitorConfig,
+    generated_at: pd.Timestamp | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, dict[str, Any]], list[str]]:
+    snapshot_rows: list[dict[str, Any]] = []
+    explanation_lookup: dict[str, dict[str, Any]] = {}
+    warnings: list[str] = []
+    snapshot_time = pd.Timestamp.utcnow().floor("s") if generated_at is None else pd.Timestamp(generated_at)
+
+    for pinned in config.pinned_runs:
+        asset_symbol = str(pinned.asset_symbol or "").upper()
+        run_id = str(pinned.run_id or "")
+        if not asset_symbol or not run_id:
+            continue
+        run_bundle = experiment_store.load_run(run_id)
+        if run_bundle is None:
+            warnings.append(f"Pinned run `{run_id}` for `{asset_symbol}` could not be loaded.")
+            continue
+
+        run_config = _bundle_to_run_config(run_bundle)
+        try:
+            feature_rows, attribution_posts = _build_model_target_bundle(
+                store=store,
+                feature_service=feature_service,
+                posts=posts,
+                spy_market=spy_market,
+                tracked_accounts=tracked_accounts,
+                llm_enabled=run_config.llm_enabled,
+                target_asset=asset_symbol,
+                feature_version=run_config.feature_version,
+            )
+        except RuntimeError as exc:
+            warnings.append(f"`{asset_symbol}` live features could not be built: {exc}")
+            continue
+        if feature_rows.empty:
+            warnings.append(f"`{asset_symbol}` does not have any current live feature rows.")
+            continue
+
+        predictions = model_service.predict(run_bundle["model_artifact"], feature_rows)
+        feature_contributions = model_service.explain_predictions(run_bundle["model_artifact"], predictions)
+        post_attribution = build_post_attribution(attribution_posts)
+        account_attribution = build_account_attribution(post_attribution)
+        latest_prediction = predictions.sort_values("signal_session_date").iloc[-1].copy()
+        latest_prediction["prediction_confidence"] = float(latest_prediction.get("prediction_confidence", 0.0) or 0.0)
+        latest_prediction["target_asset"] = asset_symbol
+        latest_prediction["run_id"] = run_id
+        latest_prediction["run_name"] = str(run_bundle.get("run", {}).get("run_name", run_id) or run_id)
+        selected_params = run_bundle.get("selected_params", {}) or {}
+        threshold = selected_params.get("threshold", 0.0)
+        min_post_count = selected_params.get("min_post_count", 1)
+        snapshot_rows.append(
+            {
+                "generated_at": snapshot_time,
+                "signal_session_date": latest_prediction.get("signal_session_date"),
+                "next_session_date": latest_prediction.get("next_session_date"),
+                "asset_symbol": asset_symbol,
+                "run_id": run_id,
+                "run_name": latest_prediction["run_name"],
+                "feature_version": str(latest_prediction.get("feature_version", run_config.feature_version) or run_config.feature_version),
+                "model_version": str(latest_prediction.get("model_version", run_bundle["model_artifact"].model_version) or run_bundle["model_artifact"].model_version),
+                "expected_return_score": float(latest_prediction.get("expected_return_score", 0.0) or 0.0),
+                "confidence": float(latest_prediction.get("prediction_confidence", 0.0) or 0.0),
+                "threshold": float(threshold if threshold is not None else 0.0),
+                "min_post_count": int(min_post_count if min_post_count is not None else 1),
+                "post_count": int(latest_prediction.get("post_count", 0) or 0),
+            },
+        )
+        explanation_lookup[asset_symbol] = {
+            "prediction_row": latest_prediction,
+            "feature_contributions": feature_contributions,
+            "post_attribution": post_attribution,
+            "account_attribution": account_attribution,
+        }
+
+    snapshots = pd.DataFrame(snapshot_rows, columns=LIVE_ASSET_SNAPSHOT_COLUMNS)
+    if snapshots.empty:
+        return snapshots, pd.DataFrame(columns=LIVE_DECISION_SNAPSHOT_COLUMNS), explanation_lookup, warnings
+
+    ranked_board, decision = rank_live_asset_snapshots(snapshots, config.fallback_mode)
+    for asset_symbol, payload in explanation_lookup.items():
+        board_match = ranked_board.loc[ranked_board["asset_symbol"] == asset_symbol]
+        if board_match.empty:
+            continue
+        payload["board_row"] = board_match.iloc[0]
+    return ranked_board, decision, explanation_lookup, warnings
+
+
+def _build_live_runner_up_frame(board: pd.DataFrame, decision_row: pd.Series) -> pd.DataFrame:
+    if board.empty:
+        return pd.DataFrame()
+    winner_asset = str(decision_row.get("winning_asset", "") or "")
+    ordered = board.sort_values(["qualifies", "expected_return_score", "confidence"], ascending=[False, False, False]).reset_index(drop=True)
+    rows: list[dict[str, Any]] = []
+    winner = ordered.loc[ordered["asset_symbol"] == winner_asset]
+    if not winner.empty:
+        winner_row = winner.iloc[0]
+        rows.append(
+            {
+                "asset_symbol": str(winner_row["asset_symbol"]),
+                "run_name": str(winner_row["run_name"]),
+                "score": float(winner_row["expected_return_score"]),
+                "confidence": float(winner_row["confidence"]),
+                "threshold_gap": float(winner_row["expected_return_score"] - winner_row["threshold"]),
+                "post_count": int(winner_row["post_count"]),
+                "qualifies": bool(winner_row["qualifies"]),
+                "winner": True,
+            },
+        )
+    runner_up_asset = str(decision_row.get("runner_up_asset", "") or "")
+    if runner_up_asset:
+        runner = ordered.loc[ordered["asset_symbol"] == runner_up_asset]
+        if not runner.empty:
+            runner_row = runner.iloc[0]
+            rows.append(
+                {
+                    "asset_symbol": str(runner_row["asset_symbol"]),
+                    "run_name": str(runner_row["run_name"]),
+                    "score": float(runner_row["expected_return_score"]),
+                    "confidence": float(runner_row["confidence"]),
+                    "threshold_gap": float(runner_row["expected_return_score"] - runner_row["threshold"]),
+                    "post_count": int(runner_row["post_count"]),
+                    "qualifies": bool(runner_row["qualifies"]),
+                    "winner": False,
+                },
+            )
+    return pd.DataFrame(rows)
 
 
 def _watchlist_symbols(store: DuckDBStore) -> list[str]:
@@ -1862,7 +2025,10 @@ def render_live_monitor(
     experiment_store: ExperimentStore,
 ) -> None:
     st.subheader("Live Monitor")
-    st.caption("Polling-style refresh for new posts plus the latest next-session SPY score from the newest saved model.")
+    st.caption(
+        "Multi-asset decision console for pinned saved runs. It ranks current live candidates, "
+        "applies the configured SPY/flat fallback, and keeps board history for debugging.",
+    )
     remote_url = st.text_input(
         "Remote X / mentions CSV URL for polling",
         key="live_remote_x_url",
@@ -1882,7 +2048,8 @@ def render_live_monitor(
             height=0,
         )
 
-    if st.button("Poll sources now", use_container_width=True):
+    refresh_requested = st.button("Poll sources now", use_container_width=True)
+    if refresh_requested:
         with st.spinner("Refreshing sources and market data..."):
             _refresh_datasets(
                 settings=settings,
@@ -1897,96 +2064,353 @@ def render_live_monitor(
             )
         st.success("Polling refresh complete.")
 
-    model_bundle = experiment_store.load_latest_model_artifact(target_asset="SPY")
-    if model_bundle is None:
-        st.info("Run a model in the Models & Backtests page to enable live predictions.")
+    runs = experiment_store.list_runs()
+    if runs.empty:
+        st.info("Save at least one run in Models & Backtests before using the live decision console.")
         return
 
-    artifact, deployment_params = model_bundle
+    run_groups = _runs_by_asset(runs)
+    if "SPY" not in run_groups:
+        st.info("Save at least one `SPY` model run first so the live monitor has a required fallback anchor.")
+        return
+
+    saved_config = experiment_store.load_live_monitor_config()
+    seeded_config = seed_live_monitor_config(runs)
+    editor_config = saved_config or seeded_config
+    if editor_config is None:
+        st.info("Save at least one model run before configuring the live decision console.")
+        return
+
+    st.markdown("**Pinned Model Set**")
+    if saved_config is None:
+        st.info("The selectors below are seeded from the newest saved run per asset. Save the pinned model set to enable monitoring.")
+
+    saved_config_errors = validate_live_monitor_config(saved_config, runs) if saved_config is not None else []
+    if saved_config_errors:
+        for message in saved_config_errors:
+            st.warning(message)
+        st.caption("Update and save the pinned model set below to restore live monitoring.")
+
+    available_non_spy_assets = sorted(asset_symbol for asset_symbol in run_groups if asset_symbol != "SPY")
+    fallback_default = str(editor_config.fallback_mode or "SPY").upper()
+    fallback_index = 0 if fallback_default == "SPY" else 1
+    asset_defaults = [
+        item.asset_symbol
+        for item in editor_config.pinned_runs
+        if item.asset_symbol != "SPY" and item.asset_symbol in available_non_spy_assets
+    ]
+    active_config = saved_config if not saved_config_errors else None
+
+    with st.form("live-monitor-config"):
+        fallback_mode = st.radio(
+            "Fallback mode",
+            options=["SPY", "FLAT"],
+            index=fallback_index,
+            horizontal=True,
+        )
+        selected_assets = st.multiselect(
+            "Pinned non-SPY assets",
+            options=available_non_spy_assets,
+            default=asset_defaults,
+        )
+        selected_asset_order = ["SPY"] + selected_assets
+        pinned_runs: list[LiveMonitorPinnedRun] = []
+        for asset_symbol in selected_asset_order:
+            asset_runs = run_groups.get(asset_symbol, pd.DataFrame())
+            if asset_runs.empty:
+                continue
+            run_options = asset_runs["run_id"].astype(str).tolist()
+            configured = next(
+                (
+                    item.run_id
+                    for item in editor_config.pinned_runs
+                    if item.asset_symbol == asset_symbol and item.run_id in run_options
+                ),
+                run_options[0],
+            )
+            selected_run_id = st.selectbox(
+                f"{asset_symbol} pinned run",
+                options=run_options,
+                index=run_options.index(configured) if configured in run_options else 0,
+                format_func=lambda run_id, asset_runs=asset_runs: _live_run_option_label(
+                    asset_runs.loc[asset_runs["run_id"].astype(str) == str(run_id)].iloc[0],
+                ),
+                key=f"live-pinned-run-{asset_symbol}",
+            )
+            selected_row = asset_runs.loc[asset_runs["run_id"].astype(str) == str(selected_run_id)].iloc[0]
+            pinned_runs.append(
+                LiveMonitorPinnedRun(
+                    asset_symbol=asset_symbol,
+                    run_id=str(selected_run_id),
+                    run_name=str(selected_row.get("run_name", selected_run_id) or selected_run_id),
+                    model_version="",
+                    pinned_at=pd.Timestamp.utcnow().floor("s").isoformat(),
+                ),
+            )
+        save_config = st.form_submit_button("Save pinned model set")
+
+    if save_config:
+        candidate_config = LiveMonitorConfig(
+            fallback_mode=str(fallback_mode).upper(),
+            pinned_runs=pinned_runs,
+        )
+        validation_errors = validate_live_monitor_config(candidate_config, runs)
+        if validation_errors:
+            for message in validation_errors:
+                st.error(message)
+        else:
+            enriched_pins: list[LiveMonitorPinnedRun] = []
+            for item in candidate_config.pinned_runs:
+                run_bundle = experiment_store.load_run(item.run_id)
+                model_version = ""
+                if run_bundle is not None:
+                    model_version = str(run_bundle["model_artifact"].model_version)
+                enriched_pins.append(
+                    LiveMonitorPinnedRun(
+                        asset_symbol=item.asset_symbol,
+                        run_id=item.run_id,
+                        run_name=item.run_name,
+                        model_version=model_version,
+                        pinned_at=item.pinned_at,
+                    ),
+                )
+            active_config = LiveMonitorConfig(
+                fallback_mode=candidate_config.fallback_mode,
+                pinned_runs=enriched_pins,
+            )
+            experiment_store.save_live_monitor_config(active_config)
+            st.success("Saved the pinned live model set.")
+
+    if active_config is None:
+        st.info("Save a valid pinned model set above to enable live monitoring.")
+        return
+
+    config_errors = validate_live_monitor_config(active_config, runs)
+    if config_errors:
+        for message in config_errors:
+            st.error(message)
+        return
+
     posts = store.read_frame("normalized_posts")
     spy = store.read_frame("spy_daily")
     tracked_accounts = store.read_frame("tracked_accounts")
-    prepared_posts = feature_service.prepare_session_posts(
-        posts=posts,
-        market_calendar=spy,
-        tracked_accounts=tracked_accounts,
-        llm_enabled=bool(artifact.metadata.get("llm_enabled", False)),
-    )
-    feature_rows = feature_service.build_session_dataset(
+    if posts.empty or spy.empty:
+        st.info("Refresh datasets first so the live decision console has normalized posts and SPY market data.")
+        return
+    board_generated_at = pd.Timestamp.utcnow().floor("s")
+    board, decision_history_row, explanation_lookup, live_warnings = _build_live_monitor_state(
+        store=store,
+        feature_service=feature_service,
+        model_service=model_service,
+        experiment_store=experiment_store,
         posts=posts,
         spy_market=spy,
         tracked_accounts=tracked_accounts,
-        feature_version="v1",
-        llm_enabled=bool(artifact.metadata.get("llm_enabled", False)),
-        prepared_posts=prepared_posts,
+        config=active_config,
+        generated_at=board_generated_at,
     )
-    feature_rows["target_asset"] = "SPY"
-    predictions = model_service.predict(artifact, feature_rows)
-    feature_contributions = model_service.explain_predictions(artifact, predictions)
-    post_attribution = build_post_attribution(prepared_posts)
-    account_attribution = build_account_attribution(post_attribution)
-    latest = predictions.sort_values("signal_session_date").iloc[-1]
-    threshold = float(deployment_params.get("threshold", 0.0))
-    min_post_count = int(deployment_params.get("min_post_count", 1))
-    stance = "LONG SPY NEXT SESSION" if latest["expected_return_score"] > threshold and latest["post_count"] >= min_post_count else "FLAT"
-    snapshot = pd.DataFrame(
-        [
-            {
-                "signal_session_date": latest["signal_session_date"],
-                "next_session_date": latest["next_session_date"],
-                "target_asset": "SPY",
-                "expected_return_score": latest["expected_return_score"],
-                "feature_version": latest["feature_version"],
-                "model_version": latest["model_version"],
-                "confidence": latest["prediction_confidence"],
-                "generated_at": pd.Timestamp.utcnow(),
-                "stance": stance,
-            },
-        ],
-    )
-    experiment_store.save_prediction_snapshots(snapshot)
+    for message in live_warnings:
+        st.warning(message)
+    if board.empty or decision_history_row.empty:
+        st.info("No live candidate rows could be built from the pinned model set.")
+        return
 
-    cols = st.columns(4)
-    cols[0].metric("Signal session", f"{pd.Timestamp(latest['signal_session_date']):%Y-%m-%d}")
-    cols[1].metric("Expected next-session return", f"{latest['expected_return_score']:+.3%}")
-    cols[2].metric("Confidence", f"{latest['prediction_confidence']:.2f}")
-    cols[3].metric("Suggested stance", stance)
+    should_persist_snapshots = bool(refresh_requested)
+    if poll_enabled:
+        last_persisted = pd.to_datetime(st.session_state.get("live_monitor_last_persisted_at"), errors="coerce")
+        if pd.isna(last_persisted) or (board_generated_at - last_persisted).total_seconds() >= max(int(poll_seconds * 0.8), 5):
+            should_persist_snapshots = True
+    if should_persist_snapshots:
+        experiment_store.save_live_asset_snapshots(board)
+        experiment_store.save_live_decision_snapshots(decision_history_row)
+        st.session_state["live_monitor_last_persisted_at"] = board_generated_at.isoformat()
 
-    st.json(
-        {
-            "threshold": threshold,
-            "minimum_post_count": min_post_count,
-            "latest_feature_preview": latest_feature_preview(feature_rows),
-        },
-    )
+    decision_row = decision_history_row.iloc[0]
+    winner_asset = str(decision_row.get("winning_asset", "") or "")
+    winner_rows = board.loc[board["is_winner"]].copy()
+    winner_row = winner_rows.iloc[0] if not winner_rows.empty else None
+    winner_confidence = float(winner_row["confidence"]) if winner_row is not None else 0.0
+    display_asset = winner_asset or "FLAT"
+    tabs = st.tabs(["Current Decision", "Why This Asset Won", "History"])
 
-    history = store.read_frame("prediction_snapshots")
-    if not history.empty:
-        if "target_asset" not in history.columns:
-            history["target_asset"] = "SPY"
-        history = history.loc[history["target_asset"].astype(str).str.upper() == "SPY"].copy()
-    if not history.empty:
-        history = history.sort_values("generated_at")
-        fig = go.Figure()
-        fig.add_trace(
-            go.Scatter(
-                x=history["generated_at"],
-                y=history["expected_return_score"],
-                mode="lines+markers",
-                name="Expected return score",
-            ),
+    with tabs[0]:
+        metric_cols = st.columns(6)
+        metric_cols[0].metric("Winning asset", display_asset)
+        metric_cols[1].metric(
+            "Signal session",
+            f"{pd.Timestamp(decision_row['signal_session_date']):%Y-%m-%d}" if pd.notna(decision_row["signal_session_date"]) else "n/a",
         )
-        fig.update_layout(title="Prediction snapshot history", xaxis_title="Generated at", yaxis_title="Expected next-session return")
-        st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(history.tail(25), use_container_width=True, hide_index=True)
+        metric_cols[2].metric("Decision source", str(decision_row["decision_source"]).upper())
+        metric_cols[3].metric("Stance", str(decision_row["stance"]))
+        metric_cols[4].metric("Winner score", f"{float(decision_row['winner_score']):+.3%}")
+        metric_cols[5].metric("Winner confidence", f"{winner_confidence:.2f}")
 
-    _render_signal_explanation_panel(
-        prediction_row=latest,
-        feature_contributions=feature_contributions,
-        post_attribution=post_attribution,
-        account_attribution=account_attribution,
-        heading="Why This Live Signal?",
-    )
+        st.json(
+            {
+                "fallback_mode": str(decision_row["fallback_mode"]),
+                "eligible_asset_count": int(decision_row["eligible_asset_count"]),
+                "runner_up_asset": str(decision_row.get("runner_up_asset", "") or ""),
+                "generated_at": str(pd.Timestamp(decision_row["generated_at"])),
+            },
+        )
+        board_view = board.rename(
+            columns={
+                "asset_symbol": "Asset",
+                "run_name": "Run",
+                "expected_return_score": "Score",
+                "confidence": "Confidence",
+                "threshold": "Threshold",
+                "min_post_count": "Min posts",
+                "post_count": "Posts",
+                "qualifies": "Qualifies",
+                "eligible_rank": "Eligible rank",
+                "is_winner": "Winner",
+                "decision_source": "Decision source",
+                "stance": "Stance",
+            },
+        )
+        st.markdown("**Live ranked board**")
+        st.dataframe(
+            board_view[
+                [
+                    "Asset",
+                    "Run",
+                    "Score",
+                    "Confidence",
+                    "Threshold",
+                    "Min posts",
+                    "Posts",
+                    "Qualifies",
+                    "Eligible rank",
+                    "Winner",
+                    "Decision source",
+                    "Stance",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with tabs[1]:
+        explain_options = board["asset_symbol"].astype(str).tolist()
+        default_explain_asset = winner_asset or (explain_options[0] if explain_options else "")
+        selected_asset = st.selectbox(
+            "Explain asset",
+            options=explain_options,
+            index=explain_options.index(default_explain_asset) if default_explain_asset in explain_options else 0,
+            key="live-monitor-explain-asset",
+        )
+        runner_frame = _build_live_runner_up_frame(board, decision_row)
+        if not runner_frame.empty:
+            st.markdown("**Winner vs runner-up**")
+            st.dataframe(
+                runner_frame.rename(
+                    columns={
+                        "asset_symbol": "Asset",
+                        "run_name": "Run",
+                        "score": "Score",
+                        "confidence": "Confidence",
+                        "threshold_gap": "Threshold gap",
+                        "post_count": "Posts",
+                        "qualifies": "Qualifies",
+                        "winner": "Winner",
+                    },
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        selected_payload = explanation_lookup.get(selected_asset, {})
+        prediction_row = selected_payload.get("prediction_row", pd.Series(dtype=object)).copy()
+        if not prediction_row.empty:
+            board_row = selected_payload.get("board_row")
+            if board_row is not None:
+                prediction_row["expected_return_score"] = board_row["expected_return_score"]
+                prediction_row["prediction_confidence"] = board_row["confidence"]
+            heading = "Why This Asset Won?" if selected_asset == winner_asset else f"Why {selected_asset}?"
+            _render_signal_explanation_panel(
+                prediction_row=prediction_row,
+                feature_contributions=selected_payload.get("feature_contributions", pd.DataFrame()),
+                post_attribution=selected_payload.get("post_attribution", pd.DataFrame()),
+                account_attribution=selected_payload.get("account_attribution", pd.DataFrame()),
+                heading=heading,
+            )
+
+    with tabs[2]:
+        asset_history = store.read_frame("live_asset_snapshots")
+        decision_history = store.read_frame("live_decision_snapshots")
+        monitored_assets = {item.asset_symbol for item in active_config.pinned_runs}
+        if not asset_history.empty and "asset_symbol" in asset_history.columns:
+            asset_history["asset_symbol"] = asset_history["asset_symbol"].astype(str).str.upper()
+            asset_history = asset_history.loc[asset_history["asset_symbol"].isin(monitored_assets)].copy()
+        if not decision_history.empty:
+            decision_history = decision_history.sort_values("generated_at").reset_index(drop=True)
+
+        if asset_history.empty:
+            st.info("No persisted live board history yet. Use polling or the manual refresh button to build it up.")
+        else:
+            asset_history = asset_history.sort_values("generated_at").reset_index(drop=True)
+            history_fig = go.Figure()
+            for asset_symbol, group in asset_history.groupby("asset_symbol", sort=False):
+                history_fig.add_trace(
+                    go.Scatter(
+                        x=group["generated_at"],
+                        y=group["expected_return_score"],
+                        mode="lines+markers",
+                        name=str(asset_symbol),
+                    ),
+                )
+            history_fig.update_layout(
+                title="Live asset score history",
+                xaxis_title="Generated at",
+                yaxis_title="Expected next-session return",
+            )
+            st.plotly_chart(history_fig, use_container_width=True)
+
+        st.markdown("**Recent live decisions**")
+        if decision_history.empty:
+            st.info("No persisted live decision history yet.")
+        else:
+            st.dataframe(decision_history.tail(25), use_container_width=True, hide_index=True)
+
+        mapped_post_asset = st.selectbox(
+            "Mapped-post view asset",
+            options=board["asset_symbol"].astype(str).tolist(),
+            index=board["asset_symbol"].astype(str).tolist().index(default_explain_asset) if default_explain_asset in board["asset_symbol"].astype(str).tolist() else 0,
+            key="live-monitor-post-asset",
+        )
+        post_payload = explanation_lookup.get(mapped_post_asset, {})
+        post_prediction = post_payload.get("prediction_row", pd.Series(dtype=object))
+        mapped_posts = _filter_for_session(
+            post_payload.get("post_attribution", pd.DataFrame()),
+            _normalize_session_date(post_prediction.get("signal_session_date")),
+        )
+        st.markdown(f"**Latest mapped posts for {mapped_post_asset}**")
+        if mapped_posts.empty:
+            st.info(f"No mapped live posts are available for `{mapped_post_asset}`.")
+        else:
+            st.dataframe(
+                mapped_posts[
+                    [
+                        "post_timestamp",
+                        "author_handle",
+                        "sentiment_score",
+                        "engagement_score",
+                        "post_signal_score",
+                        "post_preview",
+                    ]
+                ].rename(
+                    columns={
+                        "post_timestamp": "Timestamp",
+                        "author_handle": "Handle",
+                        "sentiment_score": "Sentiment",
+                        "engagement_score": "Engagement",
+                        "post_signal_score": "Signal score",
+                        "post_preview": "Post",
+                    },
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
 
 def render_historical_replay_view(

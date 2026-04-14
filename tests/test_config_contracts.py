@@ -10,6 +10,8 @@ from trump_workbench.config import APP_TITLE, AppSettings, CURRENT_TERM_START, D
 from trump_workbench.contracts import (
     BacktestRun,
     LinearModelArtifact,
+    LiveMonitorConfig,
+    LiveMonitorPinnedRun,
     ModelRunConfig,
     NormalizedPost,
     PredictionSnapshot,
@@ -123,6 +125,18 @@ class ConfigAndContractsTests(unittest.TestCase):
             train_rows=10,
             metadata={"source": "unit-test"},
         )
+        live_config = LiveMonitorConfig(
+            fallback_mode="FLAT",
+            pinned_runs=[
+                LiveMonitorPinnedRun(
+                    asset_symbol="SPY",
+                    run_id="run-1",
+                    run_name="SPY baseline",
+                    model_version="linear-v1",
+                    pinned_at="2026-04-14T01:02:03",
+                ),
+            ],
+        )
 
         self.assertEqual(post.to_dict()["post_id"], "1")
         self.assertEqual(tracked.to_dict()["status"], "active")
@@ -132,6 +146,7 @@ class ConfigAndContractsTests(unittest.TestCase):
         self.assertEqual(snapshot.to_dict()["target_asset"], "SPY")
         self.assertEqual(snapshot.to_dict()["stance"], "long")
         self.assertEqual(backtest_run.to_dict()["run_id"], "run-1")
+        self.assertEqual(LiveMonitorConfig.from_dict(live_config.to_dict()).pinned_runs[0].asset_symbol, "SPY")
         self.assertEqual(LinearModelArtifact.from_dict(artifact.to_dict()).feature_names, ["x1"])
 
 

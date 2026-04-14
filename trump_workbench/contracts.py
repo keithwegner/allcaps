@@ -221,6 +221,45 @@ class BacktestRun:
 
 
 @dataclass(frozen=True)
+class LiveMonitorPinnedRun:
+    asset_symbol: str
+    run_id: str
+    run_name: str = ""
+    model_version: str = ""
+    pinned_at: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "LiveMonitorPinnedRun":
+        return cls(**payload)
+
+
+@dataclass(frozen=True)
+class LiveMonitorConfig:
+    fallback_mode: str = "SPY"
+    pinned_runs: list[LiveMonitorPinnedRun] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["pinned_runs"] = [item.to_dict() for item in self.pinned_runs]
+        return payload
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "LiveMonitorConfig":
+        pinned_runs = [
+            LiveMonitorPinnedRun.from_dict(item)
+            for item in payload.get("pinned_runs", [])
+            if isinstance(item, dict)
+        ]
+        return cls(
+            fallback_mode=str(payload.get("fallback_mode", "SPY") or "SPY").upper(),
+            pinned_runs=pinned_runs,
+        )
+
+
+@dataclass(frozen=True)
 class LinearModelArtifact:
     model_version: str
     feature_names: list[str]
