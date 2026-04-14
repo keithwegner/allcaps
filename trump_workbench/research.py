@@ -9,8 +9,19 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from .config import EASTERN
+from .enrichment import parse_semantic_asset_targets
 from .features import map_posts_to_trade_sessions, preview_post_texts
 from .utils import fmt_pct, fmt_score, truncate_text
+
+NARRATIVE_COLOR_MAP = {
+    "markets": "#60a5fa",
+    "trade": "#f59e0b",
+    "geopolitics": "#ef4444",
+    "immigration": "#22c55e",
+    "judiciary": "#a78bfa",
+    "campaign": "#f472b6",
+    "other": "#94a3b8",
+}
 
 
 def filter_posts(
@@ -45,6 +56,343 @@ def filter_posts(
             filtered["cleaned_text"].str.contains(keyword, case=False, na=False, regex=False),
         ].copy()
     return filtered.reset_index(drop=True)
+
+
+def narrative_urgency_band(value: Any) -> str:
+    urgency = float(value or 0.0)
+    if urgency < 0.34:
+        return "low"
+    if urgency < 0.67:
+        return "medium"
+    return "high"
+
+
+def filter_narrative_rows(
+    frame: pd.DataFrame,
+    *,
+    topic: str = "All",
+    policy_bucket: str = "All",
+    stance: str = "All",
+    urgency_band: str = "All",
+    narrative_asset: str = "All",
+    platforms: list[str] | None = None,
+    tracked_scope: str = "All posts",
+) -> pd.DataFrame:
+    if frame.empty:
+        return frame.copy()
+
+    filtered = frame.copy()
+    for column in [
+        "semantic_topic",
+        "semantic_policy_bucket",
+        "semantic_stance",
+        "semantic_primary_asset",
+        "semantic_asset_targets",
+        "source_platform",
+    ]:
+        if column not in filtered.columns:
+            filtered[column] = ""
+    if "semantic_urgency" not in filtered.columns:
+        filtered["semantic_urgency"] = 0.0
+    if "author_is_trump" not in filtered.columns:
+        filtered["author_is_trump"] = False
+    if "is_active_tracked_account" not in filtered.columns:
+        filtered["is_active_tracked_account"] = False
+
+    if topic != "All":
+        filtered = filtered.loc[filtered["semantic_topic"].astype(str) == topic].copy()
+    if policy_bucket != "All":
+        filtered = filtered.loc[filtered["semantic_policy_bucket"].astype(str) == policy_bucket].copy()
+    if stance != "All":
+        filtered = filtered.loc[filtered["semantic_stance"].astype(str) == stance].copy()
+    if urgency_band != "All":
+        filtered = filtered.loc[filtered["semantic_urgency"].map(narrative_urgency_band) == urgency_band].copy()
+    if narrative_asset != "All":
+        selected_asset = str(narrative_asset).upper()
+        primary_mask = filtered["semantic_primary_asset"].astype(str).str.upper() == selected_asset
+        target_mask = filtered["semantic_asset_targets"].map(
+            lambda value: selected_asset in parse_semantic_asset_targets(value),
+        )
+        filtered = filtered.loc[primary_mask | target_mask].copy()
+    if platforms:
+        filtered = filtered.loc[filtered["source_platform"].isin(platforms)].copy()
+    if tracked_scope == "Tracked accounts only":
+        filtered = filtered.loc[filtered["is_active_tracked_account"].astype(bool)].copy()
+    elif tracked_scope == "Trump + tracked accounts":
+        filtered = filtered.loc[
+            filtered["author_is_trump"].astype(bool) | filtered["is_active_tracked_account"].astype(bool)
+        ].copy()
+    return filtered.reset_index(drop=True)
+
+
+def build_narrative_frequency_frame(mapped_posts: pd.DataFrame) -> pd.DataFrame:
+    if mapped_posts.empty:
+        return pd.DataFrame()
+    frame = mapped_posts.copy()
+    frame["session_date"] = pd.to_datetime(frame["session_date"], errors="coerce").dt.normalize()
+    frame = frame.dropna(subset=["session_date"]).copy()
+    summary = (
+        frame.groupby(["session_date", "semantic_topic"], as_index=False)
+        .agg(
+            post_count=("semantic_topic", "size"),
+            avg_market_relevance=("semantic_market_relevance", "mean"),
+            avg_urgency=("semantic_urgency", "mean"),
+        )
+        .sort_values(["session_date", "semantic_topic"])
+        .reset_index(drop=True)
+    )
+    return summary
+
+
+def build_narrative_frequency_chart(frequency: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    if frequency.empty:
+        fig.update_layout(
+            title="Narrative frequency over time",
+            margin={"l": 20, "r": 20, "t": 60, "b": 20},
+        )
+        return fig
+
+    for topic, group in frequency.groupby("semantic_topic", sort=False):
+        fig.add_trace(
+            go.Bar(
+                x=group["session_date"],
+                y=group["post_count"],
+                name=str(topic),
+                marker={"color": NARRATIVE_COLOR_MAP.get(str(topic), "#94a3b8")},
+                customdata=np.stack(
+                    [
+                        group["avg_market_relevance"].fillna(0.0),
+                        group["avg_urgency"].fillna(0.0),
+                    ],
+                    axis=1,
+                ),
+                hovertemplate=(
+                    "<b>%{x|%Y-%m-%d}</b><br>"
+                    "Topic: %{fullData.name}<br>"
+                    "Posts: %{y}<br>"
+                    "Avg relevance: %{customdata[0]:.2f}<br>"
+                    "Avg urgency: %{customdata[1]:.2f}<extra></extra>"
+                ),
+            ),
+        )
+    fig.update_layout(
+        title="Narrative frequency over time",
+        xaxis_title="Trading session",
+        yaxis_title="Posts",
+        barmode="stack",
+        hovermode="x unified",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
+        margin={"l": 20, "r": 20, "t": 80, "b": 20},
+    )
+    return fig
+
+
+def build_narrative_return_frame(
+    mapped_posts: pd.DataFrame,
+    market: pd.DataFrame,
+    bucket_field: str = "semantic_topic",
+) -> pd.DataFrame:
+    if mapped_posts.empty or market.empty or bucket_field not in mapped_posts.columns:
+        return pd.DataFrame()
+
+    session_posts = mapped_posts.copy()
+    session_posts["session_date"] = pd.to_datetime(session_posts["session_date"], errors="coerce").dt.normalize()
+    session_posts = session_posts.dropna(subset=["session_date"]).copy()
+    session_posts = session_posts.loc[session_posts[bucket_field].astype(str).str.len() > 0].copy()
+    if session_posts.empty:
+        return pd.DataFrame()
+
+    events = market.copy()
+    events["trade_date"] = pd.to_datetime(events["trade_date"], errors="coerce").dt.normalize()
+    events["daily_return_pct"] = pd.to_numeric(events["close"], errors="coerce").pct_change()
+    events["next_day_return_pct"] = events["daily_return_pct"].shift(-1)
+
+    per_session = (
+        session_posts.groupby(["session_date", bucket_field], as_index=False)
+        .agg(
+            post_count=(bucket_field, "size"),
+            avg_market_relevance=("semantic_market_relevance", "mean"),
+            avg_urgency=("semantic_urgency", "mean"),
+        )
+        .merge(events[["trade_date", "next_day_return_pct"]], left_on="session_date", right_on="trade_date", how="left")
+    )
+    if per_session.empty:
+        return pd.DataFrame()
+    summary = (
+        per_session.groupby(bucket_field, as_index=False)
+        .agg(
+            avg_next_session_return=("next_day_return_pct", "mean"),
+            median_next_session_return=("next_day_return_pct", "median"),
+            session_count=("session_date", "nunique"),
+            total_posts=("post_count", "sum"),
+            avg_market_relevance=("avg_market_relevance", "mean"),
+        )
+        .sort_values("avg_next_session_return", ascending=False)
+        .reset_index(drop=True)
+    )
+    summary["bucket_field"] = bucket_field
+    return summary
+
+
+def build_narrative_return_chart(returns: pd.DataFrame, bucket_field: str) -> go.Figure:
+    fig = go.Figure()
+    if returns.empty:
+        fig.update_layout(
+            title="Next-session return by narrative bucket",
+            margin={"l": 20, "r": 20, "t": 60, "b": 20},
+        )
+        return fig
+
+    labels = returns.iloc[:, 0].astype(str)
+    colors = [NARRATIVE_COLOR_MAP.get(label, "#94a3b8") for label in labels]
+    fig.add_trace(
+        go.Bar(
+            x=labels,
+            y=returns["avg_next_session_return"],
+            marker={"color": colors},
+            customdata=np.stack(
+                [
+                    returns["median_next_session_return"].fillna(0.0),
+                    returns["session_count"].fillna(0).astype(int),
+                    returns["total_posts"].fillna(0).astype(int),
+                ],
+                axis=1,
+            ),
+            hovertemplate=(
+                "<b>%{x}</b><br>"
+                "Avg next-session return: %{y:+.2%}<br>"
+                "Median next-session return: %{customdata[0]:+.2%}<br>"
+                "Sessions: %{customdata[1]}<br>"
+                "Posts: %{customdata[2]}<extra></extra>"
+            ),
+        ),
+    )
+    fig.add_hline(y=0.0, line_dash="dot", line_width=1, line_color="rgba(148, 163, 184, 0.9)")
+    fig.update_layout(
+        title="Next-session return by narrative bucket",
+        xaxis_title=bucket_field.replace("_", " ").title(),
+        yaxis_title="Average next-session return",
+        yaxis_tickformat=".0%",
+        margin={"l": 20, "r": 20, "t": 80, "b": 20},
+    )
+    return fig
+
+
+def build_narrative_asset_heatmap_frame(asset_post_mappings: pd.DataFrame) -> pd.DataFrame:
+    if asset_post_mappings.empty:
+        return pd.DataFrame()
+    mappings = asset_post_mappings.copy()
+    mappings["asset_symbol"] = mappings["asset_symbol"].astype(str).str.upper()
+    summary = (
+        mappings.groupby(["semantic_topic", "asset_symbol"], as_index=False)
+        .agg(
+            post_count=("asset_symbol", "size"),
+            avg_asset_relevance=("asset_relevance_score", "mean"),
+            avg_market_relevance=("semantic_market_relevance", "mean"),
+        )
+        .sort_values(["semantic_topic", "asset_symbol"])
+        .reset_index(drop=True)
+    )
+    return summary
+
+
+def build_narrative_asset_heatmap_chart(heatmap: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    if heatmap.empty:
+        fig.update_layout(
+            title="Asset-by-narrative heatmap",
+            margin={"l": 20, "r": 20, "t": 60, "b": 20},
+        )
+        return fig
+
+    pivot = heatmap.pivot(index="semantic_topic", columns="asset_symbol", values="post_count").fillna(0.0)
+    relevance_lookup = heatmap.pivot(index="semantic_topic", columns="asset_symbol", values="avg_asset_relevance").reindex_like(pivot).fillna(0.0)
+    customdata = np.dstack([relevance_lookup.to_numpy()])
+    fig.add_trace(
+        go.Heatmap(
+            x=pivot.columns.tolist(),
+            y=pivot.index.tolist(),
+            z=pivot.to_numpy(),
+            customdata=customdata,
+            colorscale="Blues",
+            hovertemplate=(
+                "<b>%{y}</b> -> %{x}<br>"
+                "Mapped posts: %{z}<br>"
+                "Avg asset relevance: %{customdata[0]:.2f}<extra></extra>"
+            ),
+        ),
+    )
+    fig.update_layout(
+        title="Asset-by-narrative heatmap",
+        xaxis_title="Asset",
+        yaxis_title="Narrative topic",
+        margin={"l": 20, "r": 20, "t": 80, "b": 20},
+    )
+    return fig
+
+
+def make_narrative_post_table(mapped_posts: pd.DataFrame) -> pd.DataFrame:
+    if mapped_posts.empty:
+        return mapped_posts.copy()
+    table = mapped_posts.copy()
+    table["post_time_et"] = pd.to_datetime(table["post_timestamp"], errors="coerce").dt.tz_convert(EASTERN).dt.strftime("%Y-%m-%d %H:%M")
+    table["session_date"] = pd.to_datetime(table["session_date"], errors="coerce").dt.date
+    table["urgency_band"] = table["semantic_urgency"].map(narrative_urgency_band)
+    table["preview"] = table["cleaned_text"].map(lambda value: truncate_text(str(value), max_chars=180))
+    keep = [
+        "session_date",
+        "post_time_et",
+        "source_platform",
+        "author_handle",
+        "semantic_topic",
+        "semantic_policy_bucket",
+        "semantic_stance",
+        "semantic_primary_asset",
+        "semantic_asset_targets",
+        "semantic_market_relevance",
+        "semantic_urgency",
+        "urgency_band",
+        "semantic_provider",
+        "semantic_cache_hit",
+        "semantic_summary",
+        "preview",
+        "post_url",
+    ]
+    return table.sort_values(
+        ["semantic_market_relevance", "semantic_urgency", "post_time_et"],
+        ascending=[False, False, False],
+    )[keep].rename(columns={"preview": "post_text"})
+
+
+def make_narrative_event_table(mapped_posts: pd.DataFrame, market: pd.DataFrame) -> pd.DataFrame:
+    if mapped_posts.empty or market.empty:
+        return pd.DataFrame()
+    events = market.copy()
+    events["trade_date"] = pd.to_datetime(events["trade_date"], errors="coerce").dt.normalize()
+    events["daily_return_pct"] = pd.to_numeric(events["close"], errors="coerce").pct_change()
+    events["next_day_return_pct"] = events["daily_return_pct"].shift(-1)
+    grouped = mapped_posts.copy()
+    grouped["session_date"] = pd.to_datetime(grouped["session_date"], errors="coerce").dt.normalize()
+    summary = (
+        grouped.groupby("session_date", as_index=False)
+        .agg(
+            post_count=("cleaned_text", "size"),
+            avg_sentiment=("sentiment_score", "mean"),
+            avg_market_relevance=("semantic_market_relevance", "mean"),
+            avg_urgency=("semantic_urgency", "mean"),
+            primary_topics=("semantic_topic", lambda values: ", ".join(pd.Series(values).value_counts().head(2).index.tolist())),
+            primary_assets=("semantic_primary_asset", lambda values: ", ".join([value for value in pd.Series(values).astype(str).replace("", pd.NA).dropna().value_counts().head(2).index.tolist()])),
+            sample_posts=("cleaned_text", lambda values: " | ".join([truncate_text(str(value), max_chars=90) for value in pd.Series(values).head(2)])),
+        )
+        .merge(events[["trade_date", "next_day_return_pct"]], left_on="session_date", right_on="trade_date", how="left")
+        .drop(columns=["trade_date"])
+        .rename(columns={"session_date": "trade_date", "next_day_return_pct": "next_session_return"})
+        .sort_values("trade_date", ascending=False)
+        .reset_index(drop=True)
+    )
+    summary["trade_date"] = pd.to_datetime(summary["trade_date"], errors="coerce").dt.date
+    return summary
 
 
 def _format_post_summary(row: pd.Series, max_chars: int = 140) -> str:

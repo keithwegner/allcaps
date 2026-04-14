@@ -46,10 +46,19 @@ from .research import (
     build_intraday_comparison_chart,
     build_intraday_comparison_frame,
     build_intraday_chart,
+    build_narrative_asset_heatmap_chart,
+    build_narrative_asset_heatmap_frame,
+    build_narrative_frequency_chart,
+    build_narrative_frequency_frame,
+    build_narrative_return_chart,
+    build_narrative_return_frame,
     filter_posts,
+    filter_narrative_rows,
     get_intraday_window,
     make_asset_mapping_table,
     make_asset_session_table,
+    make_narrative_event_table,
+    make_narrative_post_table,
     make_post_table,
     make_session_table,
 )
@@ -958,10 +967,29 @@ def render_research_view(
         keyword=keyword,
         tracked_only=tracked_only,
     )
-    mapped = map_posts_to_trade_sessions(filtered_posts, market[["trade_date"]])
-    mapped = feature_service._flag_tracked_posts(mapped, tracked_accounts)
+    mapped = feature_service.prepare_session_posts(
+        posts=filtered_posts,
+        market_calendar=market,
+        tracked_accounts=tracked_accounts,
+        llm_enabled=True,
+    )
     sessions = aggregate_research_sessions(mapped)
     events = build_event_frame(market, sessions)
+    narrative_asset_view = pd.DataFrame()
+    if not mapped.empty and not asset_universe.empty:
+        narrative_asset_view = feature_service.build_asset_post_mappings(
+            prepared_posts=mapped,
+            asset_universe=asset_universe,
+            llm_enabled=True,
+        )
+    elif not asset_post_mappings.empty:
+        narrative_asset_view = asset_post_mappings.copy()
+    if not narrative_asset_view.empty and "session_date" in narrative_asset_view.columns:
+        narrative_asset_view["session_date"] = pd.to_datetime(narrative_asset_view["session_date"], errors="coerce").dt.normalize()
+        narrative_asset_view = narrative_asset_view.loc[
+            (narrative_asset_view["session_date"] >= start_date.normalize())
+            & (narrative_asset_view["session_date"] <= end_date.normalize())
+        ].copy()
 
     metric_cols = st.columns(6)
     metric_cols[0].metric("Sessions with posts", f"{int((events['post_count'] > 0).sum()):,}")
@@ -987,270 +1015,416 @@ def render_research_view(
         with st.expander("Underlying posts", expanded=False):
             st.dataframe(post_table, use_container_width=True, hide_index=True)
 
-    st.markdown("**Multi-Asset Comparison**")
-    st.caption("Compare `SPY` with one tracked stock or ETF across overlays, event studies, and intraday reaction windows.")
-    if asset_universe.empty or asset_daily.empty:
-        st.info("Refresh datasets first to populate the tracked asset universe and daily asset market data.")
-    else:
-        comparison_candidates = asset_universe.loc[asset_universe["symbol"].astype(str).str.upper() != "SPY"].copy()
-        if comparison_candidates.empty:
-            st.info("Add at least one non-`SPY` asset to the tracked universe to enable asset comparison.")
+    narratives_tab, asset_tab = st.tabs(["Narratives", "Multi-Asset Comparison"])
+
+    with narratives_tab:
+        st.caption(
+            "Narrative Lab: inspect structured topics, policy buckets, urgency, and asset targets. "
+            "Heuristic fallback remains available even when no hosted provider is configured.",
+        )
+        if mapped.empty:
+            st.info("No enriched post sessions are available for the current date range and filters.")
         else:
-            comparison_candidates["symbol"] = comparison_candidates["symbol"].astype(str).str.upper()
-            comparison_candidates["display_name"] = comparison_candidates["display_name"].fillna(comparison_candidates["symbol"]).astype(str)
-            candidate_symbols = comparison_candidates["symbol"].tolist()
-            candidate_labels = {
-                row["symbol"]: f"{row['symbol']} - {row['display_name']}"
-                for _, row in comparison_candidates.iterrows()
+            topic_options = ["All"] + sorted(mapped["semantic_topic"].fillna("other").astype(str).unique().tolist())
+            policy_options = ["All"] + sorted(mapped["semantic_policy_bucket"].fillna("other").astype(str).unique().tolist())
+            stance_options = ["All"] + sorted(mapped["semantic_stance"].fillna("unknown").astype(str).unique().tolist())
+            asset_targets = sorted(
+                {
+                    asset
+                    for value in mapped["semantic_asset_targets"].fillna("")
+                    for asset in value.split(",")
+                    if asset
+                }
+                | {
+                    str(value).upper()
+                    for value in mapped["semantic_primary_asset"].fillna("")
+                    if str(value).strip()
+                },
+            )
+            platform_options = sorted(mapped["source_platform"].dropna().astype(str).unique().tolist())
+            bucket_field_options = {
+                "Topic": "semantic_topic",
+                "Policy bucket": "semantic_policy_bucket",
+                "Stance": "semantic_stance",
+                "Primary asset": "semantic_primary_asset",
             }
-            watchlist_symbols = comparison_candidates.loc[
-                comparison_candidates["source"].astype(str) == "watchlist",
-                "symbol",
-            ].tolist()
-            default_asset = watchlist_symbols[0] if watchlist_symbols else candidate_symbols[0]
 
-            asset_controls = st.columns([1.5, 1.1, 1.2])
-            selected_asset = asset_controls[0].selectbox(
-                "Selected asset",
-                options=candidate_symbols,
-                index=candidate_symbols.index(default_asset),
-                format_func=lambda symbol: candidate_labels.get(symbol, symbol),
-                key="research_selected_asset",
+            narrative_controls_top = st.columns(4)
+            selected_topic = narrative_controls_top[0].selectbox("Topic", options=topic_options, key="narrative_topic")
+            selected_policy = narrative_controls_top[1].selectbox("Policy bucket", options=policy_options, key="narrative_policy")
+            selected_stance = narrative_controls_top[2].selectbox("Stance", options=stance_options, key="narrative_stance")
+            selected_bucket_label = narrative_controls_top[3].selectbox(
+                "Return bucket",
+                options=list(bucket_field_options.keys()),
+                key="narrative_bucket_field",
             )
-            comparison_mode = asset_controls[1].radio(
-                "View",
-                options=["price", "normalized"],
-                format_func=lambda value: "Price overlay" if value == "price" else "Normalized returns",
-                horizontal=True,
-                key="research_asset_comparison_mode",
+
+            narrative_controls_bottom = st.columns(4)
+            selected_urgency = narrative_controls_bottom[0].selectbox(
+                "Urgency band",
+                options=["All", "low", "medium", "high"],
+                key="narrative_urgency",
             )
-            benchmark_options = ["None"] + [symbol for symbol in DEFAULT_ETF_SYMBOLS if symbol not in {"SPY", selected_asset}]
-            benchmark_choice = asset_controls[2].selectbox(
-                "ETF baseline",
-                options=benchmark_options,
-                key="research_asset_benchmark",
+            selected_narrative_asset = narrative_controls_bottom[1].selectbox(
+                "Primary asset / target",
+                options=["All"] + asset_targets,
+                key="narrative_asset_target",
             )
-            selected_benchmark = None if benchmark_choice == "None" else benchmark_choice
+            selected_narrative_platforms = narrative_controls_bottom[2].multiselect(
+                "Platforms",
+                options=platform_options,
+                default=platform_options,
+                key="narrative_platforms",
+            )
+            tracked_scope = narrative_controls_bottom[3].selectbox(
+                "Tracked scope",
+                options=["All posts", "Trump + tracked accounts", "Tracked accounts only"],
+                key="narrative_tracked_scope",
+            )
 
-            asset_feature_view = asset_session_features.copy()
-            if not asset_feature_view.empty and "signal_session_date" in asset_feature_view.columns:
-                asset_feature_view["signal_session_date"] = pd.to_datetime(asset_feature_view["signal_session_date"], errors="coerce").dt.normalize()
-                asset_feature_view = asset_feature_view.loc[
-                    (asset_feature_view["signal_session_date"] >= start_date.normalize())
-                    & (asset_feature_view["signal_session_date"] <= end_date.normalize())
-                ].copy()
-            asset_mapping_view = asset_post_mappings.copy()
-            if not asset_mapping_view.empty and "session_date" in asset_mapping_view.columns:
-                asset_mapping_view["session_date"] = pd.to_datetime(asset_mapping_view["session_date"], errors="coerce").dt.normalize()
-                asset_mapping_view = asset_mapping_view.loc[
-                    (asset_mapping_view["session_date"] >= start_date.normalize())
-                    & (asset_mapping_view["session_date"] <= end_date.normalize())
-                ].copy()
-            selected_asset_raw_mappings = asset_mapping_view.loc[
-                asset_mapping_view["asset_symbol"].astype(str).str.upper() == selected_asset
-            ].copy() if not asset_mapping_view.empty and "asset_symbol" in asset_mapping_view.columns else pd.DataFrame()
-            if not selected_asset_raw_mappings.empty and "reaction_anchor_ts" not in selected_asset_raw_mappings.columns:
-                selected_asset_raw_mappings["reaction_anchor_ts"] = selected_asset_raw_mappings["post_timestamp"]
+            filtered_narratives = filter_narrative_rows(
+                mapped,
+                topic=selected_topic,
+                policy_bucket=selected_policy,
+                stance=selected_stance,
+                urgency_band=selected_urgency,
+                narrative_asset=selected_narrative_asset,
+                platforms=selected_narrative_platforms,
+                tracked_scope=tracked_scope,
+            )
+            filtered_narrative_assets = filter_narrative_rows(
+                narrative_asset_view,
+                topic=selected_topic,
+                policy_bucket=selected_policy,
+                stance=selected_stance,
+                urgency_band=selected_urgency,
+                narrative_asset=selected_narrative_asset,
+                platforms=selected_narrative_platforms,
+                tracked_scope=tracked_scope,
+            )
 
-            overview_tab, event_study_tab, intraday_tab = st.tabs(["Overview", "Event Study", "Intraday Reaction"])
-
-            with overview_tab:
-                comparison = build_asset_comparison_frame(
-                    asset_market=asset_daily,
-                    selected_symbol=selected_asset,
-                    benchmark_symbol=selected_benchmark,
-                    date_start=start_date,
-                    date_end=end_date,
+            provider_summary = (
+                mapped.groupby("semantic_provider", as_index=False)
+                .agg(
+                    posts=("post_id", "size"),
+                    cache_hit_rate=("semantic_cache_hit", "mean"),
+                    avg_market_relevance=("semantic_market_relevance", "mean"),
                 )
-                if comparison.empty:
-                    st.info(f"No overlapping daily market data was found for `SPY` and `{selected_asset}` in the current date range.")
-                else:
-                    asset_metric_cols = st.columns(4)
-                    asset_metric_cols[0].metric("Sessions in range", f"{len(comparison):,}")
-                    asset_metric_cols[1].metric("SPY move", f"{comparison['spy_normalized_return'].iloc[-1]:+.2%}")
-                    asset_metric_cols[2].metric(f"{selected_asset} move", f"{comparison['asset_normalized_return'].iloc[-1]:+.2%}")
-                    asset_metric_cols[3].metric(
-                        f"{selected_asset} vs SPY spread",
-                        f"{(comparison['asset_normalized_return'].iloc[-1] - comparison['spy_normalized_return'].iloc[-1]):+.2%}",
-                    )
+                .sort_values("posts", ascending=False)
+            )
+            narrative_metrics = st.columns(4)
+            narrative_metrics[0].metric("Narrative-tagged posts", f"{len(filtered_narratives):,}")
+            narrative_metrics[1].metric(
+                "Narrative sessions",
+                f"{filtered_narratives['session_date'].nunique():,}" if "session_date" in filtered_narratives.columns else "0",
+            )
+            narrative_metrics[2].metric(
+                "Cache hit rate",
+                f"{mapped['semantic_cache_hit'].astype(bool).mean():.0%}" if "semantic_cache_hit" in mapped.columns and not mapped.empty else "0%",
+            )
+            narrative_metrics[3].metric("Providers used", f"{provider_summary['semantic_provider'].nunique():,}")
+
+            with st.expander("Provider, fallback, and cache indicators", expanded=False):
+                st.dataframe(provider_summary, use_container_width=True, hide_index=True)
+
+            if filtered_narratives.empty:
+                st.info("No narrative rows match the current Narrative Lab filters.")
+            else:
+                frequency = build_narrative_frequency_frame(filtered_narratives)
+                returns = build_narrative_return_frame(
+                    filtered_narratives,
+                    market,
+                    bucket_field=bucket_field_options[selected_bucket_label],
+                )
+                heatmap = build_narrative_asset_heatmap_frame(filtered_narrative_assets)
+                narrative_chart_left, narrative_chart_right = st.columns(2)
+                with narrative_chart_left:
+                    st.plotly_chart(build_narrative_frequency_chart(frequency), use_container_width=True)
+                with narrative_chart_right:
                     st.plotly_chart(
-                        build_asset_comparison_chart(comparison, selected_asset, comparison_mode),
+                        build_narrative_return_chart(returns, bucket_field_options[selected_bucket_label]),
                         use_container_width=True,
                     )
 
-                asset_session_table = make_asset_session_table(asset_feature_view, selected_asset)
-                if not asset_session_table.empty:
-                    st.markdown("**Per-asset session summary**")
-                    st.dataframe(
-                        asset_session_table.sort_values(["post_count", "trade_date"], ascending=[False, False]),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-                asset_mapping_table = make_asset_mapping_table(asset_mapping_view, selected_asset)
-                if asset_mapping_table.empty:
-                    st.info(f"No mapped posts for `{selected_asset}` were found in the current date range.")
+                if heatmap.empty:
+                    st.info("No asset-specific narrative mappings are available for the current filters.")
                 else:
-                    session_options = sorted(asset_mapping_table["session_date"].dropna().unique().tolist(), reverse=True)
-                    selected_asset_session = st.selectbox(
-                        "Matched session",
-                        options=session_options,
-                        format_func=lambda value: value.isoformat(),
-                        key="research_asset_mapping_session",
-                    )
-                    session_mapping_table = asset_mapping_table.loc[
-                        asset_mapping_table["session_date"] == selected_asset_session
+                    st.plotly_chart(build_narrative_asset_heatmap_chart(heatmap), use_container_width=True)
+
+                narrative_posts_table = make_narrative_post_table(filtered_narratives)
+                narrative_events_table = make_narrative_event_table(filtered_narratives, market)
+                detail_left, detail_right = st.columns(2)
+                with detail_left:
+                    st.markdown("**Top posts for the selected narrative slice**")
+                    st.dataframe(narrative_posts_table.head(25), use_container_width=True, hide_index=True)
+                with detail_right:
+                    st.markdown("**Selected-narrative event table**")
+                    st.dataframe(narrative_events_table, use_container_width=True, hide_index=True)
+
+    with asset_tab:
+        st.caption("Compare `SPY` with one tracked stock or ETF across overlays, event studies, and intraday reaction windows.")
+        if asset_universe.empty or asset_daily.empty:
+            st.info("Refresh datasets first to populate the tracked asset universe and daily asset market data.")
+        else:
+            comparison_candidates = asset_universe.loc[asset_universe["symbol"].astype(str).str.upper() != "SPY"].copy()
+            if comparison_candidates.empty:
+                st.info("Add at least one non-`SPY` asset to the tracked universe to enable asset comparison.")
+            else:
+                comparison_candidates["symbol"] = comparison_candidates["symbol"].astype(str).str.upper()
+                comparison_candidates["display_name"] = comparison_candidates["display_name"].fillna(comparison_candidates["symbol"]).astype(str)
+                candidate_symbols = comparison_candidates["symbol"].tolist()
+                candidate_labels = {
+                    row["symbol"]: f"{row['symbol']} - {row['display_name']}"
+                    for _, row in comparison_candidates.iterrows()
+                }
+                watchlist_symbols = comparison_candidates.loc[
+                    comparison_candidates["source"].astype(str) == "watchlist",
+                    "symbol",
+                ].tolist()
+                default_asset = watchlist_symbols[0] if watchlist_symbols else candidate_symbols[0]
+
+                asset_controls = st.columns([1.5, 1.1, 1.2])
+                selected_asset = asset_controls[0].selectbox(
+                    "Selected asset",
+                    options=candidate_symbols,
+                    index=candidate_symbols.index(default_asset),
+                    format_func=lambda symbol: candidate_labels.get(symbol, symbol),
+                    key="research_selected_asset",
+                )
+                comparison_mode = asset_controls[1].radio(
+                    "View",
+                    options=["price", "normalized"],
+                    format_func=lambda value: "Price overlay" if value == "price" else "Normalized returns",
+                    horizontal=True,
+                    key="research_asset_comparison_mode",
+                )
+                benchmark_options = ["None"] + [symbol for symbol in DEFAULT_ETF_SYMBOLS if symbol not in {"SPY", selected_asset}]
+                benchmark_choice = asset_controls[2].selectbox(
+                    "ETF baseline",
+                    options=benchmark_options,
+                    key="research_asset_benchmark",
+                )
+                selected_benchmark = None if benchmark_choice == "None" else benchmark_choice
+
+                asset_feature_view = asset_session_features.copy()
+                if not asset_feature_view.empty and "signal_session_date" in asset_feature_view.columns:
+                    asset_feature_view["signal_session_date"] = pd.to_datetime(asset_feature_view["signal_session_date"], errors="coerce").dt.normalize()
+                    asset_feature_view = asset_feature_view.loc[
+                        (asset_feature_view["signal_session_date"] >= start_date.normalize())
+                        & (asset_feature_view["signal_session_date"] <= end_date.normalize())
                     ].copy()
-                    st.markdown(f"**Matched posts for {selected_asset} on {selected_asset_session.isoformat()}**")
-                    st.dataframe(session_mapping_table, use_container_width=True, hide_index=True)
+                asset_mapping_view = asset_post_mappings.copy()
+                if not asset_mapping_view.empty and "session_date" in asset_mapping_view.columns:
+                    asset_mapping_view["session_date"] = pd.to_datetime(asset_mapping_view["session_date"], errors="coerce").dt.normalize()
+                    asset_mapping_view = asset_mapping_view.loc[
+                        (asset_mapping_view["session_date"] >= start_date.normalize())
+                        & (asset_mapping_view["session_date"] <= end_date.normalize())
+                    ].copy()
+                selected_asset_raw_mappings = asset_mapping_view.loc[
+                    asset_mapping_view["asset_symbol"].astype(str).str.upper() == selected_asset
+                ].copy() if not asset_mapping_view.empty and "asset_symbol" in asset_mapping_view.columns else pd.DataFrame()
+                if not selected_asset_raw_mappings.empty and "reaction_anchor_ts" not in selected_asset_raw_mappings.columns:
+                    selected_asset_raw_mappings["reaction_anchor_ts"] = selected_asset_raw_mappings["post_timestamp"]
 
-            with event_study_tab:
-                study_controls = st.columns(2)
-                pre_sessions = study_controls[0].slider(
-                    "Sessions before event",
-                    min_value=1,
-                    max_value=10,
-                    value=3,
-                    step=1,
-                    key="research_event_study_pre",
-                )
-                post_sessions = study_controls[1].slider(
-                    "Sessions after event",
-                    min_value=1,
-                    max_value=10,
-                    value=5,
-                    step=1,
-                    key="research_event_study_post",
-                )
-                event_study = build_event_study_frame(
-                    asset_market=asset_daily,
-                    asset_session_features=asset_feature_view,
-                    selected_symbol=selected_asset,
-                    benchmark_symbol=selected_benchmark,
-                    pre_sessions=pre_sessions,
-                    post_sessions=post_sessions,
-                )
-                if event_study.empty:
-                    st.info(f"No asset-specific event-study rows are available for `{selected_asset}` in the current range.")
-                else:
-                    st.plotly_chart(
-                        build_event_study_chart(event_study, selected_asset),
-                        use_container_width=True,
-                    )
-                    pivot = (
-                        event_study.pivot(index="relative_session", columns="symbol", values="avg_relative_return")
-                        .reset_index()
-                        .sort_values("relative_session")
-                    )
-                    st.markdown("**Average return by relative session**")
-                    st.dataframe(pivot, use_container_width=True, hide_index=True)
+                overview_tab, event_study_tab, intraday_tab = st.tabs(["Overview", "Event Study", "Intraday Reaction"])
 
-            with intraday_tab:
-                st.caption("Uses the stored recent `asset_intraday` dataset, so older sessions may not have intraday coverage.")
-                if asset_intraday.empty:
-                    st.info("Refresh datasets first to populate recent multi-asset intraday data.")
-                elif selected_asset_raw_mappings.empty:
-                    st.info(f"No mapped posts for `{selected_asset}` are available to anchor an intraday comparison.")
-                else:
-                    intraday_required_symbols = {"SPY", selected_asset}
-                    if selected_benchmark:
-                        intraday_required_symbols.add(selected_benchmark)
-                    intraday_view = asset_intraday.copy()
-                    intraday_view["symbol"] = intraday_view["symbol"].astype(str).str.upper()
-                    intraday_view["timestamp"] = pd.to_datetime(intraday_view["timestamp"], errors="coerce")
-                    intraday_dates = {
-                        symbol: set(
-                            intraday_view.loc[intraday_view["symbol"] == symbol, "timestamp"]
-                            .dropna()
-                            .dt.tz_convert(settings.timezone)
-                            .dt.date
-                            .tolist()
-                        )
-                        for symbol in intraday_required_symbols
-                    }
-                    intraday_mapping_candidates = selected_asset_raw_mappings.copy()
-                    intraday_mapping_candidates["session_date"] = pd.to_datetime(
-                        intraday_mapping_candidates["session_date"],
-                        errors="coerce",
-                    ).dt.date
-                    eligible_intraday_sessions = [
-                        session_date
-                        for session_date in sorted(intraday_mapping_candidates["session_date"].dropna().unique().tolist(), reverse=True)
-                        if all(session_date in intraday_dates.get(symbol, set()) for symbol in intraday_required_symbols)
-                    ]
-                    if not eligible_intraday_sessions:
-                        st.info(
-                            f"No recent intraday coverage overlaps the mapped `{selected_asset}` sessions for the required symbols "
-                            f"({', '.join(sorted(intraday_required_symbols))}).",
-                        )
+                with overview_tab:
+                    comparison = build_asset_comparison_frame(
+                        asset_market=asset_daily,
+                        selected_symbol=selected_asset,
+                        benchmark_symbol=selected_benchmark,
+                        date_start=start_date,
+                        date_end=end_date,
+                    )
+                    if comparison.empty:
+                        st.info(f"No overlapping daily market data was found for `SPY` and `{selected_asset}` in the current date range.")
                     else:
-                        intraday_controls = st.columns(4)
-                        selected_intraday_session = intraday_controls[0].selectbox(
-                            "Intraday session",
-                            options=eligible_intraday_sessions,
+                        asset_metric_cols = st.columns(4)
+                        asset_metric_cols[0].metric("Sessions in range", f"{len(comparison):,}")
+                        asset_metric_cols[1].metric("SPY move", f"{comparison['spy_normalized_return'].iloc[-1]:+.2%}")
+                        asset_metric_cols[2].metric(f"{selected_asset} move", f"{comparison['asset_normalized_return'].iloc[-1]:+.2%}")
+                        asset_metric_cols[3].metric(
+                            f"{selected_asset} vs SPY spread",
+                            f"{(comparison['asset_normalized_return'].iloc[-1] - comparison['spy_normalized_return'].iloc[-1]):+.2%}",
+                        )
+                        st.plotly_chart(
+                            build_asset_comparison_chart(comparison, selected_asset, comparison_mode),
+                            use_container_width=True,
+                        )
+
+                    asset_session_table = make_asset_session_table(asset_feature_view, selected_asset)
+                    if not asset_session_table.empty:
+                        st.markdown("**Per-asset session summary**")
+                        st.dataframe(
+                            asset_session_table.sort_values(["post_count", "trade_date"], ascending=[False, False]),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                    asset_mapping_table = make_asset_mapping_table(asset_mapping_view, selected_asset)
+                    if asset_mapping_table.empty:
+                        st.info(f"No mapped posts for `{selected_asset}` were found in the current date range.")
+                    else:
+                        session_options = sorted(asset_mapping_table["session_date"].dropna().unique().tolist(), reverse=True)
+                        selected_asset_session = st.selectbox(
+                            "Matched session",
+                            options=session_options,
                             format_func=lambda value: value.isoformat(),
-                            key="research_intraday_asset_session",
+                            key="research_asset_mapping_session",
                         )
-                        session_intraday_posts = intraday_mapping_candidates.loc[
-                            intraday_mapping_candidates["session_date"] == selected_intraday_session
-                        ].sort_values("post_timestamp")
-                        post_labels = [
-                            f"{row['post_timestamp'].tz_convert(settings.timezone):%Y-%m-%d %H:%M} ET | @{row['author_handle'] or row['author_display_name']} | {truncate(row['cleaned_text'])}"
-                            for _, row in session_intraday_posts.iterrows()
-                        ]
-                        selected_intraday_label = intraday_controls[1].selectbox(
-                            "Anchor post",
-                            options=post_labels,
-                            key="research_intraday_asset_post",
+                        session_mapping_table = asset_mapping_table.loc[
+                            asset_mapping_table["session_date"] == selected_asset_session
+                        ].copy()
+                        st.markdown(f"**Matched posts for {selected_asset} on {selected_asset_session.isoformat()}**")
+                        st.dataframe(session_mapping_table, use_container_width=True, hide_index=True)
+
+                with event_study_tab:
+                    study_controls = st.columns(2)
+                    pre_sessions = study_controls[0].slider(
+                        "Sessions before event",
+                        min_value=1,
+                        max_value=10,
+                        value=3,
+                        step=1,
+                        key="research_event_study_pre",
+                    )
+                    post_sessions = study_controls[1].slider(
+                        "Sessions after event",
+                        min_value=1,
+                        max_value=10,
+                        value=5,
+                        step=1,
+                        key="research_event_study_post",
+                    )
+                    event_study = build_event_study_frame(
+                        asset_market=asset_daily,
+                        asset_session_features=asset_feature_view,
+                        selected_symbol=selected_asset,
+                        benchmark_symbol=selected_benchmark,
+                        pre_sessions=pre_sessions,
+                        post_sessions=post_sessions,
+                    )
+                    if event_study.empty:
+                        st.info(f"No asset-specific event-study rows are available for `{selected_asset}` in the current range.")
+                    else:
+                        st.plotly_chart(
+                            build_event_study_chart(event_study, selected_asset),
+                            use_container_width=True,
                         )
-                        before_minutes = intraday_controls[2].selectbox(
-                            "Minutes before",
-                            options=[30, 60, 120, 180, 240],
-                            index=2,
-                            key="research_intraday_asset_before",
+                        pivot = (
+                            event_study.pivot(index="relative_session", columns="symbol", values="avg_relative_return")
+                            .reset_index()
+                            .sort_values("relative_session")
                         )
-                        after_minutes = intraday_controls[3].selectbox(
-                            "Minutes after",
-                            options=[60, 120, 240, 390],
-                            index=2,
-                            key="research_intraday_asset_after",
-                        )
-                        selected_intraday_post = session_intraday_posts.iloc[post_labels.index(selected_intraday_label)]
-                        anchor_ts = pd.to_datetime(
-                            selected_intraday_post.get("reaction_anchor_ts", selected_intraday_post["post_timestamp"]),
+                        st.markdown("**Average return by relative session**")
+                        st.dataframe(pivot, use_container_width=True, hide_index=True)
+
+                with intraday_tab:
+                    st.caption("Uses the stored recent `asset_intraday` dataset, so older sessions may not have intraday coverage.")
+                    if asset_intraday.empty:
+                        st.info("Refresh datasets first to populate recent multi-asset intraday data.")
+                    elif selected_asset_raw_mappings.empty:
+                        st.info(f"No mapped posts for `{selected_asset}` are available to anchor an intraday comparison.")
+                    else:
+                        intraday_required_symbols = {"SPY", selected_asset}
+                        if selected_benchmark:
+                            intraday_required_symbols.add(selected_benchmark)
+                        intraday_view = asset_intraday.copy()
+                        intraday_view["symbol"] = intraday_view["symbol"].astype(str).str.upper()
+                        intraday_view["timestamp"] = pd.to_datetime(intraday_view["timestamp"], errors="coerce")
+                        intraday_dates = {
+                            symbol: set(
+                                intraday_view.loc[intraday_view["symbol"] == symbol, "timestamp"]
+                                .dropna()
+                                .dt.tz_convert(settings.timezone)
+                                .dt.date
+                                .tolist()
+                            )
+                            for symbol in intraday_required_symbols
+                        }
+                        intraday_mapping_candidates = selected_asset_raw_mappings.copy()
+                        intraday_mapping_candidates["session_date"] = pd.to_datetime(
+                            intraday_mapping_candidates["session_date"],
                             errors="coerce",
-                        )
-                        if pd.isna(anchor_ts):
-                            anchor_ts = selected_intraday_post["post_timestamp"]
-                        if getattr(anchor_ts, "tzinfo", None) is None:
-                            anchor_ts = anchor_ts.tz_localize(settings.timezone)
-                        else:
-                            anchor_ts = anchor_ts.tz_convert(settings.timezone)
-                        intraday_comparison = build_intraday_comparison_frame(
-                            intraday_frame=intraday_view,
-                            selected_symbol=selected_asset,
-                            anchor_ts=anchor_ts,
-                            before_minutes=int(before_minutes),
-                            after_minutes=int(after_minutes),
-                            benchmark_symbol=selected_benchmark,
-                        )
-                        if intraday_comparison.empty:
-                            st.warning("No intraday comparison rows were returned for the selected window.")
-                        else:
-                            st.plotly_chart(
-                                build_intraday_comparison_chart(intraday_comparison, selected_asset, anchor_ts),
-                                use_container_width=True,
+                        ).dt.date
+                        eligible_intraday_sessions = [
+                            session_date
+                            for session_date in sorted(intraday_mapping_candidates["session_date"].dropna().unique().tolist(), reverse=True)
+                            if all(session_date in intraday_dates.get(symbol, set()) for symbol in intraday_required_symbols)
+                        ]
+                        if not eligible_intraday_sessions:
+                            st.info(
+                                f"No recent intraday coverage overlaps the mapped `{selected_asset}` sessions for the required symbols "
+                                f"({', '.join(sorted(intraday_required_symbols))}).",
                             )
-                            coverage = (
-                                intraday_comparison.groupby("symbol", as_index=False)
-                                .agg(
-                                    bars=("timestamp", "size"),
-                                    first_timestamp=("timestamp", "min"),
-                                    last_timestamp=("timestamp", "max"),
+                        else:
+                            intraday_controls = st.columns(4)
+                            selected_intraday_session = intraday_controls[0].selectbox(
+                                "Intraday session",
+                                options=eligible_intraday_sessions,
+                                format_func=lambda value: value.isoformat(),
+                                key="research_intraday_asset_session",
+                            )
+                            session_intraday_posts = intraday_mapping_candidates.loc[
+                                intraday_mapping_candidates["session_date"] == selected_intraday_session
+                            ].sort_values("post_timestamp")
+                            post_labels = [
+                                f"{row['post_timestamp'].tz_convert(settings.timezone):%Y-%m-%d %H:%M} ET | @{row['author_handle'] or row['author_display_name']} | {truncate(row['cleaned_text'])}"
+                                for _, row in session_intraday_posts.iterrows()
+                            ]
+                            selected_intraday_label = intraday_controls[1].selectbox(
+                                "Anchor post",
+                                options=post_labels,
+                                key="research_intraday_asset_post",
+                            )
+                            before_minutes = intraday_controls[2].selectbox(
+                                "Minutes before",
+                                options=[30, 60, 120, 180, 240],
+                                index=2,
+                                key="research_intraday_asset_before",
+                            )
+                            after_minutes = intraday_controls[3].selectbox(
+                                "Minutes after",
+                                options=[60, 120, 240, 390],
+                                index=2,
+                                key="research_intraday_asset_after",
+                            )
+                            selected_intraday_post = session_intraday_posts.iloc[post_labels.index(selected_intraday_label)]
+                            anchor_ts = pd.to_datetime(
+                                selected_intraday_post.get("reaction_anchor_ts", selected_intraday_post["post_timestamp"]),
+                                errors="coerce",
+                            )
+                            if pd.isna(anchor_ts):
+                                anchor_ts = selected_intraday_post["post_timestamp"]
+                            if getattr(anchor_ts, "tzinfo", None) is None:
+                                anchor_ts = anchor_ts.tz_localize(settings.timezone)
+                            else:
+                                anchor_ts = anchor_ts.tz_convert(settings.timezone)
+                            intraday_comparison = build_intraday_comparison_frame(
+                                intraday_frame=intraday_view,
+                                selected_symbol=selected_asset,
+                                anchor_ts=anchor_ts,
+                                before_minutes=int(before_minutes),
+                                after_minutes=int(after_minutes),
+                                benchmark_symbol=selected_benchmark,
+                            )
+                            if intraday_comparison.empty:
+                                st.warning("No intraday comparison rows were returned for the selected window.")
+                            else:
+                                st.plotly_chart(
+                                    build_intraday_comparison_chart(intraday_comparison, selected_asset, anchor_ts),
+                                    use_container_width=True,
                                 )
-                            )
-                            st.markdown("**Intraday coverage**")
-                            st.dataframe(coverage, use_container_width=True, hide_index=True)
+                                coverage = (
+                                    intraday_comparison.groupby("symbol", as_index=False)
+                                    .agg(
+                                        bars=("timestamp", "size"),
+                                        first_timestamp=("timestamp", "min"),
+                                        last_timestamp=("timestamp", "max"),
+                                    )
+                                )
+                                st.markdown("**Intraday coverage**")
+                                st.dataframe(coverage, use_container_width=True, hide_index=True)
 
     with st.expander("Intraday SPY drill-down", expanded=False):
         alpha_vantage_key = st.text_input(

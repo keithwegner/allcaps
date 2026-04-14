@@ -16,12 +16,22 @@ from trump_workbench.research import (
     build_intraday_comparison_chart,
     build_intraday_comparison_frame,
     build_intraday_chart,
+    build_narrative_asset_heatmap_chart,
+    build_narrative_asset_heatmap_frame,
+    build_narrative_frequency_chart,
+    build_narrative_frequency_frame,
+    build_narrative_return_chart,
+    build_narrative_return_frame,
     filter_posts,
+    filter_narrative_rows,
     get_intraday_window,
     make_asset_mapping_table,
     make_asset_session_table,
+    make_narrative_event_table,
+    make_narrative_post_table,
     make_post_table,
     make_session_table,
+    narrative_urgency_band,
 )
 
 
@@ -50,6 +60,21 @@ class ResearchTests(unittest.TestCase):
                 "mentions_trump": [False, True, True],
                 "sentiment_score": [0.8, -0.2, 0.1],
                 "sentiment_label": ["positive", "negative", "positive"],
+                "semantic_topic": ["markets", "trade", "campaign"],
+                "semantic_policy_bucket": ["economy", "trade", "economy"],
+                "semantic_stance": ["positive", "negative", "positive"],
+                "semantic_market_relevance": [0.7, 0.9, 0.4],
+                "semantic_urgency": [0.2, 0.8, 0.3],
+                "semantic_primary_asset": ["SPY", "NVDA", "SPY"],
+                "semantic_asset_targets": ["SPY,QQQ", "NVDA,XLE", "SPY"],
+                "semantic_confidence": [0.71, 0.89, 0.5],
+                "semantic_summary": [
+                    "Markets narrative with broad-market focus.",
+                    "Trade narrative with NVDA focus.",
+                    "Campaign narrative with broad-market focus.",
+                ],
+                "semantic_provider": ["heuristic-cache", "heuristic-cache", "heuristic-cache"],
+                "semantic_cache_hit": [True, False, True],
                 "post_url": ["https://truth/1", "https://x.com/macro/status/1", "https://x.com/re/status/2"],
             },
         )
@@ -88,6 +113,7 @@ class ResearchTests(unittest.TestCase):
         )
         self.asset_post_mappings = pd.DataFrame(
             {
+                "post_id": ["nvda-1", "nvda-2"],
                 "asset_symbol": ["NVDA", "NVDA"],
                 "session_date": pd.to_datetime(["2025-02-03", "2025-02-04"]),
                 "post_timestamp": pd.to_datetime(
@@ -104,6 +130,16 @@ class ResearchTests(unittest.TestCase):
                 "asset_relevance_score": [0.8, 0.55],
                 "rule_match_score": [0.6, 0.4],
                 "semantic_match_score": [0.2, 0.15],
+                "semantic_topic": ["markets", "trade"],
+                "semantic_policy_bucket": ["economy", "trade"],
+                "semantic_stance": ["positive", "negative"],
+                "semantic_market_relevance": [0.9, 0.8],
+                "semantic_urgency": [0.3, 0.6],
+                "semantic_primary_asset": ["NVDA", "NVDA"],
+                "semantic_asset_targets": ["NVDA,SMH,QQQ", "NVDA,XLE"],
+                "semantic_confidence": [0.84, 0.77],
+                "semantic_summary": ["Markets narrative with NVDA focus.", "Trade narrative with NVDA focus."],
+                "semantic_provider": ["heuristic-cache", "heuristic-cache"],
                 "match_rank": [1, 1],
                 "is_primary_asset": [True, True],
                 "match_reasons": ["rule:nvidia, topic:markets", "rule:semiconductor, policy:economy"],
@@ -259,6 +295,47 @@ class ResearchTests(unittest.TestCase):
         self.assertAlmostEqual(float(spy_anchor), 0.0)
         intraday_chart = build_intraday_comparison_chart(intraday_comparison, "NVDA", anchor)
         self.assertEqual(intraday_chart.layout.title.text, "SPY vs. NVDA intraday reaction")
+
+    def test_narrative_helpers_and_filters(self) -> None:
+        self.assertEqual(narrative_urgency_band(0.1), "low")
+        self.assertEqual(narrative_urgency_band(0.5), "medium")
+        self.assertEqual(narrative_urgency_band(0.9), "high")
+
+        filtered = filter_narrative_rows(
+            self.posts,
+            topic="trade",
+            policy_bucket="trade",
+            stance="negative",
+            urgency_band="high",
+            narrative_asset="NVDA",
+            platforms=["X"],
+            tracked_scope="Tracked accounts only",
+        )
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered.iloc[0]["author_handle"], "macroalpha")
+
+        frequency = build_narrative_frequency_frame(self.posts)
+        self.assertEqual(set(frequency["semantic_topic"].tolist()), {"campaign", "markets", "trade"})
+        frequency_chart = build_narrative_frequency_chart(frequency)
+        self.assertEqual(frequency_chart.layout.title.text, "Narrative frequency over time")
+
+        returns = build_narrative_return_frame(self.posts, self.market, bucket_field="semantic_topic")
+        self.assertIn("avg_next_session_return", returns.columns)
+        return_chart = build_narrative_return_chart(returns, "semantic_topic")
+        self.assertEqual(return_chart.layout.title.text, "Next-session return by narrative bucket")
+
+        heatmap = build_narrative_asset_heatmap_frame(self.asset_post_mappings)
+        self.assertEqual(sorted(heatmap["asset_symbol"].unique().tolist()), ["NVDA"])
+        heatmap_chart = build_narrative_asset_heatmap_chart(heatmap)
+        self.assertEqual(heatmap_chart.layout.title.text, "Asset-by-narrative heatmap")
+
+        narrative_post_table = make_narrative_post_table(self.posts)
+        self.assertIn("semantic_summary", narrative_post_table.columns)
+        self.assertIn("semantic_cache_hit", narrative_post_table.columns)
+
+        narrative_event_table = make_narrative_event_table(self.posts, self.market)
+        self.assertIn("next_session_return", narrative_event_table.columns)
+        self.assertIn("primary_topics", narrative_event_table.columns)
 
 
 if __name__ == "__main__":
