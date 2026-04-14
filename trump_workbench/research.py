@@ -111,6 +111,124 @@ def build_event_frame(sp500_market: pd.DataFrame, sessions: pd.DataFrame) -> pd.
     return events
 
 
+def build_asset_comparison_frame(
+    asset_market: pd.DataFrame,
+    selected_symbol: str,
+    date_start: pd.Timestamp | None = None,
+    date_end: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    if asset_market.empty or not str(selected_symbol or "").strip():
+        return pd.DataFrame()
+
+    market = asset_market.copy()
+    market["trade_date"] = pd.to_datetime(market["trade_date"], errors="coerce").dt.normalize()
+    market = market.dropna(subset=["trade_date"]).copy()
+    if date_start is not None:
+        market = market.loc[market["trade_date"] >= pd.Timestamp(date_start).normalize()].copy()
+    if date_end is not None:
+        market = market.loc[market["trade_date"] <= pd.Timestamp(date_end).normalize()].copy()
+
+    symbol = str(selected_symbol).upper()
+    spy = market.loc[market["symbol"] == "SPY", ["trade_date", "close"]].rename(columns={"close": "spy_close"})
+    asset = market.loc[market["symbol"] == symbol, ["trade_date", "close"]].rename(columns={"close": "asset_close"})
+    comparison = spy.merge(asset, on="trade_date", how="inner").sort_values("trade_date").reset_index(drop=True)
+    if comparison.empty:
+        return comparison
+
+    comparison["asset_symbol"] = symbol
+    comparison["spy_daily_return"] = comparison["spy_close"].pct_change().fillna(0.0)
+    comparison["asset_daily_return"] = comparison["asset_close"].pct_change().fillna(0.0)
+    comparison["spy_normalized_return"] = comparison["spy_close"] / comparison["spy_close"].iloc[0] - 1.0
+    comparison["asset_normalized_return"] = comparison["asset_close"] / comparison["asset_close"].iloc[0] - 1.0
+    return comparison
+
+
+def build_asset_comparison_chart(
+    comparison: pd.DataFrame,
+    selected_symbol: str,
+    mode: str,
+) -> go.Figure:
+    symbol = str(selected_symbol).upper()
+    fig = make_subplots(specs=[[{"secondary_y": mode == "price"}]])
+    if comparison.empty:
+        fig.update_layout(
+            title=f"SPY vs. {symbol} comparison",
+            margin={"l": 20, "r": 20, "t": 60, "b": 20},
+        )
+        return fig
+
+    if mode == "normalized":
+        fig.add_trace(
+            go.Scatter(
+                x=comparison["trade_date"],
+                y=comparison["spy_normalized_return"],
+                mode="lines",
+                name="SPY normalized return",
+                line={"color": "#8ecae6", "width": 3},
+                hovertemplate="<b>%{x|%Y-%m-%d}</b><br>SPY: %{y:+.2%}<extra></extra>",
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=comparison["trade_date"],
+                y=comparison["asset_normalized_return"],
+                mode="lines",
+                name=f"{symbol} normalized return",
+                line={"color": "#f59e0b", "width": 2.5},
+                hovertemplate=f"<b>%{{x|%Y-%m-%d}}</b><br>{symbol}: %{{y:+.2%}}<extra></extra>",
+            ),
+            row=1,
+            col=1,
+        )
+        fig.update_yaxes(title_text="Return since range start", tickformat=".0%", row=1, col=1)
+        title = f"SPY vs. {symbol} normalized returns"
+    else:
+        fig.add_trace(
+            go.Scatter(
+                x=comparison["trade_date"],
+                y=comparison["spy_close"],
+                mode="lines",
+                name="SPY close",
+                line={"color": "#8ecae6", "width": 3},
+                customdata=comparison["spy_daily_return"],
+                hovertemplate="<b>%{x|%Y-%m-%d}</b><br>SPY close: %{y:,.2f}<br>Daily return: %{customdata:+.2%}<extra></extra>",
+            ),
+            row=1,
+            col=1,
+            secondary_y=False,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=comparison["trade_date"],
+                y=comparison["asset_close"],
+                mode="lines",
+                name=f"{symbol} close",
+                line={"color": "#f59e0b", "width": 2.5},
+                customdata=comparison["asset_daily_return"],
+                hovertemplate=f"<b>%{{x|%Y-%m-%d}}</b><br>{symbol} close: %{{y:,.2f}}<br>Daily return: %{{customdata:+.2%}}<extra></extra>",
+            ),
+            row=1,
+            col=1,
+            secondary_y=True,
+        )
+        fig.update_yaxes(title_text="SPY close", row=1, col=1, secondary_y=False)
+        fig.update_yaxes(title_text=f"{symbol} close", row=1, col=1, secondary_y=True)
+        title = f"SPY vs. {symbol} price overlay"
+
+    fig.update_xaxes(title_text="Trading session", dtick="M3", tickformat="%b %Y", row=1, col=1)
+    fig.update_layout(
+        title=title,
+        hovermode="x unified",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        margin={"l": 20, "r": 20, "t": 80, "b": 20},
+    )
+    return fig
+
+
 def build_combined_chart(events: pd.DataFrame, scale_markers: bool) -> go.Figure:
     plot_events = events.sort_values("trade_date").reset_index(drop=True).copy()
     fig = make_subplots(
@@ -309,6 +427,35 @@ def make_session_table(events: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def make_asset_session_table(asset_session_features: pd.DataFrame, selected_symbol: str) -> pd.DataFrame:
+    if asset_session_features.empty:
+        return asset_session_features.copy()
+
+    symbol = str(selected_symbol).upper()
+    table = asset_session_features.copy()
+    table = table.loc[table["asset_symbol"].astype(str).str.upper() == symbol].copy()
+    if table.empty:
+        return table
+    table["signal_session_date"] = pd.to_datetime(table["signal_session_date"]).dt.date
+    keep = [
+        "signal_session_date",
+        "post_count",
+        "rule_matched_post_count",
+        "semantic_matched_post_count",
+        "primary_match_post_count",
+        "asset_relevance_score_avg",
+        "sentiment_avg",
+        "target_next_session_return",
+        "target_available",
+    ]
+    return table[keep].rename(
+        columns={
+            "signal_session_date": "trade_date",
+            "target_next_session_return": "next_session_return",
+        },
+    )
+
+
 def make_post_table(mapped_posts: pd.DataFrame) -> pd.DataFrame:
     if mapped_posts.empty:
         return mapped_posts
@@ -331,6 +478,37 @@ def make_post_table(mapped_posts: pd.DataFrame) -> pd.DataFrame:
         "post_url",
     ]
     return table[keep].rename(columns={"preview": "post_text"})
+
+
+def make_asset_mapping_table(asset_post_mappings: pd.DataFrame, selected_symbol: str) -> pd.DataFrame:
+    if asset_post_mappings.empty:
+        return asset_post_mappings.copy()
+
+    symbol = str(selected_symbol).upper()
+    table = asset_post_mappings.copy()
+    table = table.loc[table["asset_symbol"].astype(str).str.upper() == symbol].copy()
+    if table.empty:
+        return table
+    table["post_time_et"] = pd.to_datetime(table["post_timestamp"], errors="coerce").dt.tz_convert(EASTERN).dt.strftime("%Y-%m-%d %H:%M")
+    table["session_date"] = pd.to_datetime(table["session_date"], errors="coerce").dt.date
+    table["preview"] = table["cleaned_text"].map(lambda x: truncate_text(str(x), max_chars=180))
+    keep = [
+        "asset_symbol",
+        "session_date",
+        "post_time_et",
+        "author_handle",
+        "author_display_name",
+        "asset_relevance_score",
+        "rule_match_score",
+        "semantic_match_score",
+        "match_rank",
+        "is_primary_asset",
+        "match_reasons",
+        "preview",
+    ]
+    return table.sort_values(["session_date", "match_rank", "post_time_et"], ascending=[False, True, True])[keep].rename(
+        columns={"preview": "post_text"},
+    )
 
 
 def build_intraday_chart(intraday: pd.DataFrame, anchor_ts: pd.Timestamp, title: str) -> go.Figure:
