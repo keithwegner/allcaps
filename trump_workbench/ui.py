@@ -113,6 +113,7 @@ def _refresh_datasets(
     ingestion_service: IngestionService,
     market_service: MarketDataService,
     discovery_service: DiscoveryService,
+    feature_service: FeatureService,
     remote_url: str,
     uploaded_files: list[Any],
     incremental: bool = False,
@@ -152,6 +153,34 @@ def _refresh_datasets(
 
     as_of = posts["post_timestamp"].max() if not posts.empty else pd.Timestamp.now(tz=settings.timezone)
     tracked_accounts, ranking_history = _rebuild_discovery_state(store, discovery_service, posts, as_of)
+    prepared_posts = feature_service.prepare_session_posts(
+        posts=posts,
+        market_calendar=spy,
+        tracked_accounts=tracked_accounts,
+        llm_enabled=True,
+    )
+    asset_post_mappings = feature_service.build_asset_post_mappings(
+        prepared_posts=prepared_posts,
+        asset_universe=asset_universe,
+        llm_enabled=True,
+    )
+    asset_session_features = feature_service.build_asset_session_dataset(
+        asset_post_mappings=asset_post_mappings,
+        asset_market=asset_daily,
+        feature_version="asset-v1",
+        llm_enabled=True,
+        asset_universe=asset_universe,
+    )
+    store.save_frame(
+        "asset_post_mappings",
+        asset_post_mappings,
+        metadata={"row_count": int(len(asset_post_mappings)), "match_mode": "rules_plus_semantic"},
+    )
+    store.save_frame(
+        "asset_session_features",
+        asset_session_features,
+        metadata={"row_count": int(len(asset_session_features)), "feature_version": "asset-v1"},
+    )
     return {
         "posts": posts,
         "source_manifest": source_manifest,
@@ -162,6 +191,8 @@ def _refresh_datasets(
         "asset_daily": asset_daily,
         "asset_intraday": asset_intraday,
         "asset_market_manifest": asset_market_manifest,
+        "asset_post_mappings": asset_post_mappings,
+        "asset_session_features": asset_session_features,
         "tracked_accounts": tracked_accounts,
     }
 
@@ -172,6 +203,7 @@ def _ensure_bootstrap(
     ingestion_service: IngestionService,
     market_service: MarketDataService,
     discovery_service: DiscoveryService,
+    feature_service: FeatureService,
 ) -> None:
     if store.read_frame("asset_watchlist").empty and store.read_frame("asset_universe").empty:
         _save_watchlist(store, [])
@@ -181,6 +213,8 @@ def _ensure_bootstrap(
         or store.read_frame("spy_daily").empty
         or store.read_frame("asset_daily").empty
         or store.read_frame("asset_intraday").empty
+        or store.read_frame("asset_post_mappings").empty
+        or store.read_frame("asset_session_features").empty
     ):
         _refresh_datasets(
             settings=settings,
@@ -188,6 +222,7 @@ def _ensure_bootstrap(
             ingestion_service=ingestion_service,
             market_service=market_service,
             discovery_service=discovery_service,
+            feature_service=feature_service,
             remote_url=st.session_state.get("remote_x_url", ""),
             uploaded_files=[],
             incremental=False,
@@ -287,6 +322,7 @@ def render_datasets_view(
     ingestion_service: IngestionService,
     market_service: MarketDataService,
     discovery_service: DiscoveryService,
+    feature_service: FeatureService,
 ) -> None:
     st.subheader("Datasets")
     st.caption("Refresh historical sources, store normalized datasets, and inspect the local DuckDB + Parquet catalog.")
@@ -332,6 +368,7 @@ def render_datasets_view(
                 ingestion_service=ingestion_service,
                 market_service=market_service,
                 discovery_service=discovery_service,
+                feature_service=feature_service,
                 remote_url=remote_url,
                 uploaded_files=uploaded_files or [],
             )
@@ -347,6 +384,7 @@ def render_datasets_view(
                 ingestion_service=ingestion_service,
                 market_service=market_service,
                 discovery_service=discovery_service,
+                feature_service=feature_service,
                 remote_url=remote_url,
                 uploaded_files=uploaded_files or [],
                 incremental=True,
@@ -387,6 +425,35 @@ def render_datasets_view(
     if not asset_intraday.empty:
         st.markdown("**Intraday asset market sample**")
         st.dataframe(asset_intraday.tail(20), use_container_width=True, hide_index=True)
+
+    asset_post_mappings = store.read_frame("asset_post_mappings")
+    if not asset_post_mappings.empty:
+        st.markdown("**Asset post mappings sample**")
+        keep = [
+            "asset_symbol",
+            "session_date",
+            "author_handle",
+            "asset_relevance_score",
+            "rule_match_score",
+            "semantic_match_score",
+            "match_reasons",
+            "cleaned_text",
+        ]
+        st.dataframe(asset_post_mappings[keep].tail(20), use_container_width=True, hide_index=True)
+
+    asset_session_features = store.read_frame("asset_session_features")
+    if not asset_session_features.empty:
+        st.markdown("**Per-asset session feature sample**")
+        keep = [
+            "asset_symbol",
+            "signal_session_date",
+            "post_count",
+            "asset_relevance_score_avg",
+            "rule_matched_post_count",
+            "semantic_matched_post_count",
+            "target_next_session_return",
+        ]
+        st.dataframe(asset_session_features[keep].tail(20), use_container_width=True, hide_index=True)
 
     posts = store.read_frame("normalized_posts")
     if not posts.empty:
@@ -1415,6 +1482,7 @@ def render_live_monitor(
                 ingestion_service=ingestion_service,
                 market_service=market_service,
                 discovery_service=discovery_service,
+                feature_service=feature_service,
                 remote_url=remote_url,
                 uploaded_files=[],
                 incremental=True,
@@ -1660,7 +1728,7 @@ def main() -> None:
     backtest_service = BacktestService(model_service)
     experiment_store = ExperimentStore(store)
 
-    _ensure_bootstrap(settings, store, ingestion_service, market_service, discovery_service)
+    _ensure_bootstrap(settings, store, ingestion_service, market_service, discovery_service, feature_service)
 
     page = st.sidebar.radio(
         "Workbench",
@@ -1673,7 +1741,7 @@ def main() -> None:
     if page == "Research View":
         render_research_view(settings, store, market_service, feature_service)
     elif page == "Datasets":
-        render_datasets_view(settings, store, ingestion_service, market_service, discovery_service)
+        render_datasets_view(settings, store, ingestion_service, market_service, discovery_service, feature_service)
     elif page == "Discovery":
         render_discovery_view(settings, store, discovery_service)
     elif page == "Models & Backtests":
