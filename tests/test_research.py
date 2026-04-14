@@ -7,11 +7,15 @@ import pandas as pd
 from trump_workbench.research import (
     _format_post_summary,
     aggregate_research_sessions,
+    build_asset_comparison_chart,
+    build_asset_comparison_frame,
     build_combined_chart,
     build_event_frame,
     build_intraday_chart,
     filter_posts,
     get_intraday_window,
+    make_asset_mapping_table,
+    make_asset_session_table,
     make_post_table,
     make_session_table,
 )
@@ -49,6 +53,48 @@ class ResearchTests(unittest.TestCase):
             {
                 "trade_date": pd.to_datetime(["2025-02-03", "2025-02-04", "2025-02-05"]),
                 "close": [100.0, 101.0, 102.0],
+            },
+        )
+        self.asset_market = pd.DataFrame(
+            {
+                "symbol": ["SPY", "SPY", "SPY", "NVDA", "NVDA", "NVDA"],
+                "trade_date": pd.to_datetime(
+                    ["2025-02-03", "2025-02-04", "2025-02-05", "2025-02-03", "2025-02-04", "2025-02-05"],
+                ),
+                "close": [100.0, 101.0, 102.0, 200.0, 210.0, 205.0],
+            },
+        )
+        self.asset_session_features = pd.DataFrame(
+            {
+                "asset_symbol": ["NVDA", "NVDA"],
+                "signal_session_date": pd.to_datetime(["2025-02-03", "2025-02-04"]),
+                "post_count": [2, 1],
+                "rule_matched_post_count": [2, 1],
+                "semantic_matched_post_count": [1, 1],
+                "primary_match_post_count": [2, 1],
+                "asset_relevance_score_avg": [0.72, 0.61],
+                "sentiment_avg": [0.3, -0.1],
+                "target_next_session_return": [0.05, -0.01],
+                "target_available": [True, True],
+            },
+        )
+        self.asset_post_mappings = pd.DataFrame(
+            {
+                "asset_symbol": ["NVDA", "NVDA"],
+                "session_date": pd.to_datetime(["2025-02-03", "2025-02-04"]),
+                "post_timestamp": pd.to_datetime(
+                    ["2025-02-03 10:00-05:00", "2025-02-04 11:00-05:00"],
+                    utc=True,
+                ).tz_convert("America/New_York"),
+                "author_handle": ["macroalpha", "macrobeta"],
+                "author_display_name": ["Macro Alpha", "Macro Beta"],
+                "asset_relevance_score": [0.8, 0.55],
+                "rule_match_score": [0.6, 0.4],
+                "semantic_match_score": [0.2, 0.15],
+                "match_rank": [1, 1],
+                "is_primary_asset": [True, True],
+                "match_reasons": ["rule:nvidia, topic:markets", "rule:semiconductor, policy:economy"],
+                "cleaned_text": ["NVIDIA keeps rallying after strong AI demand.", "Semiconductor policy talk is picking up."],
             },
         )
 
@@ -101,6 +147,34 @@ class ResearchTests(unittest.TestCase):
         post_table = make_post_table(self.posts)
         self.assertIn("post_text", post_table.columns)
         self.assertEqual(post_table.iloc[0]["session_date"].isoformat(), "2025-02-03")
+
+    def test_asset_comparison_helpers_and_tables(self) -> None:
+        comparison = build_asset_comparison_frame(
+            self.asset_market,
+            "NVDA",
+            date_start=pd.Timestamp("2025-02-03"),
+            date_end=pd.Timestamp("2025-02-05"),
+        )
+        self.assertEqual(len(comparison), 3)
+        self.assertAlmostEqual(float(comparison.iloc[-1]["spy_normalized_return"]), 0.02)
+        self.assertAlmostEqual(float(comparison.iloc[-1]["asset_normalized_return"]), 0.025)
+
+        price_chart = build_asset_comparison_chart(comparison, "NVDA", mode="price")
+        normalized_chart = build_asset_comparison_chart(comparison, "NVDA", mode="normalized")
+        self.assertEqual(price_chart.layout.title.text, "SPY vs. NVDA price overlay")
+        self.assertEqual(normalized_chart.layout.title.text, "SPY vs. NVDA normalized returns")
+        self.assertEqual(len(price_chart.data), 2)
+        self.assertEqual(len(normalized_chart.data), 2)
+
+        asset_session_table = make_asset_session_table(self.asset_session_features, "NVDA")
+        self.assertIn("trade_date", asset_session_table.columns)
+        self.assertIn("next_session_return", asset_session_table.columns)
+        self.assertEqual(len(asset_session_table), 2)
+
+        asset_mapping_table = make_asset_mapping_table(self.asset_post_mappings, "NVDA")
+        self.assertIn("post_text", asset_mapping_table.columns)
+        self.assertIn("match_reasons", asset_mapping_table.columns)
+        self.assertEqual(asset_mapping_table.iloc[0]["asset_symbol"], "NVDA")
 
     def test_intraday_helpers(self) -> None:
         intraday = pd.DataFrame(
