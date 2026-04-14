@@ -6,7 +6,8 @@ from typing import Any
 
 import pandas as pd
 
-from .contracts import BacktestRun, LinearModelArtifact, SavedRunArtifacts
+from .contracts import BacktestRun, LinearModelArtifact, LiveMonitorConfig, SavedRunArtifacts
+from .live_monitor import LIVE_MONITOR_CONFIG_PATH
 from .storage import DuckDBStore
 
 
@@ -151,6 +152,15 @@ class ExperimentStore:
             return artifact, row["selected_params_json"]
         return None
 
+    def save_live_monitor_config(self, config: LiveMonitorConfig) -> Path:
+        return self.store.save_json_artifact(LIVE_MONITOR_CONFIG_PATH, config.to_dict())
+
+    def load_live_monitor_config(self) -> LiveMonitorConfig | None:
+        payload = self.store.read_json_artifact(LIVE_MONITOR_CONFIG_PATH)
+        if payload is None:
+            return None
+        return LiveMonitorConfig.from_dict(payload)
+
     def save_prediction_snapshots(self, snapshots: pd.DataFrame) -> None:
         if snapshots.empty:
             return
@@ -162,6 +172,26 @@ class ExperimentStore:
             normalized,
             dedupe_on=["signal_session_date", "generated_at", "target_asset"],
             metadata={"dataset": "prediction_snapshots"},
+        )
+
+    def save_live_asset_snapshots(self, snapshots: pd.DataFrame) -> None:
+        if snapshots.empty:
+            return
+        self.store.append_frame(
+            "live_asset_snapshots",
+            snapshots.copy(),
+            dedupe_on=["generated_at", "asset_symbol", "run_id"],
+            metadata={"dataset": "live_asset_snapshots"},
+        )
+
+    def save_live_decision_snapshots(self, snapshots: pd.DataFrame) -> None:
+        if snapshots.empty:
+            return
+        self.store.append_frame(
+            "live_decision_snapshots",
+            snapshots.copy(),
+            dedupe_on=["generated_at", "winning_asset", "winning_run_id"],
+            metadata={"dataset": "live_decision_snapshots"},
         )
 
     @staticmethod
