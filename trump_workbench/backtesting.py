@@ -151,6 +151,8 @@ def build_leakage_audit(feature_rows: pd.DataFrame, window_rows: pd.DataFrame) -
 
 def build_prediction_diagnostics(predictions: pd.DataFrame) -> pd.DataFrame:
     diagnostics = predictions.copy()
+    if "target_asset" not in diagnostics.columns:
+        diagnostics["target_asset"] = "SPY"
     diagnostics["actual_next_session_return"] = diagnostics["target_next_session_return"]
     diagnostics["prediction_error"] = diagnostics["expected_return_score"] - diagnostics["actual_next_session_return"]
     diagnostics["absolute_error"] = diagnostics["prediction_error"].abs()
@@ -159,6 +161,7 @@ def build_prediction_diagnostics(predictions: pd.DataFrame) -> pd.DataFrame:
         == np.sign(diagnostics["actual_next_session_return"].fillna(0.0))
     )
     keep = [
+        "target_asset",
         "signal_session_date",
         "next_session_date",
         "expected_return_score",
@@ -183,10 +186,15 @@ def build_benchmark_suite(
     transaction_cost_bps: float,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     benchmark_inputs = evaluation_rows.dropna(subset=["next_session_open", "next_session_close"]).copy()
+    target_asset = str(
+        benchmark_inputs.get("target_asset", pd.Series(["SPY"])).iloc[0]
+        if not benchmark_inputs.empty
+        else "SPY",
+    ).upper()
     strategies: list[tuple[str, pd.Series, dict[str, float] | None]] = [
         ("strategy", strategy_trades["trade_taken"].astype(bool), strategy_metrics),
         ("always_flat", pd.Series(False, index=benchmark_inputs.index), None),
-        ("always_long", benchmark_inputs["target_available"].fillna(False), None),
+        (f"always_long_{target_asset.lower()}", benchmark_inputs["target_available"].fillna(False), None),
         ("trump_only", (benchmark_inputs["trump_post_count"] > 0) & benchmark_inputs["target_available"].fillna(False), None),
         (
             "tracked_accounts_only",
@@ -207,6 +215,7 @@ def build_benchmark_suite(
         if precomputed_metrics is not None:
             metrics = precomputed_metrics
         row = {"benchmark_name": name, **metrics}
+        row["target_asset"] = target_asset
         row["excess_total_return_vs_strategy"] = float(metrics["total_return"] - strategy_total_return)
         metric_rows.append(row)
         curve[name] = trades["equity_curve"].to_numpy()
@@ -227,6 +236,8 @@ class BacktestService:
     ) -> dict[str, Any]:
         replay_date = pd.Timestamp(replay_session_date).normalize()
         usable = feature_rows.copy()
+        if "target_asset" not in usable.columns:
+            usable["target_asset"] = run_config.target_asset
         if run_config.start_date:
             usable = usable.loc[usable["signal_session_date"] >= pd.Timestamp(run_config.start_date)]
         if run_config.end_date:
@@ -262,7 +273,7 @@ class BacktestService:
         replay_prediction["history_end"] = history["signal_session_date"].max()
         replay_prediction["suggested_stance"] = np.where(
             (replay_prediction["expected_return_score"] > threshold) & (replay_prediction["post_count"] >= min_post_count),
-            "LONG SPY NEXT SESSION",
+            f"LONG {run_config.target_asset.upper()} NEXT SESSION",
             "FLAT",
         )
         replay_prediction["future_training_leakage"] = False
@@ -289,6 +300,8 @@ class BacktestService:
         feature_rows: pd.DataFrame,
     ) -> tuple[BacktestRun, dict[str, Any]]:
         usable = feature_rows.copy()
+        if "target_asset" not in usable.columns:
+            usable["target_asset"] = run_config.target_asset
         if run_config.start_date:
             usable = usable.loc[usable["signal_session_date"] >= pd.Timestamp(run_config.start_date)]
         if run_config.end_date:
@@ -440,6 +453,7 @@ class BacktestService:
         run = BacktestRun(
             run_id=run_id,
             run_name=run_config.run_name,
+            target_asset=run_config.target_asset,
             config_hash=config_hash,
             train_window=train_window,
             validation_window=validation_window,

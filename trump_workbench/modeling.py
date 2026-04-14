@@ -139,7 +139,7 @@ class ModelService:
             y=train_df["target_next_session_return"].fillna(0.0),
             ridge_alpha=run_config.ridge_alpha,
             model_version=model_version,
-            metadata={"llm_enabled": run_config.llm_enabled},
+            metadata={"llm_enabled": run_config.llm_enabled, "target_asset": run_config.target_asset},
         )
         importance = pd.DataFrame(
             {

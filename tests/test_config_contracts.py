@@ -93,6 +93,7 @@ class ConfigAndContractsTests(unittest.TestCase):
         snapshot = PredictionSnapshot(
             signal_session_date=pd.Timestamp("2025-02-03"),
             next_session_date=pd.Timestamp("2025-02-04"),
+            target_asset="SPY",
             expected_return_score=0.01,
             feature_version="v1",
             model_version="linear-v1",
@@ -103,6 +104,7 @@ class ConfigAndContractsTests(unittest.TestCase):
         backtest_run = BacktestRun(
             run_id="run-1",
             run_name="test",
+            target_asset="SPY",
             config_hash="hash",
             train_window=60,
             validation_window=20,
@@ -125,7 +127,9 @@ class ConfigAndContractsTests(unittest.TestCase):
         self.assertEqual(post.to_dict()["post_id"], "1")
         self.assertEqual(tracked.to_dict()["status"], "active")
         self.assertEqual(feature_row.to_dict()["post_count"], 2)
+        self.assertEqual(config.to_dict()["target_asset"], "SPY")
         self.assertEqual(config.to_dict()["threshold_grid"], list(config.threshold_grid))
+        self.assertEqual(snapshot.to_dict()["target_asset"], "SPY")
         self.assertEqual(snapshot.to_dict()["stance"], "long")
         self.assertEqual(backtest_run.to_dict()["run_id"], "run-1")
         self.assertEqual(LinearModelArtifact.from_dict(artifact.to_dict()).feature_names, ["x1"])

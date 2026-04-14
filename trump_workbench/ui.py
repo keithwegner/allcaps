@@ -50,6 +50,91 @@ def _parse_grid(value: str, cast: type[float] | type[int]) -> tuple[float, ...] 
     return tuple(float(part) for part in parts)
 
 
+def _target_asset_options(store: DuckDBStore) -> list[str]:
+    asset_universe = store.read_frame("asset_universe")
+    if asset_universe.empty or "symbol" not in asset_universe.columns:
+        return ["SPY"]
+    symbols = normalize_symbols(asset_universe["symbol"].astype(str).tolist())
+    return ["SPY"] + [symbol for symbol in symbols if symbol != "SPY"]
+
+
+def _target_asset_label(store: DuckDBStore, symbol: str) -> str:
+    normalized = str(symbol).upper()
+    asset_universe = store.read_frame("asset_universe")
+    if asset_universe.empty:
+        return normalized
+    rows = asset_universe.loc[asset_universe["symbol"].astype(str).str.upper() == normalized]
+    if rows.empty:
+        return normalized
+    display_name = str(rows.iloc[0].get("display_name", normalized) or normalized)
+    return f"{normalized} - {display_name}"
+
+
+def _build_model_target_bundle(
+    store: DuckDBStore,
+    feature_service: FeatureService,
+    posts: pd.DataFrame,
+    spy_market: pd.DataFrame,
+    tracked_accounts: pd.DataFrame,
+    llm_enabled: bool,
+    target_asset: str,
+    feature_version: str | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    normalized_target = str(target_asset).upper()
+    resolved_feature_version = feature_version or ("v1" if normalized_target == "SPY" else "asset-v1")
+    asset_universe = store.read_frame("asset_universe")
+    asset_daily = store.read_frame("asset_daily")
+    prepared_posts = feature_service.prepare_session_posts(
+        posts=posts,
+        market_calendar=spy_market,
+        tracked_accounts=tracked_accounts,
+        llm_enabled=llm_enabled,
+    )
+
+    if normalized_target == "SPY":
+        feature_rows = feature_service.build_session_dataset(
+            posts=posts,
+            spy_market=spy_market,
+            tracked_accounts=tracked_accounts,
+            feature_version=resolved_feature_version,
+            llm_enabled=llm_enabled,
+            prepared_posts=prepared_posts,
+        )
+        feature_rows["target_asset"] = "SPY"
+        feature_rows["target_asset_display_name"] = "SPDR S&P 500 ETF Trust"
+        return feature_rows.reset_index(drop=True), prepared_posts.reset_index(drop=True)
+
+    if asset_universe.empty or asset_daily.empty:
+        raise RuntimeError("Refresh datasets first so non-SPY target assets have market and universe data available.")
+
+    asset_post_mappings = feature_service.build_asset_post_mappings(
+        prepared_posts=prepared_posts,
+        asset_universe=asset_universe,
+        llm_enabled=llm_enabled,
+    )
+    asset_feature_rows = feature_service.build_asset_session_dataset(
+        asset_post_mappings=asset_post_mappings,
+        asset_market=asset_daily,
+        feature_version=resolved_feature_version,
+        llm_enabled=llm_enabled,
+        asset_universe=asset_universe,
+    )
+    feature_rows = asset_feature_rows.loc[
+        asset_feature_rows["asset_symbol"].astype(str).str.upper() == normalized_target
+    ].copy()
+    if feature_rows.empty:
+        raise RuntimeError(f"No session feature rows were available for target asset `{normalized_target}`.")
+    asset_rows = asset_universe.loc[asset_universe["symbol"].astype(str).str.upper() == normalized_target]
+    display_name = str(asset_rows.iloc[0].get("display_name", normalized_target)) if not asset_rows.empty else normalized_target
+    feature_rows["target_asset"] = normalized_target
+    feature_rows["target_asset_display_name"] = display_name
+    attribution_posts = asset_post_mappings.loc[
+        asset_post_mappings["asset_symbol"].astype(str).str.upper() == normalized_target
+    ].copy()
+    attribution_posts["target_asset"] = normalized_target
+    return feature_rows.reset_index(drop=True), attribution_posts.reset_index(drop=True)
+
+
 def _watchlist_symbols(store: DuckDBStore) -> list[str]:
     watchlist = store.read_frame("asset_watchlist")
     if watchlist.empty or "symbol" not in watchlist.columns:
@@ -1239,7 +1324,9 @@ def _comparison_settings(run_bundle: dict[str, Any]) -> dict[str, Any]:
     config = run_bundle.get("config", {}) or {}
     selected = run_bundle.get("selected_params", {}) or {}
     artifact = run_bundle.get("model_artifact")
+    run_meta = run_bundle.get("run", {}) or {}
     return {
+        "target_asset": str(config.get("target_asset") or run_meta.get("target_asset") or getattr(artifact, "metadata", {}).get("target_asset", "SPY")),
         "feature_version": config.get("feature_version", "v1"),
         "llm_enabled": bool(config.get("llm_enabled", getattr(artifact, "metadata", {}).get("llm_enabled", False))),
         "train_window": config.get("train_window"),
@@ -1269,6 +1356,7 @@ def _build_metric_comparison_table(base_run_id: str, run_bundles: dict[str, dict
             {
                 "run_id": run_id,
                 "run_name": bundle.get("run", {}).get("run_name", run_id),
+                "target_asset": _comparison_settings(bundle).get("target_asset", "SPY"),
                 "total_return": metrics.get("total_return", 0.0),
                 "sharpe": metrics.get("sharpe", 0.0),
                 "sortino": metrics.get("sortino", 0.0),
@@ -1319,6 +1407,7 @@ def _build_feature_diff_table(base_run_id: str, run_bundles: dict[str, dict[str,
             {
                 "run_id": run_id,
                 "run_name": bundle.get("run", {}).get("run_name", run_id),
+                "target_asset": _comparison_settings(bundle).get("target_asset", "SPY"),
                 "feature_count": len(feature_names),
                 "semantic_features": families.get("semantic", 0),
                 "policy_features": families.get("policy", 0),
@@ -1348,6 +1437,7 @@ def _build_benchmark_delta_table(base_run_id: str, run_bundles: dict[str, dict[s
         benchmarks = bundle.get("benchmarks", pd.DataFrame())
         if benchmarks.empty or "benchmark_name" not in benchmarks.columns:
             continue
+        target_asset = _comparison_settings(bundle).get("target_asset", "SPY")
         lookup = benchmarks.set_index("benchmark_name")
         strategy_return = float(lookup.loc["strategy", "total_return"]) if "strategy" in lookup.index else np.nan
         for benchmark_name in sorted(set(base_lookup.index).union(set(lookup.index))):
@@ -1358,6 +1448,7 @@ def _build_benchmark_delta_table(base_run_id: str, run_bundles: dict[str, dict[s
             rows.append(
                 {
                     "run_id": run_id,
+                    "target_asset": target_asset,
                     "benchmark_name": benchmark_name,
                     "total_return": current_total,
                     "delta_total_return_vs_base": current_total - base_total if pd.notna(current_total) and pd.notna(base_total) else np.nan,
@@ -1387,6 +1478,8 @@ def _summarize_run_changes(base_run_id: str, run_bundles: dict[str, dict[str, An
         ]
         if settings.get("llm_enabled") != base_settings.get("llm_enabled"):
             parts.append(f"LLM {'on' if settings.get('llm_enabled') else 'off'} vs {'on' if base_settings.get('llm_enabled') else 'off'}")
+        if settings.get("target_asset") != base_settings.get("target_asset"):
+            parts.append(f"target asset {base_settings.get('target_asset')} -> {settings.get('target_asset')}")
         if settings.get("deploy_threshold") != base_settings.get("deploy_threshold"):
             parts.append(f"threshold {base_settings.get('deploy_threshold')} -> {settings.get('deploy_threshold')}")
         if settings.get("deploy_min_post_count") != base_settings.get("deploy_min_post_count"):
@@ -1408,6 +1501,7 @@ def _bundle_to_run_config(run_bundle: dict[str, Any]) -> ModelRunConfig:
     run_meta = run_bundle.get("run", {}) or {}
     return ModelRunConfig(
         run_name=str(config.get("run_name") or run_meta.get("run_name") or "historical-replay"),
+        target_asset=str(config.get("target_asset") or run_meta.get("target_asset") or "SPY"),
         feature_version=str(config.get("feature_version", "v1")),
         llm_enabled=bool(config.get("llm_enabled", False)),
         train_window=int(config.get("train_window", 90) or 90),
@@ -1475,7 +1569,10 @@ def render_models_view(
     experiment_store: ExperimentStore,
 ) -> None:
     st.subheader("Models & Backtests")
-    st.caption("Build the session dataset, train a next-session SPY expected-return model, compare saved runs, and inspect benchmark plus leakage diagnostics.")
+    st.caption(
+        "Build the session dataset, train a next-session expected-return model for SPY or a selected asset, "
+        "compare saved runs, and inspect benchmark plus leakage diagnostics.",
+    )
     posts = store.read_frame("normalized_posts")
     spy = store.read_frame("spy_daily")
     tracked_accounts = store.read_frame("tracked_accounts")
@@ -1483,11 +1580,18 @@ def render_models_view(
         st.info("Refresh datasets first so the modeling pipeline has normalized posts and SPY market data.")
         return
 
-    control_cols = st.columns(4)
+    target_asset_options = _target_asset_options(store)
+    control_cols = st.columns(5)
     run_name = control_cols[0].text_input("Run name", value="baseline-research-run")
-    llm_enabled = control_cols[1].checkbox("Enable semantic enrichment", value=False)
-    train_window = control_cols[2].number_input("Train window", min_value=20, max_value=252, value=90, step=5)
-    validation_window = control_cols[3].number_input("Validation window", min_value=10, max_value=126, value=30, step=5)
+    selected_target_asset = control_cols[1].selectbox(
+        "Target asset",
+        options=target_asset_options,
+        index=0,
+        format_func=lambda symbol: _target_asset_label(store, symbol),
+    )
+    llm_enabled = control_cols[2].checkbox("Enable semantic enrichment", value=False)
+    train_window = control_cols[3].number_input("Train window", min_value=20, max_value=252, value=90, step=5)
+    validation_window = control_cols[4].number_input("Validation window", min_value=10, max_value=126, value=30, step=5)
     control_cols2 = st.columns(4)
     test_window = control_cols2[0].number_input("Test window", min_value=10, max_value=126, value=30, step=5)
     step_size = control_cols2[1].number_input("Step size", min_value=5, max_value=126, value=30, step=5)
@@ -1499,64 +1603,80 @@ def render_models_view(
 
     if st.button("Build dataset and run walk-forward backtest", use_container_width=True):
         with st.spinner("Building session features and running walk-forward optimization..."):
-            prepared_posts = feature_service.prepare_session_posts(
-                posts=posts,
-                market_calendar=spy,
-                tracked_accounts=tracked_accounts,
-                llm_enabled=llm_enabled,
-            )
-            feature_rows = feature_service.build_session_dataset(
-                posts=posts,
-                spy_market=spy,
-                tracked_accounts=tracked_accounts,
-                feature_version="v1",
-                llm_enabled=llm_enabled,
-                prepared_posts=prepared_posts,
-            )
-            store.save_frame("session_features_latest", feature_rows, metadata={"llm_enabled": llm_enabled, "row_count": int(len(feature_rows))})
-            config = ModelRunConfig(
-                run_name=run_name,
-                llm_enabled=llm_enabled,
-                train_window=int(train_window),
-                validation_window=int(validation_window),
-                test_window=int(test_window),
-                step_size=int(step_size),
-                threshold_grid=_parse_grid(threshold_text, float),
-                minimum_signal_grid=_parse_grid(min_posts_text, int),
-                account_weight_grid=_parse_grid(account_weight_text, float),
-                ridge_alpha=float(ridge_alpha),
-                transaction_cost_bps=float(transaction_cost_bps),
-            )
-            run, artifacts = backtest_service.run_walk_forward(config, feature_rows)
-            post_attribution = build_post_attribution(prepared_posts)
-            account_attribution = build_account_attribution(post_attribution)
-            predicted_sessions = {
-                session_date
-                for session_date in pd.to_datetime(artifacts["predictions"]["signal_session_date"], errors="coerce").dropna().dt.normalize().tolist()
-            }
-            post_attribution = post_attribution.loc[
-                pd.to_datetime(post_attribution["signal_session_date"], errors="coerce").dt.normalize().isin(predicted_sessions)
-            ].reset_index(drop=True)
-            account_attribution = account_attribution.loc[
-                pd.to_datetime(account_attribution["signal_session_date"], errors="coerce").dt.normalize().isin(predicted_sessions)
-            ].reset_index(drop=True)
-            experiment_store.save_run(
-                run=run,
-                config=artifacts["config"],
-                trades=artifacts["trades"],
-                predictions=artifacts["predictions"],
-                windows=artifacts["windows"],
-                importance=artifacts["importance"],
-                model_artifact=artifacts["model_artifact"],
-                feature_contributions=artifacts["feature_contributions"],
-                post_attribution=post_attribution,
-                account_attribution=account_attribution,
-                benchmarks=artifacts["benchmarks"],
-                diagnostics=artifacts["diagnostics"],
-                benchmark_curves=artifacts["benchmark_curves"],
-                leakage_audit=artifacts["leakage_audit"],
-            )
-        st.success(f"Saved run `{run.run_id}`.")
+            normalized_target_asset = str(selected_target_asset).upper()
+            target_feature_version = "v1" if normalized_target_asset == "SPY" else "asset-v1"
+            try:
+                feature_rows, attribution_posts = _build_model_target_bundle(
+                    store=store,
+                    feature_service=feature_service,
+                    posts=posts,
+                    spy_market=spy,
+                    tracked_accounts=tracked_accounts,
+                    llm_enabled=llm_enabled,
+                    target_asset=normalized_target_asset,
+                    feature_version=target_feature_version,
+                )
+                store.save_frame(
+                    "session_features_latest",
+                    feature_rows,
+                    metadata={
+                        "llm_enabled": llm_enabled,
+                        "row_count": int(len(feature_rows)),
+                        "target_asset": normalized_target_asset,
+                        "feature_version": target_feature_version,
+                    },
+                )
+                config = ModelRunConfig(
+                    run_name=run_name,
+                    target_asset=normalized_target_asset,
+                    feature_version=target_feature_version,
+                    llm_enabled=llm_enabled,
+                    train_window=int(train_window),
+                    validation_window=int(validation_window),
+                    test_window=int(test_window),
+                    step_size=int(step_size),
+                    threshold_grid=_parse_grid(threshold_text, float),
+                    minimum_signal_grid=_parse_grid(min_posts_text, int),
+                    account_weight_grid=_parse_grid(account_weight_text, float),
+                    ridge_alpha=float(ridge_alpha),
+                    transaction_cost_bps=float(transaction_cost_bps),
+                )
+                run, artifacts = backtest_service.run_walk_forward(config, feature_rows)
+                post_attribution = build_post_attribution(attribution_posts)
+                account_attribution = build_account_attribution(post_attribution)
+                predicted_sessions = {
+                    session_date
+                    for session_date in pd.to_datetime(
+                        artifacts["predictions"]["signal_session_date"],
+                        errors="coerce",
+                    ).dropna().dt.normalize().tolist()
+                }
+                post_attribution = post_attribution.loc[
+                    pd.to_datetime(post_attribution["signal_session_date"], errors="coerce").dt.normalize().isin(predicted_sessions)
+                ].reset_index(drop=True)
+                account_attribution = account_attribution.loc[
+                    pd.to_datetime(account_attribution["signal_session_date"], errors="coerce").dt.normalize().isin(predicted_sessions)
+                ].reset_index(drop=True)
+                experiment_store.save_run(
+                    run=run,
+                    config=artifacts["config"],
+                    trades=artifacts["trades"],
+                    predictions=artifacts["predictions"],
+                    windows=artifacts["windows"],
+                    importance=artifacts["importance"],
+                    model_artifact=artifacts["model_artifact"],
+                    feature_contributions=artifacts["feature_contributions"],
+                    post_attribution=post_attribution,
+                    account_attribution=account_attribution,
+                    benchmarks=artifacts["benchmarks"],
+                    diagnostics=artifacts["diagnostics"],
+                    benchmark_curves=artifacts["benchmark_curves"],
+                    leakage_audit=artifacts["leakage_audit"],
+                )
+            except RuntimeError as exc:
+                st.error(str(exc))
+                return
+        st.success(f"Saved run `{run.run_id}` for `{normalized_target_asset}`.")
 
     latest_features = store.read_frame("session_features_latest")
     if not latest_features.empty:
@@ -1570,12 +1690,13 @@ def render_models_view(
         return
 
     leaderboard = runs.copy()
+    leaderboard["target_asset"] = leaderboard["target_asset"].fillna("SPY").replace("", "SPY")
     leaderboard["total_return"] = leaderboard["metrics_json"].map(lambda metrics: metrics.get("total_return", 0.0))
     leaderboard["sharpe"] = leaderboard["metrics_json"].map(lambda metrics: metrics.get("sharpe", 0.0))
     leaderboard["sortino"] = leaderboard["metrics_json"].map(lambda metrics: metrics.get("sortino", 0.0))
     leaderboard["max_drawdown"] = leaderboard["metrics_json"].map(lambda metrics: metrics.get("max_drawdown", 0.0))
     leaderboard["robust_score"] = leaderboard["metrics_json"].map(lambda metrics: metrics.get("robust_score", 0.0))
-    keep = ["run_id", "run_name", "created_at", "total_return", "sharpe", "sortino", "max_drawdown", "robust_score"]
+    keep = ["run_id", "run_name", "target_asset", "created_at", "total_return", "sharpe", "sortino", "max_drawdown", "robust_score"]
     st.markdown("**Run leaderboard**")
     st.dataframe(
         leaderboard[keep].sort_values("robust_score", ascending=False),
@@ -1588,6 +1709,7 @@ def render_models_view(
     if loaded is None:
         st.warning("The selected run could not be loaded.")
         return
+    st.caption(f"Selected run target asset: `{_comparison_settings(loaded).get('target_asset', 'SPY')}`")
 
     feature_contributions = loaded["feature_contributions"]
     if feature_contributions.empty:
@@ -1595,14 +1717,22 @@ def render_models_view(
     post_attribution = loaded["post_attribution"]
     account_attribution = loaded["account_attribution"]
     if post_attribution.empty or account_attribution.empty:
-        fallback_posts = feature_service.prepare_session_posts(
-            posts=posts,
-            market_calendar=spy,
-            tracked_accounts=tracked_accounts,
-            llm_enabled=bool(loaded["model_artifact"].metadata.get("llm_enabled", False)),
-        )
-        post_attribution = build_post_attribution(fallback_posts)
-        account_attribution = build_account_attribution(post_attribution)
+        try:
+            _, fallback_posts = _build_model_target_bundle(
+                store=store,
+                feature_service=feature_service,
+                posts=posts,
+                spy_market=spy,
+                tracked_accounts=tracked_accounts,
+                llm_enabled=bool(loaded["model_artifact"].metadata.get("llm_enabled", False)),
+                target_asset=_comparison_settings(loaded).get("target_asset", "SPY"),
+                feature_version=str(loaded.get("config", {}).get("feature_version", "v1")),
+            )
+            post_attribution = build_post_attribution(fallback_posts)
+            account_attribution = build_account_attribution(post_attribution)
+        except RuntimeError:
+            post_attribution = pd.DataFrame()
+            account_attribution = pd.DataFrame()
 
     _metric_row(loaded["metrics"])
     _render_equity_curve(loaded["trades"], title="Walk-forward out-of-sample equity curve")
@@ -1767,7 +1897,7 @@ def render_live_monitor(
             )
         st.success("Polling refresh complete.")
 
-    model_bundle = experiment_store.load_latest_model_artifact()
+    model_bundle = experiment_store.load_latest_model_artifact(target_asset="SPY")
     if model_bundle is None:
         st.info("Run a model in the Models & Backtests page to enable live predictions.")
         return
@@ -1790,6 +1920,7 @@ def render_live_monitor(
         llm_enabled=bool(artifact.metadata.get("llm_enabled", False)),
         prepared_posts=prepared_posts,
     )
+    feature_rows["target_asset"] = "SPY"
     predictions = model_service.predict(artifact, feature_rows)
     feature_contributions = model_service.explain_predictions(artifact, predictions)
     post_attribution = build_post_attribution(prepared_posts)
@@ -1803,6 +1934,7 @@ def render_live_monitor(
             {
                 "signal_session_date": latest["signal_session_date"],
                 "next_session_date": latest["next_session_date"],
+                "target_asset": "SPY",
                 "expected_return_score": latest["expected_return_score"],
                 "feature_version": latest["feature_version"],
                 "model_version": latest["model_version"],
@@ -1829,6 +1961,10 @@ def render_live_monitor(
     )
 
     history = store.read_frame("prediction_snapshots")
+    if not history.empty:
+        if "target_asset" not in history.columns:
+            history["target_asset"] = "SPY"
+        history = history.loc[history["target_asset"].astype(str).str.upper() == "SPY"].copy()
     if not history.empty:
         history = history.sort_values("generated_at")
         fig = go.Figure()
@@ -1884,20 +2020,20 @@ def render_historical_replay_view(
         return
 
     run_config = _bundle_to_run_config(loaded)
-    prepared_posts = feature_service.prepare_session_posts(
-        posts=posts,
-        market_calendar=spy,
-        tracked_accounts=tracked_accounts,
-        llm_enabled=run_config.llm_enabled,
-    )
-    feature_rows = feature_service.build_session_dataset(
-        posts=posts,
-        spy_market=spy,
-        tracked_accounts=tracked_accounts,
-        feature_version=run_config.feature_version,
-        llm_enabled=run_config.llm_enabled,
-        prepared_posts=prepared_posts,
-    )
+    try:
+        feature_rows, attribution_posts = _build_model_target_bundle(
+            store=store,
+            feature_service=feature_service,
+            posts=posts,
+            spy_market=spy,
+            tracked_accounts=tracked_accounts,
+            llm_enabled=run_config.llm_enabled,
+            target_asset=run_config.target_asset,
+            feature_version=run_config.feature_version,
+        )
+    except RuntimeError as exc:
+        st.warning(str(exc))
+        return
     if run_config.start_date:
         feature_rows = feature_rows.loc[feature_rows["signal_session_date"] >= pd.Timestamp(run_config.start_date)].copy()
     if run_config.end_date:
@@ -1924,8 +2060,8 @@ def render_historical_replay_view(
     replay_prediction = replay["prediction"].iloc[0]
     replay_feature_contributions = replay["feature_contributions"]
     session_post_attribution = build_post_attribution(
-        prepared_posts.loc[
-            pd.to_datetime(prepared_posts["session_date"], errors="coerce").dt.normalize()
+        attribution_posts.loc[
+            pd.to_datetime(attribution_posts["session_date"], errors="coerce").dt.normalize()
             == pd.Timestamp(replay_prediction["signal_session_date"]).normalize()
         ].copy(),
     )
@@ -1934,11 +2070,12 @@ def render_historical_replay_view(
     full_history_match = _filter_for_session(loaded["predictions"], _normalize_session_date(replay_prediction["signal_session_date"]))
     full_history_row = full_history_match.iloc[0] if not full_history_match.empty else None
 
-    metric_cols = st.columns(4)
-    metric_cols[0].metric("Replay session", f"{pd.Timestamp(replay_prediction['signal_session_date']):%Y-%m-%d}")
-    metric_cols[1].metric("Replay score", f"{float(replay_prediction['expected_return_score']):+.3%}")
-    metric_cols[2].metric("Replay confidence", f"{float(replay_prediction['prediction_confidence']):.2f}")
-    metric_cols[3].metric("Suggested stance", str(replay_prediction["suggested_stance"]))
+    metric_cols = st.columns(5)
+    metric_cols[0].metric("Target asset", str(run_config.target_asset).upper())
+    metric_cols[1].metric("Replay session", f"{pd.Timestamp(replay_prediction['signal_session_date']):%Y-%m-%d}")
+    metric_cols[2].metric("Replay score", f"{float(replay_prediction['expected_return_score']):+.3%}")
+    metric_cols[3].metric("Replay confidence", f"{float(replay_prediction['prediction_confidence']):.2f}")
+    metric_cols[4].metric("Suggested stance", str(replay_prediction["suggested_stance"]))
 
     if full_history_row is not None:
         delta = float(replay_prediction["expected_return_score"] - full_history_row["expected_return_score"])
@@ -1954,6 +2091,7 @@ def render_historical_replay_view(
     st.json(
         {
             "template_run_id": selected_run_id,
+            "target_asset": str(run_config.target_asset).upper(),
             "history_start": str(pd.Timestamp(replay["history_start"]).date()),
             "history_end": str(pd.Timestamp(replay["history_end"]).date()),
             "training_rows_used": replay["training_rows_used"],
@@ -1993,7 +2131,7 @@ def main() -> None:
     st.title(settings.title)
     st.caption(
         "Single-user web workbench for ingesting Trump-related social data, discovering influential mention accounts, "
-        "building next-session SPY features, and evaluating long/flat strategies with walk-forward testing.",
+        "building next-session features for SPY and watchlist assets, and evaluating long/flat strategies with walk-forward testing.",
     )
 
     store = DuckDBStore(settings)
