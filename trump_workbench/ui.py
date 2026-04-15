@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 
+from .access import ADMIN_SESSION_KEY, app_mode_label, is_public_mode, verify_admin_password, writes_enabled
 from .backtesting import BacktestService
 from .config import AppSettings, DEFAULT_ETF_SYMBOLS, EASTERN
 from .contracts import (
@@ -52,6 +53,16 @@ from .live_monitor import (
     rank_live_asset_snapshots,
     validate_live_monitor_config,
 )
+from .runtime import (
+    append_refresh_history as runtime_append_refresh_history,
+    build_source_adapters as runtime_build_source_adapters,
+    ensure_bootstrap as runtime_ensure_bootstrap,
+    missing_core_datasets,
+    rebuild_discovery_state as runtime_rebuild_discovery_state,
+    refresh_datasets as runtime_refresh_datasets,
+    save_watchlist as runtime_save_watchlist,
+    watchlist_symbols as runtime_watchlist_symbols,
+)
 from .research import (
     aggregate_research_sessions,
     build_asset_comparison_chart,
@@ -81,6 +92,49 @@ from .research import (
 )
 from .storage import DuckDBStore
 from .utils import fmt_score
+
+
+def _writes_enabled(settings: AppSettings) -> bool:
+    return writes_enabled(settings, st.session_state)
+
+
+def _app_mode_label(settings: AppSettings) -> str:
+    return app_mode_label(settings, st.session_state)
+
+
+def _refresh_required_message(settings: AppSettings, base_message: str) -> str:
+    if is_public_mode(settings) and not _writes_enabled(settings):
+        return f"{base_message} An admin needs to bootstrap or refresh the shared datasets."
+    return base_message
+
+
+def _render_sidebar_access_panel(settings: AppSettings) -> None:
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Access**")
+    mode_label = _app_mode_label(settings)
+    friendly_label = mode_label.replace("_", " ").title()
+    if not is_public_mode(settings):
+        st.sidebar.success(f"Mode: {friendly_label}")
+        return
+
+    if st.session_state.get(ADMIN_SESSION_KEY, False):
+        st.sidebar.success("Mode: Admin")
+        if st.sidebar.button("End admin session", use_container_width=True):
+            st.session_state[ADMIN_SESSION_KEY] = False
+            st.rerun()
+        return
+
+    st.sidebar.warning("Mode: Public read-only")
+    if not settings.admin_password:
+        st.sidebar.caption("Admin password is not configured for this deployment.")
+        return
+    password = st.sidebar.text_input("Admin password", type="password", key="allcaps_admin_password_input")
+    if st.sidebar.button("Unlock admin access", use_container_width=True):
+        if verify_admin_password(settings, password):
+            st.session_state[ADMIN_SESSION_KEY] = True
+            st.session_state.pop("allcaps_admin_password_input", None)
+            st.rerun()
+        st.sidebar.error("Invalid admin password.")
 
 
 def _parse_grid(value: str, cast: type[float] | type[int]) -> tuple[float, ...] | tuple[int, ...]:
@@ -564,25 +618,11 @@ def _build_live_runner_up_frame(board: pd.DataFrame, decision_row: pd.Series) ->
 
 
 def _watchlist_symbols(store: DuckDBStore) -> list[str]:
-    watchlist = store.read_frame("asset_watchlist")
-    if watchlist.empty or "symbol" not in watchlist.columns:
-        return []
-    return normalize_symbols(watchlist["symbol"].astype(str).tolist())
+    return runtime_watchlist_symbols(store)
 
 
 def _save_watchlist(store: DuckDBStore, symbols: list[str] | tuple[str, ...]) -> tuple[pd.DataFrame, pd.DataFrame]:
-    watchlist = build_watchlist_frame(symbols)
-    asset_universe = build_asset_universe(watchlist["symbol"].tolist() if not watchlist.empty else [])
-    store.save_frame("asset_watchlist", watchlist, metadata={"row_count": int(len(watchlist))})
-    store.save_frame(
-        "asset_universe",
-        asset_universe,
-        metadata={
-            "row_count": int(len(asset_universe)),
-            "default_etfs": list(DEFAULT_ETF_SYMBOLS),
-        },
-    )
-    return watchlist, asset_universe
+    return runtime_save_watchlist(store, symbols)
 
 
 def _watchlist_text_value(store: DuckDBStore) -> str:
@@ -595,37 +635,7 @@ def _build_adapters(
     remote_url: str,
     uploaded_files: list[Any],
 ) -> list[Any]:
-    adapters: list[Any] = [TruthSocialArchiveAdapter(settings=settings)]
-    if settings.local_x_path.exists():
-        adapters.append(
-            XCsvAdapter(
-                settings=settings,
-                name="Local X posts",
-                provenance=f"file:{settings.local_x_path}",
-                raw_bytes=settings.local_x_path.read_bytes(),
-            ),
-        )
-    if settings.local_mentions_path.exists():
-        adapters.append(
-            XCsvAdapter(
-                settings=settings,
-                name="Local influential mentions",
-                provenance=f"file:{settings.local_mentions_path}",
-                raw_bytes=settings.local_mentions_path.read_bytes(),
-            ),
-        )
-    if remote_url.strip():
-        adapters.append(XCsvAdapter.from_remote_url(settings, remote_url.strip(), "Remote X / mention CSV"))
-    for uploaded_file in uploaded_files:
-        adapters.append(
-            XCsvAdapter(
-                settings=settings,
-                name=f"Uploaded CSV: {uploaded_file.name}",
-                provenance=f"upload:{uploaded_file.name}",
-                raw_bytes=uploaded_file.getvalue(),
-            ),
-        )
-    return adapters
+    return runtime_build_source_adapters(settings, remote_url, uploaded_files)
 
 
 def _refresh_datasets(
@@ -641,112 +651,19 @@ def _refresh_datasets(
     incremental: bool = False,
     refresh_mode: str = "full",
 ) -> dict[str, Any]:
-    started_at = pd.Timestamp.now(tz="UTC")
-    resolved_mode = str(refresh_mode or ("incremental" if incremental else "full"))
-    refresh_id = create_refresh_id(resolved_mode, started_at)
-
-    try:
-        adapters = _build_adapters(settings, remote_url, uploaded_files)
-        existing_posts = store.read_frame("normalized_posts")
-        last_cursor = pd.to_datetime(existing_posts["post_timestamp"], errors="coerce").max() if not existing_posts.empty else None
-        if incremental and last_cursor is not None:
-            new_posts, source_manifest = ingestion_service.run_incremental_refresh(adapters, last_cursor=last_cursor)
-            posts = pd.concat([existing_posts, new_posts], ignore_index=True) if not existing_posts.empty else new_posts
-            posts = posts.drop_duplicates(subset=["post_id"], keep="last").sort_values("post_timestamp").reset_index(drop=True)
-        else:
-            posts, source_manifest = ingestion_service.run_refresh(adapters)
-        store.save_frame("normalized_posts", posts, metadata={"row_count": int(len(posts))})
-        store.save_frame("source_manifests", source_manifest, metadata={"row_count": int(len(source_manifest))})
-
-        start = settings.term_start.strftime("%Y-%m-%d")
-        end = pd.Timestamp.now(tz=settings.timezone).strftime("%Y-%m-%d")
-        sp500 = market_service.load_sp500_daily(start, end)
-        spy = market_service.load_spy_daily(start, end)
-        store.save_frame("sp500_daily", sp500, metadata={"row_count": int(len(sp500))})
-        store.save_frame("spy_daily", spy, metadata={"row_count": int(len(spy))})
-
-        watchlist_symbols = _watchlist_symbols(store)
-        watchlist, asset_universe = _save_watchlist(store, watchlist_symbols)
-        asset_symbols = asset_universe["symbol"].astype(str).tolist() if not asset_universe.empty else list(DEFAULT_ETF_SYMBOLS)
-        asset_daily, daily_manifest = market_service.load_assets_daily(asset_symbols, start, end)
-        asset_intraday, intraday_manifest = market_service.load_assets_intraday(asset_symbols, interval="5m", lookback_days=30)
-        asset_market_manifest = pd.concat([daily_manifest, intraday_manifest], ignore_index=True)
-        store.save_frame("asset_daily", asset_daily, metadata={"row_count": int(len(asset_daily)), "symbols": asset_symbols})
-        store.save_frame(
-            "asset_intraday",
-            asset_intraday,
-            metadata={"row_count": int(len(asset_intraday)), "symbols": asset_symbols, "interval": "5m", "lookback_days": 30},
-        )
-        store.save_frame("asset_market_manifest", asset_market_manifest, metadata={"row_count": int(len(asset_market_manifest))})
-
-        as_of = posts["post_timestamp"].max() if not posts.empty else pd.Timestamp.now(tz=settings.timezone)
-        tracked_accounts, ranking_history = _rebuild_discovery_state(store, discovery_service, posts, as_of)
-        prepared_posts = feature_service.prepare_session_posts(
-            posts=posts,
-            market_calendar=spy,
-            tracked_accounts=tracked_accounts,
-            llm_enabled=True,
-        )
-        asset_post_mappings = feature_service.build_asset_post_mappings(
-            prepared_posts=prepared_posts,
-            asset_universe=asset_universe,
-            llm_enabled=True,
-        )
-        asset_session_features = feature_service.build_asset_session_dataset(
-            asset_post_mappings=asset_post_mappings,
-            asset_market=asset_daily,
-            feature_version="asset-v1",
-            llm_enabled=True,
-            asset_universe=asset_universe,
-        )
-        store.save_frame(
-            "asset_post_mappings",
-            asset_post_mappings,
-            metadata={"row_count": int(len(asset_post_mappings)), "match_mode": "rules_plus_semantic"},
-        )
-        store.save_frame(
-            "asset_session_features",
-            asset_session_features,
-            metadata={"row_count": int(len(asset_session_features)), "feature_version": "asset-v1"},
-        )
-        completed_at = pd.Timestamp.now(tz="UTC")
-        health_latest = health_service.persist_snapshot(store, refresh_id=refresh_id, generated_at=completed_at)
-        refresh_history = _append_refresh_history(
-            store=store,
-            refresh_id=refresh_id,
-            refresh_mode=resolved_mode,
-            status="success",
-            started_at=started_at,
-            completed_at=completed_at,
-        )
-        return {
-            "posts": posts,
-            "source_manifest": source_manifest,
-            "sp500": sp500,
-            "spy": spy,
-            "asset_watchlist": watchlist,
-            "asset_universe": asset_universe,
-            "asset_daily": asset_daily,
-            "asset_intraday": asset_intraday,
-            "asset_market_manifest": asset_market_manifest,
-            "asset_post_mappings": asset_post_mappings,
-            "asset_session_features": asset_session_features,
-            "tracked_accounts": tracked_accounts,
-            "data_health_latest": health_latest,
-            "refresh_history": refresh_history,
-            "refresh_id": refresh_id,
-        }
-    except Exception as exc:
-        _append_refresh_history(
-            store=store,
-            refresh_id=refresh_id,
-            refresh_mode=resolved_mode,
-            status="error",
-            started_at=started_at,
-            completed_at=pd.Timestamp.now(tz="UTC"),
-            error_message=str(exc),
-        )
-        raise
+    return runtime_refresh_datasets(
+        settings=settings,
+        store=store,
+        ingestion_service=ingestion_service,
+        market_service=market_service,
+        discovery_service=discovery_service,
+        feature_service=feature_service,
+        health_service=health_service,
+        remote_url=remote_url,
+        uploaded_files=uploaded_files,
+        incremental=incremental,
+        refresh_mode=refresh_mode,
+    )
 
 
 def _ensure_bootstrap(
@@ -757,31 +674,16 @@ def _ensure_bootstrap(
     discovery_service: DiscoveryService,
     feature_service: FeatureService,
     health_service: DataHealthService,
-) -> None:
-    if store.read_frame("asset_watchlist").empty and store.read_frame("asset_universe").empty:
-        _save_watchlist(store, [])
-    if (
-        store.read_frame("normalized_posts").empty
-        or store.read_frame("sp500_daily").empty
-        or store.read_frame("spy_daily").empty
-        or store.read_frame("asset_daily").empty
-        or store.read_frame("asset_intraday").empty
-        or store.read_frame("asset_post_mappings").empty
-        or store.read_frame("asset_session_features").empty
-    ):
-        _refresh_datasets(
-            settings=settings,
-            store=store,
-            ingestion_service=ingestion_service,
-            market_service=market_service,
-            discovery_service=discovery_service,
-            feature_service=feature_service,
-            health_service=health_service,
-            remote_url=st.session_state.get("remote_x_url", ""),
-            uploaded_files=[],
-            incremental=False,
-            refresh_mode="bootstrap",
-        )
+) -> dict[str, Any] | None:
+    return runtime_ensure_bootstrap(
+        settings=settings,
+        store=store,
+        ingestion_service=ingestion_service,
+        market_service=market_service,
+        discovery_service=discovery_service,
+        feature_service=feature_service,
+        health_service=health_service,
+    )
 
 
 def _rebuild_discovery_state(
@@ -790,20 +692,7 @@ def _rebuild_discovery_state(
     posts: pd.DataFrame,
     as_of: pd.Timestamp,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    overrides = store.read_frame("manual_account_overrides")
-    normalized_overrides = discovery_service.normalize_manual_overrides(overrides)
-    if normalized_overrides.empty:
-        normalized_overrides = pd.DataFrame(columns=MANUAL_OVERRIDE_COLUMNS)
-    tracked_accounts, ranking_history = discovery_service.refresh_accounts(
-        posts=posts,
-        existing_accounts=pd.DataFrame(),
-        as_of=as_of,
-        manual_overrides=normalized_overrides,
-    )
-    store.save_frame("manual_account_overrides", normalized_overrides, metadata={"row_count": int(len(normalized_overrides))})
-    store.save_frame("tracked_accounts", tracked_accounts, metadata={"row_count": int(len(tracked_accounts))})
-    store.save_frame("account_rankings", ranking_history, metadata={"row_count": int(len(ranking_history))})
-    return tracked_accounts, ranking_history
+    return runtime_rebuild_discovery_state(store, discovery_service, posts, as_of)
 
 
 def _metric_row(metrics: dict[str, Any]) -> None:
@@ -880,7 +769,8 @@ def _append_refresh_history(
     completed_at: pd.Timestamp,
     error_message: str = "",
 ) -> pd.DataFrame:
-    refresh_row = make_refresh_history_frame(
+    return runtime_append_refresh_history(
+        store=store,
         refresh_id=refresh_id,
         refresh_mode=refresh_mode,
         status=status,
@@ -888,13 +778,6 @@ def _append_refresh_history(
         completed_at=completed_at,
         error_message=error_message,
     )
-    store.append_frame(
-        "refresh_history",
-        refresh_row,
-        dedupe_on=["refresh_id"],
-        metadata={"latest_status": status, "latest_refresh_mode": refresh_mode},
-    )
-    return ensure_refresh_history_frame(store.read_frame("refresh_history"))
 
 
 def _load_data_health_view_state(
@@ -942,6 +825,39 @@ def render_datasets_view(
 ) -> None:
     st.subheader("Datasets")
     st.caption("Refresh historical sources, store normalized datasets, and inspect the local DuckDB + Parquet catalog.")
+    can_write = _writes_enabled(settings)
+    missing_datasets = missing_core_datasets(store)
+    if is_public_mode(settings) and not can_write:
+        st.info("This hosted deployment is in public read-only mode. Unlock admin access in the sidebar to refresh data, edit the watchlist, or change live configuration.")
+
+    health_state = _load_data_health_view_state(store, health_service)
+    latest_health = health_state["latest"]
+    refresh_history = health_state["refresh_history"]
+    trend = health_state["trend"]
+    summary = health_state["summary"]
+
+    st.markdown("**Hosted Operations**")
+    ops_cols = st.columns(5)
+    ops_cols[0].metric("App mode", _app_mode_label(settings).replace("_", " ").title())
+    ops_cols[1].metric("Scheduler", "Enabled" if settings.scheduler_enabled else "Disabled")
+    ops_cols[2].metric("Last refresh mode", str(summary.get("last_refresh_mode", "n/a")).upper())
+    last_refresh_at = summary.get("last_refresh_at", pd.NaT)
+    ops_cols[3].metric(
+        "Last refresh at",
+        pd.Timestamp(last_refresh_at).tz_convert(EASTERN).strftime("%Y-%m-%d %H:%M") if pd.notna(last_refresh_at) else "n/a",
+    )
+    ops_cols[4].metric("Missing core datasets", f"{len(missing_datasets):,}")
+    st.caption(f"State root: `{settings.state_root}` | DuckDB: `{settings.db_path}`")
+
+    if missing_datasets:
+        if can_write:
+            st.warning(
+                "Core datasets are missing for this deployment. Use `Bootstrap datasets` to populate the shared state volume.",
+            )
+        else:
+            st.warning(
+                "This hosted instance has not been bootstrapped yet. An admin needs to populate the shared datasets before public pages will show data.",
+            )
 
     st.markdown("**Asset universe**")
     st.caption("Manage a small stock watchlist here. The ETF starter set is always included: `SPY`, `QQQ`, `XLK`, `XLF`, `XLE`, `SMH`.")
@@ -950,16 +866,17 @@ def render_datasets_view(
         "Watchlist symbols",
         value=st.session_state.get("watchlist_symbols", default_text),
         help="Enter a comma-separated list of stock tickers such as `AAPL, TSLA, NVDA`.",
+        disabled=not can_write,
     )
     st.session_state["watchlist_symbols"] = watchlist_input
     watchlist_cols = st.columns(2)
-    if watchlist_cols[0].button("Save watchlist", use_container_width=True):
+    if watchlist_cols[0].button("Save watchlist", use_container_width=True, disabled=not can_write):
         symbols = normalize_symbols([part.strip() for part in watchlist_input.replace("\n", ",").split(",") if part.strip()])
         watchlist, asset_universe = _save_watchlist(store, symbols)
         st.session_state["watchlist_symbols"] = ", ".join(watchlist["symbol"].tolist()) if not watchlist.empty else ""
         st.success(f"Saved {len(watchlist):,} watchlist symbols and {len(asset_universe):,} total tracked assets.")
         st.rerun()
-    if watchlist_cols[1].button("Reset watchlist", use_container_width=True):
+    if watchlist_cols[1].button("Reset watchlist", use_container_width=True, disabled=not can_write):
         _save_watchlist(store, [])
         st.session_state["watchlist_symbols"] = ""
         st.success("Reset the manual watchlist to the ETF starter set only.")
@@ -968,15 +885,18 @@ def render_datasets_view(
     remote_url = st.text_input(
         "Remote X / mentions CSV URL",
         key="remote_x_url",
-        value=st.session_state.get("remote_x_url", os.getenv("TRUMP_X_CSV_URL", "")),
+        value=st.session_state.get("remote_x_url", settings.remote_x_csv_url),
+        disabled=not can_write,
     )
     uploaded_files = st.file_uploader(
         "Upload X or mention CSVs",
         type=["csv"],
         accept_multiple_files=True,
+        disabled=not can_write,
     )
     action_cols = st.columns(2)
-    if action_cols[0].button("Refresh full datasets", use_container_width=True):
+    primary_refresh_label = "Bootstrap datasets" if missing_datasets else "Refresh full datasets"
+    if action_cols[0].button(primary_refresh_label, use_container_width=True, disabled=not can_write):
         with st.spinner("Refreshing source data, market data, and discovery state..."):
             summary = _refresh_datasets(
                 settings=settings,
@@ -988,13 +908,13 @@ def render_datasets_view(
                 health_service=health_service,
                 remote_url=remote_url,
                 uploaded_files=uploaded_files or [],
-                refresh_mode="full",
+                refresh_mode="bootstrap" if missing_datasets else "full",
             )
         st.success(
             f"Refreshed {len(summary['posts']):,} normalized posts, {len(summary['asset_daily']):,} daily market rows, "
             f"and {len(summary['tracked_accounts']):,} tracked account versions.",
         )
-    if action_cols[1].button("Incremental refresh", use_container_width=True):
+    if action_cols[1].button("Incremental refresh", use_container_width=True, disabled=not can_write):
         with st.spinner("Polling sources for new data..."):
             summary = _refresh_datasets(
                 settings=settings,
@@ -1013,12 +933,6 @@ def render_datasets_view(
             f"Incremental refresh complete. Total posts stored: {len(summary['posts']):,}. "
             f"Asset intraday rows stored: {len(summary['asset_intraday']):,}.",
         )
-
-    health_state = _load_data_health_view_state(store, health_service)
-    latest_health = health_state["latest"]
-    refresh_history = health_state["refresh_history"]
-    trend = health_state["trend"]
-    summary = health_state["summary"]
 
     st.markdown("**Data Health**")
     st.caption("Warn-only checks for freshness, completeness, manifest errors, duplicates, and anomaly drift across refresh history.")
@@ -1200,13 +1114,16 @@ def render_discovery_view(
 ) -> None:
     st.subheader("Discovery")
     st.caption("Dynamic discovery ranks X accounts mentioning Trump, auto-includes the strongest candidates, and lets you pin or suppress accounts manually.")
+    can_write = _writes_enabled(settings)
+    if is_public_mode(settings) and not can_write:
+        st.info("Discovery overrides are disabled in public read-only mode.")
     posts = store.read_frame("normalized_posts")
     tracked_accounts = store.read_frame("tracked_accounts")
     ranking_history = store.read_frame("account_rankings")
     overrides = discovery_service.normalize_manual_overrides(store.read_frame("manual_account_overrides"))
 
     if posts.empty:
-        st.info("Refresh datasets first so the workbench has posts to analyze.")
+        st.info(_refresh_required_message(settings, "Refresh datasets first so the workbench has posts to analyze."))
         return
 
     candidate_posts = posts.loc[
@@ -1215,7 +1132,7 @@ def render_discovery_view(
         & (~posts["author_is_trump"])
     ]
     ranking_columns_present = {"author_account_id", "ranked_at"}.issubset(ranking_history.columns)
-    if (not candidate_posts.empty or not overrides.empty) and not ranking_columns_present:
+    if (not candidate_posts.empty or not overrides.empty) and not ranking_columns_present and can_write:
         tracked_accounts, ranking_history = _rebuild_discovery_state(
             store,
             discovery_service,
@@ -1223,6 +1140,8 @@ def render_discovery_view(
             posts["post_timestamp"].max(),
         )
         overrides = discovery_service.normalize_manual_overrides(store.read_frame("manual_account_overrides"))
+    elif (not candidate_posts.empty or not overrides.empty) and not ranking_columns_present:
+        st.info("Discovery rankings have not been built for this hosted instance yet. An admin needs to refresh datasets first.")
 
     active_accounts = discovery_service.current_active_accounts(
         tracked_accounts,
@@ -1294,7 +1213,7 @@ def render_discovery_view(
                 min_value=effective_from,
                 key="override_effective_to",
             )
-        if st.button("Save override", use_container_width=True):
+        if st.button("Save override", use_container_width=True, disabled=not can_write):
             updated = discovery_service.add_manual_override(
                 overrides=overrides,
                 account_id=str(selected_row["author_account_id"]),
@@ -1321,7 +1240,7 @@ def render_discovery_view(
         ).tolist()
         remove_choice = st.selectbox("Remove override", options=remove_options)
         remove_id = remove_choice.split(" | ", 1)[0]
-        if st.button("Delete selected override", use_container_width=True):
+        if st.button("Delete selected override", use_container_width=True, disabled=not can_write):
             updated = discovery_service.remove_manual_override(overrides, remove_id)
             store.save_frame("manual_account_overrides", updated, metadata={"row_count": int(len(updated))})
             _rebuild_discovery_state(store, discovery_service, posts, posts["post_timestamp"].max())
@@ -1364,7 +1283,7 @@ def render_research_view(
     asset_session_features = store.read_frame("asset_session_features")
     tracked_accounts = store.read_frame("tracked_accounts")
     if posts.empty or sp500.empty:
-        st.info("Refresh datasets first so the research view has source data.")
+        st.info(_refresh_required_message(settings, "Refresh datasets first so the research view has source data."))
         return
 
     today_et = pd.Timestamp.now(tz=settings.timezone).normalize().tz_localize(None)
@@ -1599,7 +1518,7 @@ def render_research_view(
     with asset_tab:
         st.caption("Compare `SPY` with one tracked stock or ETF across overlays, event studies, and intraday reaction windows.")
         if asset_universe.empty or asset_daily.empty:
-            st.info("Refresh datasets first to populate the tracked asset universe and daily asset market data.")
+            st.info(_refresh_required_message(settings, "Refresh datasets first to populate the tracked asset universe and daily asset market data."))
         else:
             comparison_candidates = asset_universe.loc[asset_universe["symbol"].astype(str).str.upper() != "SPY"].copy()
             if comparison_candidates.empty:
@@ -1757,7 +1676,7 @@ def render_research_view(
                 with intraday_tab:
                     st.caption("Uses the stored recent `asset_intraday` dataset, so older sessions may not have intraday coverage.")
                     if asset_intraday.empty:
-                        st.info("Refresh datasets first to populate recent multi-asset intraday data.")
+                        st.info(_refresh_required_message(settings, "Refresh datasets first to populate recent multi-asset intraday data."))
                     elif selected_asset_raw_mappings.empty:
                         st.info(f"No mapped posts for `{selected_asset}` are available to anchor an intraday comparison.")
                     else:
@@ -2502,11 +2421,14 @@ def render_models_view(
         "Build the session dataset, train a next-session expected-return model for SPY or a selected asset, "
         "compare saved runs, and inspect benchmark plus leakage diagnostics.",
     )
+    can_write = _writes_enabled(settings)
+    if is_public_mode(settings) and not can_write:
+        st.info("Run creation is disabled in public read-only mode. Saved runs remain viewable.")
     posts = store.read_frame("normalized_posts")
     spy = store.read_frame("spy_daily")
     tracked_accounts = store.read_frame("tracked_accounts")
     if posts.empty or spy.empty:
-        st.info("Refresh datasets first so the modeling pipeline has normalized posts and SPY market data.")
+        st.info(_refresh_required_message(settings, "Refresh datasets first so the modeling pipeline has normalized posts and SPY market data."))
         return
 
     target_asset_options = _target_asset_options(store)
@@ -2530,7 +2452,7 @@ def render_models_view(
     min_posts_text = st.text_input("Minimum signal post-count grid", value="1,2,3")
     account_weight_text = st.text_input("Tracked-account weight grid", value="0.5,1.0,1.5")
 
-    if st.button("Build dataset and run walk-forward backtest", use_container_width=True):
+    if st.button("Build dataset and run walk-forward backtest", use_container_width=True, disabled=not can_write):
         with st.spinner("Building session features and running walk-forward optimization..."):
             normalized_target_asset = str(selected_target_asset).upper()
             target_feature_version = "v1" if normalized_target_asset == "SPY" else "asset-v1"
@@ -2672,7 +2594,7 @@ def render_models_view(
                 )
                 selected_component_ids.append(selected_run_id)
 
-            if st.button("Build saved-run portfolio allocator", use_container_width=True):
+            if st.button("Build saved-run portfolio allocator", use_container_width=True, disabled=not can_write):
                 with st.spinner("Aligning component runs and backtesting the shared portfolio allocator..."):
                     component_bundles = {
                         run_id: bundle
@@ -2715,7 +2637,7 @@ def render_models_view(
         )
         asset_session_features = store.read_frame("asset_session_features")
         if asset_session_features.empty:
-            st.info("Refresh datasets first so the asset-session feature dataset is available.")
+            st.info(_refresh_required_message(settings, "Refresh datasets first so the asset-session feature dataset is available."))
         else:
             available_symbols = sorted(asset_session_features["asset_symbol"].dropna().astype(str).str.upper().unique().tolist())
             if "SPY" in available_symbols:
@@ -2764,7 +2686,7 @@ def render_models_view(
                 default=["ridge", "elastic_net", "hist_gradient_boosting_regressor"],
             )
 
-            if st.button("Build joint portfolio model", use_container_width=True):
+            if st.button("Build joint portfolio model", use_container_width=True, disabled=not can_write):
                 if "SPY" not in selected_symbols and str(joint_fallback_mode).upper() == "SPY":
                     st.error("Include `SPY` in the selected symbols when fallback mode is `SPY`.")
                     return
@@ -3144,10 +3066,14 @@ def render_live_monitor(
         "Multi-asset decision console for pinned saved runs. It ranks current live candidates, "
         "applies the configured SPY/flat fallback, and keeps board history for debugging.",
     )
+    can_write = _writes_enabled(settings)
+    if is_public_mode(settings) and not can_write:
+        st.info("Public visitors can inspect the live board and history, but polling refreshes and config changes require admin access.")
     remote_url = st.text_input(
         "Remote X / mentions CSV URL for polling",
         key="live_remote_x_url",
-        value=st.session_state.get("remote_x_url", ""),
+        value=st.session_state.get("remote_x_url", settings.remote_x_csv_url),
+        disabled=not can_write,
     )
     poll_enabled = st.checkbox("Enable browser polling refresh", value=False)
     poll_seconds = st.slider("Polling interval (seconds)", min_value=30, max_value=900, value=settings.default_poll_seconds, step=30)
@@ -3163,7 +3089,7 @@ def render_live_monitor(
             height=0,
         )
 
-    refresh_requested = st.button("Poll sources now", use_container_width=True)
+    refresh_requested = st.button("Poll sources now", use_container_width=True, disabled=not can_write)
     if refresh_requested:
         with st.spinner("Refreshing sources and market data..."):
             _refresh_datasets(
@@ -3242,7 +3168,7 @@ def render_live_monitor(
             f"Deployment variant: `{deployment_variant or 'n/a'}` | "
             f"selected symbols: `{', '.join(selected_symbols) if selected_symbols else 'n/a'}`",
         )
-        save_config = st.form_submit_button("Save pinned portfolio run")
+        save_config = st.form_submit_button("Save pinned portfolio run", disabled=not can_write)
 
     if save_config:
         candidate_config = LiveMonitorConfig(
@@ -3275,7 +3201,7 @@ def render_live_monitor(
     spy = store.read_frame("spy_daily")
     tracked_accounts = store.read_frame("tracked_accounts")
     if str(active_config.mode or "portfolio_run") == "asset_model_set" and (posts.empty or spy.empty):
-        st.info("Refresh datasets first so the live decision console has normalized posts and SPY market data.")
+        st.info(_refresh_required_message(settings, "Refresh datasets first so the live decision console has normalized posts and SPY market data."))
         return
     board_generated_at = pd.Timestamp.utcnow().floor("s")
     board, decision_history_row, explanation_lookup, live_warnings = _build_live_monitor_state(
@@ -3295,8 +3221,8 @@ def render_live_monitor(
         st.info("No live candidate rows could be built from the pinned portfolio run.")
         return
 
-    should_persist_snapshots = bool(refresh_requested)
-    if poll_enabled:
+    should_persist_snapshots = bool(refresh_requested and can_write)
+    if poll_enabled and can_write:
         last_persisted = pd.to_datetime(st.session_state.get("live_monitor_last_persisted_at"), errors="coerce")
         if pd.isna(last_persisted) or (board_generated_at - last_persisted).total_seconds() >= max(int(poll_seconds * 0.8), 5):
             should_persist_snapshots = True
@@ -3519,7 +3445,7 @@ def render_historical_replay_view(
     spy = store.read_frame("spy_daily")
     tracked_accounts = store.read_frame("tracked_accounts")
     if posts.empty or spy.empty:
-        st.info("Refresh datasets first so replay can rebuild historical features.")
+        st.info(_refresh_required_message(settings, "Refresh datasets first so replay can rebuild historical features."))
         return
 
     selected_run_id = st.selectbox("Replay template run", options=runs["run_id"].tolist(), key="replay-run-id")
@@ -3656,12 +3582,14 @@ def main() -> None:
 
     _ensure_bootstrap(settings, store, ingestion_service, market_service, discovery_service, feature_service, health_service)
 
+    _render_sidebar_access_panel(settings)
     page = st.sidebar.radio(
         "Workbench",
         options=["Research View", "Datasets", "Discovery", "Models & Backtests", "Historical Replay", "Live Monitor"],
     )
     st.sidebar.markdown("---")
     st.sidebar.caption("Storage: DuckDB + Parquet")
+    st.sidebar.code(str(settings.state_root))
     st.sidebar.code(str(settings.db_path))
 
     if page == "Research View":
