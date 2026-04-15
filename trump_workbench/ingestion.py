@@ -350,6 +350,9 @@ class IngestionService:
         for adapter in adapters:
             posts, meta = adapter.fetch_history()
             frames.append(posts)
+            meta = dict(meta)
+            meta.setdefault("status", "ok")
+            meta.setdefault("detail", "")
             manifest_rows.append(meta)
         combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=NORMALIZED_POST_COLUMNS)
         combined = _ensure_normalized_schema(combined) if not combined.empty else pd.DataFrame(columns=NORMALIZED_POST_COLUMNS)
@@ -366,6 +369,9 @@ class IngestionService:
         for adapter in adapters:
             posts, meta = adapter.fetch_since(last_cursor)
             frames.append(posts)
+            meta = dict(meta)
+            meta.setdefault("status", "ok")
+            meta.setdefault("detail", "")
             manifest_rows.append(meta)
         combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=NORMALIZED_POST_COLUMNS)
         combined = _ensure_normalized_schema(combined) if not combined.empty else pd.DataFrame(columns=NORMALIZED_POST_COLUMNS)
