@@ -16,6 +16,28 @@ In plain English, the app helps you:
 - backtest a simple **long / flat SPY** strategy
 - compare saved runs and inspect why a run did or did not work
 
+## Table of Contents
+
+- [What The App Is For](#what-the-app-is-for)
+- [What You Need Before You Start](#what-you-need-before-you-start)
+- [Quick Start](#quick-start)
+- [Contributor Workflow](#contributor-workflow)
+- [Recommended First Run](#recommended-first-run)
+- [How To Work With Each Page](#how-to-work-with-each-page)
+  - [`Datasets`](#datasets)
+- [`Discovery`](#discovery)
+- [`Research View`](#research-view)
+- [`Models & Backtests`](#models--backtests)
+- [`Live Monitor`](#live-monitor)
+- [Data Inputs](#data-inputs)
+- [CSV Expectations](#csv-expectations)
+- [What Gets Stored Locally](#what-gets-stored-locally)
+- [Typical User Workflow](#typical-user-workflow)
+- [Troubleshooting](#troubleshooting)
+- [Current Limits](#current-limits)
+- [Architecture](#architecture)
+- [Testing](#testing)
+
 ## What The App Is For
 
 Use this app when you want to answer questions like:
