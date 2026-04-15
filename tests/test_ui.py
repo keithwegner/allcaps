@@ -13,6 +13,7 @@ from trump_workbench.storage import DuckDBStore
 from trump_workbench.ui import (
     _build_benchmark_delta_table,
     _build_replay_comparison_frame,
+    _bundle_feature_names,
     _build_feature_diff_table,
     _build_metric_comparison_table,
     _build_setting_diff_table,
@@ -228,6 +229,49 @@ class UiHelperTests(unittest.TestCase):
         self.assertIn("target asset SPY -> QQQ", notes[0])
         self.assertIn("LLM on vs off", notes[0])
         self.assertIn("threshold 0.001 -> 0.0025", notes[0])
+
+    def test_bundle_feature_names_handles_joint_portfolio_bundle(self) -> None:
+        bundle = {
+            "run": {
+                "run_id": "portfolio-run",
+                "run_name": "portfolio-run",
+                "run_type": "portfolio_allocator",
+                "allocator_mode": "joint_model",
+                "target_asset": "PORTFOLIO",
+            },
+            "config": {
+                "allocator_mode": "joint_model",
+                "selected_symbols": ["SPY", "QQQ"],
+                "topology_variants": ["per_asset", "pooled"],
+                "model_families": ["ridge"],
+            },
+            "selected_params": {
+                "deployment_variant": "pooled",
+            },
+            "metrics": {"total_return": 0.12, "sharpe": 1.1, "sortino": 1.2, "max_drawdown": -0.1, "robust_score": 1.5, "trade_count": 10},
+            "model_artifact": LinearModelArtifact(
+                model_version="portfolio-placeholder",
+                feature_names=[],
+            ),
+            "portfolio_model_bundle": {
+                "deployment_variant": "pooled",
+                "variants": {
+                    "pooled": {
+                        "models": {
+                            "pooled": {
+                                "feature_names": ["post_count", "asset_indicator__spy", "sentiment_avg"],
+                            },
+                        },
+                    },
+                },
+            },
+            "benchmarks": pd.DataFrame(),
+        }
+
+        self.assertEqual(
+            _bundle_feature_names(bundle),
+            ["asset_indicator__spy", "post_count", "sentiment_avg"],
+        )
 
     def test_replay_helpers_build_session_list_config_and_summary(self) -> None:
         feature_rows = pd.DataFrame(

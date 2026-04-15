@@ -163,7 +163,11 @@ class ExperimentStoreTests(unittest.TestCase):
         )
 
         live_config = LiveMonitorConfig(
+            mode="portfolio_run",
             fallback_mode="FLAT",
+            portfolio_run_id="portfolio-1",
+            portfolio_run_name="Portfolio baseline",
+            deployment_variant="pooled",
             pinned_runs=[
                 LiveMonitorPinnedRun(
                     asset_symbol="SPY",
@@ -180,7 +184,8 @@ class ExperimentStoreTests(unittest.TestCase):
         self.assertIsNotNone(loaded_config)
         assert loaded_config is not None
         self.assertEqual(loaded_config.fallback_mode, "FLAT")
-        self.assertEqual(loaded_config.pinned_runs[0].asset_symbol, "SPY")
+        self.assertEqual(loaded_config.portfolio_run_id, "portfolio-1")
+        self.assertEqual(loaded_config.deployment_variant, "pooled")
 
         asset_snapshots = pd.DataFrame(
             {
@@ -240,23 +245,28 @@ class ExperimentStoreTests(unittest.TestCase):
             metrics={"robust_score": 2.0, "total_return": 0.05},
             selected_params={"fallback_mode": "SPY", "component_run_ids": ["run-123", "run-qqq"]},
             run_type="portfolio_allocator",
-            allocator_mode="saved_runs",
+            allocator_mode="joint_model",
             fallback_mode="SPY",
-            component_run_ids=["run-123", "run-qqq"],
             universe_symbols=["SPY", "QQQ"],
+            deployment_variant="pooled",
+            topology_variants=["per_asset", "pooled"],
+            model_families=["ridge", "hist_gradient_boosting_regressor"],
+            selected_symbols=["SPY", "QQQ"],
         )
         portfolio_saved = self.experiments.save_portfolio_run(
             run=portfolio_run,
             config={
                 "run_name": "portfolio-test",
-                "allocator_mode": "saved_runs",
+                "allocator_mode": "joint_model",
                 "fallback_mode": "SPY",
                 "transaction_cost_bps": 2.0,
-                "component_run_ids": ["run-123", "run-qqq"],
-                "universe_symbols": ["SPY", "QQQ"],
+                "selected_symbols": ["SPY", "QQQ"],
+                "topology_variants": ["per_asset", "pooled"],
+                "model_families": ["ridge", "hist_gradient_boosting_regressor"],
             },
             trades=pd.DataFrame(
                 {
+                    "variant_name": ["pooled"],
                     "signal_session_date": [pd.Timestamp("2025-02-03")],
                     "next_session_date": [pd.Timestamp("2025-02-04")],
                     "selected_asset": ["QQQ"],
@@ -267,6 +277,7 @@ class ExperimentStoreTests(unittest.TestCase):
             ),
             decision_history=pd.DataFrame(
                 {
+                    "variant_name": ["pooled"],
                     "signal_session_date": [pd.Timestamp("2025-02-03")],
                     "next_session_date": [pd.Timestamp("2025-02-04")],
                     "winning_asset": ["QQQ"],
@@ -282,6 +293,7 @@ class ExperimentStoreTests(unittest.TestCase):
             ),
             candidate_predictions=pd.DataFrame(
                 {
+                    "variant_name": ["pooled", "pooled"],
                     "signal_session_date": [pd.Timestamp("2025-02-03"), pd.Timestamp("2025-02-03")],
                     "next_session_date": [pd.Timestamp("2025-02-04"), pd.Timestamp("2025-02-04")],
                     "asset_symbol": ["SPY", "QQQ"],
@@ -304,31 +316,66 @@ class ExperimentStoreTests(unittest.TestCase):
             ),
             component_summary=pd.DataFrame(
                 {
-                    "asset_symbol": ["SPY", "QQQ"],
-                    "run_id": ["run-123", "run-qqq"],
-                    "run_name": ["unit-test-run", "unit-test-run"],
+                    "variant_name": ["pooled"],
+                    "window_id": [1],
+                    "model_family": ["ridge"],
+                    "account_weight": [1.0],
                 },
             ),
-            benchmarks=pd.DataFrame({"benchmark_name": ["strategy", "always_long_spy"]}),
+            benchmarks=pd.DataFrame({"variant_name": ["pooled", "pooled"], "benchmark_name": ["strategy", "always_long_spy"]}),
             benchmark_curves=pd.DataFrame(
                 {
                     "next_session_date": [pd.Timestamp("2025-02-04")],
                     "strategy": [1.01],
                     "always_long_spy": [1.005],
+                    "variant_name": ["pooled"],
                 },
             ),
-            diagnostics=pd.DataFrame({"winner_gap_vs_runner_up": [0.01]}),
+            diagnostics=pd.DataFrame({"variant_name": ["pooled"], "winner_gap_vs_runner_up": [0.01]}),
             leakage_audit={"overall_pass": True},
+            variant_summary=pd.DataFrame(
+                {
+                    "variant_name": ["per_asset", "pooled"],
+                    "validation_robust_score": [1.0, 1.2],
+                    "test_robust_score": [0.9, 1.1],
+                    "deployment_winner": [False, True],
+                },
+            ),
+            portfolio_model_bundle={
+                "deployment_variant": "pooled",
+                "selected_symbols": ["SPY", "QQQ"],
+                "variants": {
+                    "pooled": {
+                        "variant_name": "pooled",
+                        "topology": "pooled",
+                        "model_family": "ridge",
+                        "threshold": 0.001,
+                        "min_post_count": 1,
+                        "account_weight": 1.0,
+                        "selected_symbols": ["SPY", "QQQ"],
+                        "models": {
+                            "pooled": {
+                                "model_version": "portfolio-pooled",
+                                "feature_names": ["post_count"],
+                            },
+                        },
+                    },
+                },
+            },
         )
         self.assertTrue(portfolio_saved.candidate_predictions_path is not None and portfolio_saved.candidate_predictions_path.exists())
+        self.assertTrue(portfolio_saved.variant_summary_path is not None and portfolio_saved.variant_summary_path.exists())
+        self.assertTrue(portfolio_saved.portfolio_model_bundle_path is not None and portfolio_saved.portfolio_model_bundle_path.exists())
         loaded_portfolio = self.experiments.load_run("portfolio-1")
         self.assertIsNotNone(loaded_portfolio)
         assert loaded_portfolio is not None
         self.assertEqual(loaded_portfolio["run"]["run_type"], "portfolio_allocator")
-        self.assertEqual(loaded_portfolio["config"]["allocator_mode"], "saved_runs")
+        self.assertEqual(loaded_portfolio["config"]["allocator_mode"], "joint_model")
         self.assertFalse(loaded_portfolio["candidate_predictions"].empty)
         self.assertEqual(loaded_portfolio["benchmarks"]["benchmark_name"].tolist(), ["strategy", "always_long_spy"])
         self.assertEqual(loaded_portfolio["model_artifact"].metadata["run_type"], "portfolio_allocator")
+        self.assertFalse(loaded_portfolio["variant_summary"].empty)
+        self.assertEqual(loaded_portfolio["portfolio_model_bundle"]["deployment_variant"], "pooled")
         latest_after_portfolio = self.experiments.load_latest_model_artifact(target_asset="SPY")
         self.assertIsNotNone(latest_after_portfolio)
         assert latest_after_portfolio is not None
