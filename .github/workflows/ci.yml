@@ -43,7 +43,7 @@ jobs:
         run: bash scripts/ci.sh
 
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-xml
           path: coverage.xml
