@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from .config import DEFAULT_ETF_SYMBOLS, EASTERN
-from .enrichment import LLMEnrichmentService
+from .enrichment import LLMEnrichmentService, parse_semantic_asset_targets
 from .utils import business_minutes_until_close, ensure_tz_naive_date, truncate_text
 
 REGULAR_OPEN_MINUTE = 9 * 60 + 30
@@ -34,8 +34,15 @@ ASSET_POST_MAPPING_COLUMNS = [
     "sentiment_label",
     "semantic_topic",
     "semantic_policy_bucket",
+    "semantic_stance",
     "semantic_market_relevance",
     "semantic_urgency",
+    "semantic_primary_asset",
+    "semantic_asset_targets",
+    "semantic_confidence",
+    "semantic_summary",
+    "semantic_schema_version",
+    "semantic_provider",
     "is_active_tracked_account",
     "tracked_discovery_score",
     "tracked_account_status",
@@ -202,7 +209,10 @@ class FeatureService:
             text = str(post.get("cleaned_text", "") or "").lower()
             semantic_topic = str(post.get("semantic_topic", "") or "")
             semantic_policy = str(post.get("semantic_policy_bucket", "") or "")
+            semantic_stance = str(post.get("semantic_stance", "") or "")
             market_relevance = float(post.get("semantic_market_relevance", 0.0) or 0.0)
+            primary_asset = str(post.get("semantic_primary_asset", "") or "").upper()
+            target_assets = set(parse_semantic_asset_targets(post.get("semantic_asset_targets", "")))
             post_id = str(post.get("post_id", "") or f"row-{row_idx}")
             candidates: list[dict[str, Any]] = []
 
@@ -214,15 +224,22 @@ class FeatureService:
                 semantic_score = 0.0
                 semantic_reasons: list[str] = []
                 if llm_enabled:
+                    has_explicit_semantic_asset = symbol in target_assets or (primary_asset and symbol == primary_asset)
                     if symbol in SEMANTIC_TOPIC_ASSETS.get(semantic_topic, set()):
                         semantic_score += 0.2 + market_relevance * 0.2
                         semantic_reasons.append(f"topic:{semantic_topic}")
                     if symbol in SEMANTIC_POLICY_ASSETS.get(semantic_policy, set()):
                         semantic_score += 0.15 + market_relevance * 0.15
                         semantic_reasons.append(f"policy:{semantic_policy}")
+                    if symbol in target_assets:
+                        semantic_score += 0.2 + market_relevance * 0.15
+                        semantic_reasons.append(f"target:{symbol.lower()}")
+                    if primary_asset and symbol == primary_asset:
+                        semantic_score += 0.15
+                        semantic_reasons.append("primary_asset")
                     if str(asset.get("asset_type", "")) == "equity" and rule_score > 0.0:
                         semantic_score += market_relevance * 0.2
-                    if str(asset.get("asset_type", "")) == "equity" and rule_score <= 0.0:
+                    if str(asset.get("asset_type", "")) == "equity" and rule_score <= 0.0 and not has_explicit_semantic_asset:
                         semantic_score = 0.0
                         semantic_reasons = []
 
@@ -255,8 +272,15 @@ class FeatureService:
                         "sentiment_label": str(post["sentiment_label"]),
                         "semantic_topic": semantic_topic,
                         "semantic_policy_bucket": semantic_policy,
+                        "semantic_stance": semantic_stance,
                         "semantic_market_relevance": market_relevance,
                         "semantic_urgency": float(post.get("semantic_urgency", 0.0) or 0.0),
+                        "semantic_primary_asset": primary_asset,
+                        "semantic_asset_targets": ",".join(sorted(target_assets)),
+                        "semantic_confidence": float(post.get("semantic_confidence", 0.0) or 0.0),
+                        "semantic_summary": str(post.get("semantic_summary", "") or ""),
+                        "semantic_schema_version": str(post.get("semantic_schema_version", "") or ""),
+                        "semantic_provider": str(post.get("semantic_provider", "") or ""),
                         "is_active_tracked_account": bool(post.get("is_active_tracked_account", False)),
                         "tracked_discovery_score": float(post.get("tracked_discovery_score", 0.0) or 0.0),
                         "tracked_account_status": str(post.get("tracked_account_status", "none") or "none"),
@@ -264,12 +288,14 @@ class FeatureService:
                         "semantic_match_score": float(semantic_score),
                         "asset_relevance_score": float(asset_relevance_score),
                         "match_reasons": ", ".join(reasons),
+                        "narrative_primary_match": primary_asset == symbol,
                     },
                 )
 
             candidates = sorted(
                 candidates,
                 key=lambda item: (
+                    item["narrative_primary_match"],
                     item["asset_relevance_score"],
                     item["rule_match_score"],
                     item["semantic_match_score"],
