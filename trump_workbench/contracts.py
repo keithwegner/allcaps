@@ -217,8 +217,12 @@ class BacktestRun:
     run_type: str = "asset_model"
     allocator_mode: str = ""
     fallback_mode: str = ""
+    deployment_variant: str = ""
     component_run_ids: list[str] = field(default_factory=list)
     universe_symbols: list[str] = field(default_factory=list)
+    topology_variants: list[str] = field(default_factory=list)
+    model_families: list[str] = field(default_factory=list)
+    selected_symbols: list[str] = field(default_factory=list)
     artifact_paths: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -270,12 +274,31 @@ class PortfolioRunConfig:
     transaction_cost_bps: float = 2.0
     component_run_ids: tuple[str, ...] = ()
     universe_symbols: tuple[str, ...] = ()
+    selected_symbols: tuple[str, ...] = ()
+    llm_enabled: bool = False
+    feature_version: str = "asset-v1"
+    train_window: int = 90
+    validation_window: int = 30
+    test_window: int = 30
+    step_size: int = 30
+    threshold_grid: tuple[float, ...] = (0.0, 0.001, 0.0025, 0.005)
+    minimum_signal_grid: tuple[int, ...] = (1, 2, 3)
+    account_weight_grid: tuple[float, ...] = (0.5, 1.0, 1.5)
+    model_families: tuple[str, ...] = ()
+    topology_variants: tuple[str, ...] = ()
+    deployment_variant: str = ""
     notes: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["component_run_ids"] = list(self.component_run_ids)
         payload["universe_symbols"] = list(self.universe_symbols)
+        payload["selected_symbols"] = list(self.selected_symbols)
+        payload["threshold_grid"] = list(self.threshold_grid)
+        payload["minimum_signal_grid"] = list(self.minimum_signal_grid)
+        payload["account_weight_grid"] = list(self.account_weight_grid)
+        payload["model_families"] = list(self.model_families)
+        payload["topology_variants"] = list(self.topology_variants)
         return payload
 
 
@@ -297,7 +320,11 @@ class LiveMonitorPinnedRun:
 
 @dataclass(frozen=True)
 class LiveMonitorConfig:
+    mode: str = "portfolio_run"
     fallback_mode: str = "SPY"
+    portfolio_run_id: str = ""
+    portfolio_run_name: str = ""
+    deployment_variant: str = ""
     pinned_runs: list[LiveMonitorPinnedRun] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -312,8 +339,18 @@ class LiveMonitorConfig:
             for item in payload.get("pinned_runs", [])
             if isinstance(item, dict)
         ]
+        if "mode" in payload:
+            mode = str(payload.get("mode", "portfolio_run") or "portfolio_run")
+        elif pinned_runs:
+            mode = "asset_model_set"
+        else:
+            mode = "portfolio_run"
         return cls(
+            mode=mode,
             fallback_mode=str(payload.get("fallback_mode", "SPY") or "SPY").upper(),
+            portfolio_run_id=str(payload.get("portfolio_run_id", "") or ""),
+            portfolio_run_name=str(payload.get("portfolio_run_name", "") or ""),
+            deployment_variant=str(payload.get("deployment_variant", "") or ""),
             pinned_runs=pinned_runs,
         )
 
@@ -322,20 +359,36 @@ class LiveMonitorConfig:
 class LinearModelArtifact:
     model_version: str
     feature_names: list[str]
-    intercept: float
-    coefficients: list[float]
-    means: list[float]
-    stds: list[float]
-    residual_std: float
-    train_rows: int
-    metadata: dict[str, Any]
+    intercept: float = 0.0
+    coefficients: list[float] = field(default_factory=list)
+    means: list[float] = field(default_factory=list)
+    stds: list[float] = field(default_factory=list)
+    residual_std: float = 0.0
+    train_rows: int = 0
+    metadata: dict[str, Any] = field(default_factory=dict)
+    model_family: str = "custom_linear"
+    feature_importances: list[float] = field(default_factory=list)
+    serialized_estimator_b64: str = ""
+    explanation_kind: str = "linear_exact"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "LinearModelArtifact":
-        return cls(**payload)
+        normalized = dict(payload)
+        normalized.setdefault("intercept", 0.0)
+        normalized.setdefault("coefficients", [])
+        normalized.setdefault("means", [])
+        normalized.setdefault("stds", [])
+        normalized.setdefault("residual_std", 0.0)
+        normalized.setdefault("train_rows", 0)
+        normalized.setdefault("metadata", {})
+        normalized.setdefault("model_family", "custom_linear")
+        normalized.setdefault("feature_importances", [])
+        normalized.setdefault("serialized_estimator_b64", "")
+        normalized.setdefault("explanation_kind", "linear_exact")
+        return cls(**normalized)
 
 
 @dataclass(frozen=True)
@@ -354,3 +407,5 @@ class SavedRunArtifacts:
     benchmark_curves_path: Path
     leakage_audit_path: Path
     candidate_predictions_path: Optional[Path] = None
+    variant_summary_path: Optional[Path] = None
+    portfolio_model_bundle_path: Optional[Path] = None

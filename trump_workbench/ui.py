@@ -15,6 +15,7 @@ from .config import AppSettings, DEFAULT_ETF_SYMBOLS
 from .contracts import (
     LiveMonitorConfig,
     LiveMonitorPinnedRun,
+    LinearModelArtifact,
     MANUAL_OVERRIDE_COLUMNS,
     ModelRunConfig,
     PortfolioRunConfig,
@@ -27,7 +28,13 @@ from .experiments import ExperimentStore
 from .features import FeatureService, latest_feature_preview, map_posts_to_trade_sessions
 from .ingestion import IngestionService, TruthSocialArchiveAdapter, XCsvAdapter
 from .market import MarketDataService, build_asset_universe, build_watchlist_frame, normalize_symbols
-from .modeling import ModelService, classify_feature_family
+from .modeling import (
+    ASSET_INDICATOR_PREFIX,
+    ModelService,
+    SUPPORTED_PORTFOLIO_MODEL_FAMILIES,
+    add_asset_indicator_columns,
+    classify_feature_family,
+)
 from .live_monitor import (
     LIVE_ASSET_SNAPSHOT_COLUMNS,
     LIVE_DECISION_SNAPSHOT_COLUMNS,
@@ -206,6 +213,38 @@ def _build_live_monitor_state(
     config: LiveMonitorConfig,
     generated_at: pd.Timestamp | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, dict[str, Any]], list[str]]:
+    if str(config.mode or "portfolio_run") == "asset_model_set":
+        return _build_live_monitor_state_from_asset_model_set(
+            store=store,
+            feature_service=feature_service,
+            model_service=model_service,
+            experiment_store=experiment_store,
+            posts=posts,
+            spy_market=spy_market,
+            tracked_accounts=tracked_accounts,
+            config=config,
+            generated_at=generated_at,
+        )
+    return _build_live_monitor_state_from_portfolio_run(
+        store=store,
+        model_service=model_service,
+        experiment_store=experiment_store,
+        config=config,
+        generated_at=generated_at,
+    )
+
+
+def _build_live_monitor_state_from_asset_model_set(
+    store: DuckDBStore,
+    feature_service: FeatureService,
+    model_service: ModelService,
+    experiment_store: ExperimentStore,
+    posts: pd.DataFrame,
+    spy_market: pd.DataFrame,
+    tracked_accounts: pd.DataFrame,
+    config: LiveMonitorConfig,
+    generated_at: pd.Timestamp | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, dict[str, Any]], list[str]]:
     snapshot_rows: list[dict[str, Any]] = []
     explanation_lookup: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
@@ -283,6 +322,190 @@ def _build_live_monitor_state(
     ranked_board, decision = rank_live_asset_snapshots(snapshots, config.fallback_mode)
     for asset_symbol, payload in explanation_lookup.items():
         board_match = ranked_board.loc[ranked_board["asset_symbol"] == asset_symbol]
+        if board_match.empty:
+            continue
+        payload["board_row"] = board_match.iloc[0]
+    return ranked_board, decision, explanation_lookup, warnings
+
+
+def _apply_live_account_weight(feature_rows: pd.DataFrame, account_weight: float) -> pd.DataFrame:
+    adjusted = feature_rows.copy()
+    for column in ["tracked_weighted_mentions", "tracked_weighted_engagement", "tracked_account_post_count"]:
+        if column in adjusted.columns:
+            adjusted[column] = adjusted[column] * float(account_weight)
+    return adjusted
+
+
+def _portfolio_live_model_artifact(payload: dict[str, Any]) -> LinearModelArtifact:
+    return LinearModelArtifact.from_dict(payload)
+
+
+def _predict_portfolio_live_variant(
+    model_service: ModelService,
+    feature_rows: pd.DataFrame,
+    variant_payload: dict[str, Any],
+    selected_symbols: list[str],
+) -> tuple[pd.DataFrame, dict[str, dict[str, Any]]]:
+    topology = str(variant_payload.get("topology", "per_asset") or "per_asset")
+    models_payload = variant_payload.get("models", {}) or {}
+    predictions: list[pd.DataFrame] = []
+    explanations: dict[str, dict[str, Any]] = {}
+    if topology == "pooled":
+        pooled_model = models_payload.get("pooled")
+        if not isinstance(pooled_model, dict):
+            return pd.DataFrame(), {}
+        artifact = _portfolio_live_model_artifact(pooled_model)
+        pooled_rows = add_asset_indicator_columns(feature_rows, selected_symbols)
+        scored = model_service.predict(artifact, pooled_rows)
+        predictions.append(scored)
+        for asset_symbol in selected_symbols:
+            asset_rows = scored.loc[scored["asset_symbol"].astype(str).str.upper() == asset_symbol].copy()
+            if asset_rows.empty:
+                continue
+            explanations[asset_symbol] = {
+                "artifact": artifact,
+                "prediction_frame": asset_rows,
+                "feature_contributions": model_service.explain_predictions(artifact, asset_rows),
+            }
+    else:
+        for asset_symbol in selected_symbols:
+            model_payload = models_payload.get(asset_symbol)
+            if not isinstance(model_payload, dict):
+                continue
+            artifact = _portfolio_live_model_artifact(model_payload)
+            asset_rows = feature_rows.loc[feature_rows["asset_symbol"].astype(str).str.upper() == asset_symbol].copy()
+            if asset_rows.empty:
+                continue
+            scored = model_service.predict(artifact, asset_rows)
+            predictions.append(scored)
+            explanations[asset_symbol] = {
+                "artifact": artifact,
+                "prediction_frame": scored,
+                "feature_contributions": model_service.explain_predictions(artifact, scored),
+            }
+    if not predictions:
+        return pd.DataFrame(), {}
+    combined = pd.concat(predictions, ignore_index=True).sort_values(["signal_session_date", "asset_symbol"]).reset_index(drop=True)
+    return combined, explanations
+
+
+def _build_live_monitor_state_from_portfolio_run(
+    store: DuckDBStore,
+    model_service: ModelService,
+    experiment_store: ExperimentStore,
+    config: LiveMonitorConfig,
+    generated_at: pd.Timestamp | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, dict[str, Any]], list[str]]:
+    warnings: list[str] = []
+    explanation_lookup: dict[str, dict[str, Any]] = {}
+    snapshot_time = pd.Timestamp.utcnow().floor("s") if generated_at is None else pd.Timestamp(generated_at)
+    run_id = str(config.portfolio_run_id or "")
+    if not run_id:
+        return pd.DataFrame(columns=LIVE_ASSET_SNAPSHOT_COLUMNS), pd.DataFrame(columns=LIVE_DECISION_SNAPSHOT_COLUMNS), explanation_lookup, ["Select and save a joint portfolio run first."]
+
+    run_bundle = experiment_store.load_run(run_id)
+    if run_bundle is None:
+        return pd.DataFrame(columns=LIVE_ASSET_SNAPSHOT_COLUMNS), pd.DataFrame(columns=LIVE_DECISION_SNAPSHOT_COLUMNS), explanation_lookup, [f"Saved portfolio run `{run_id}` could not be loaded."]
+
+    portfolio_bundle = run_bundle.get("portfolio_model_bundle", {}) or {}
+    deployment_variant = str(config.deployment_variant or portfolio_bundle.get("deployment_variant") or "")
+    variant_payload = (portfolio_bundle.get("variants", {}) or {}).get(deployment_variant, {})
+    if not variant_payload:
+        return pd.DataFrame(columns=LIVE_ASSET_SNAPSHOT_COLUMNS), pd.DataFrame(columns=LIVE_DECISION_SNAPSHOT_COLUMNS), explanation_lookup, [f"Deployment variant `{deployment_variant}` is not available in the pinned portfolio run."]
+
+    selected_symbols = [str(symbol).upper() for symbol in (variant_payload.get("selected_symbols") or portfolio_bundle.get("selected_symbols") or [])]
+    asset_session_features = store.read_frame("asset_session_features")
+    asset_post_mappings = store.read_frame("asset_post_mappings")
+    if asset_session_features.empty:
+        return pd.DataFrame(columns=LIVE_ASSET_SNAPSHOT_COLUMNS), pd.DataFrame(columns=LIVE_DECISION_SNAPSHOT_COLUMNS), explanation_lookup, ["Refresh datasets first so `asset_session_features` is available."]
+    live_rows = asset_session_features.copy()
+    live_rows["asset_symbol"] = live_rows["asset_symbol"].astype(str).str.upper()
+    if selected_symbols:
+        live_rows = live_rows.loc[live_rows["asset_symbol"].isin(selected_symbols)].copy()
+    feature_version = str(variant_payload.get("feature_version") or portfolio_bundle.get("feature_version") or "")
+    if feature_version and "feature_version" in live_rows.columns:
+        matching = live_rows.loc[live_rows["feature_version"].astype(str) == feature_version].copy()
+        if not matching.empty:
+            live_rows = matching
+    llm_enabled = bool(variant_payload.get("llm_enabled", portfolio_bundle.get("llm_enabled", False)))
+    if "llm_enabled" in live_rows.columns:
+        matching = live_rows.loc[live_rows["llm_enabled"].fillna(False).astype(bool) == llm_enabled].copy()
+        if not matching.empty:
+            live_rows = matching
+    if live_rows.empty:
+        return pd.DataFrame(columns=LIVE_ASSET_SNAPSHOT_COLUMNS), pd.DataFrame(columns=LIVE_DECISION_SNAPSHOT_COLUMNS), explanation_lookup, ["No live asset-session rows matched the pinned portfolio run."]
+
+    latest_rows = (
+        live_rows.sort_values(["asset_symbol", "signal_session_date"])
+        .groupby("asset_symbol", as_index=False, sort=False)
+        .tail(1)
+        .reset_index(drop=True)
+    )
+    weighted_rows = _apply_live_account_weight(latest_rows, float(variant_payload.get("account_weight", 1.0) or 1.0))
+    scored_rows, explanation_models = _predict_portfolio_live_variant(
+        model_service=model_service,
+        feature_rows=weighted_rows,
+        variant_payload=variant_payload,
+        selected_symbols=selected_symbols,
+    )
+    if scored_rows.empty:
+        return pd.DataFrame(columns=LIVE_ASSET_SNAPSHOT_COLUMNS), pd.DataFrame(columns=LIVE_DECISION_SNAPSHOT_COLUMNS), explanation_lookup, ["The pinned portfolio models could not score any live rows."]
+
+    threshold = float(variant_payload.get("threshold", 0.0) or 0.0)
+    min_post_count = int(variant_payload.get("min_post_count", 1) or 1)
+    run_name = str(config.portfolio_run_name or run_bundle.get("run", {}).get("run_name", run_id) or run_id)
+    snapshot_rows: list[dict[str, Any]] = []
+    for _, row in scored_rows.sort_values("signal_session_date").iterrows():
+        asset_symbol = str(row.get("asset_symbol", "") or "").upper()
+        snapshot_rows.append(
+            {
+                "generated_at": snapshot_time,
+                "variant_name": deployment_variant,
+                "signal_session_date": row.get("signal_session_date"),
+                "next_session_date": row.get("next_session_date"),
+                "asset_symbol": asset_symbol,
+                "run_id": run_id,
+                "run_name": run_name,
+                "feature_version": str(row.get("feature_version", feature_version) or feature_version),
+                "model_version": str(row.get("model_version", "") or ""),
+                "expected_return_score": float(row.get("expected_return_score", 0.0) or 0.0),
+                "confidence": float(row.get("prediction_confidence", 0.0) or 0.0),
+                "threshold": threshold,
+                "min_post_count": min_post_count,
+                "post_count": int(row.get("post_count", 0) or 0),
+                "target_available": bool(row.get("target_available", False)),
+                "tradeable": bool(row.get("tradeable", row.get("target_available", False))),
+                "next_session_open": row.get("next_session_open"),
+                "next_session_close": row.get("next_session_close"),
+            },
+        )
+        session_date = _normalize_session_date(row.get("signal_session_date"))
+        if asset_post_mappings.empty or session_date is None:
+            post_attribution = pd.DataFrame()
+        else:
+            post_rows = asset_post_mappings.copy()
+            post_rows["asset_symbol"] = post_rows["asset_symbol"].astype(str).str.upper()
+            session_mask = pd.to_datetime(post_rows["session_date"], errors="coerce").dt.normalize() == session_date
+            post_rows = post_rows.loc[(post_rows["asset_symbol"] == asset_symbol) & session_mask].copy()
+            post_attribution = build_post_attribution(post_rows)
+        account_attribution = build_account_attribution(post_attribution)
+        explanation_payload = explanation_models.get(asset_symbol, {})
+        explanation_lookup[asset_symbol] = {
+            "prediction_row": row,
+            "feature_contributions": explanation_payload.get("feature_contributions", pd.DataFrame()),
+            "post_attribution": post_attribution,
+            "account_attribution": account_attribution,
+            "variant_name": deployment_variant,
+        }
+
+    snapshots = pd.DataFrame(snapshot_rows)
+    if snapshots.empty:
+        return pd.DataFrame(columns=LIVE_ASSET_SNAPSHOT_COLUMNS), pd.DataFrame(columns=LIVE_DECISION_SNAPSHOT_COLUMNS), explanation_lookup, ["No live portfolio snapshots were produced."]
+
+    ranked_board, decision = rank_live_asset_snapshots(snapshots, config.fallback_mode)
+    decision["deployment_variant"] = deployment_variant
+    for asset_symbol, payload in explanation_lookup.items():
+        board_match = ranked_board.loc[ranked_board["asset_symbol"].astype(str) == asset_symbol]
         if board_match.empty:
             continue
         payload["board_row"] = board_match.iloc[0]
@@ -1784,10 +2007,46 @@ def _comparison_settings(run_bundle: dict[str, Any]) -> dict[str, Any]:
         ).upper(),
         "component_run_ids": tuple(selected.get("component_run_ids", config.get("component_run_ids", run_meta.get("component_run_ids", [])))),
         "universe_symbols": tuple(selected.get("universe_symbols", config.get("universe_symbols", run_meta.get("universe_symbols", [])))),
+        "selected_symbols": tuple(
+            selected.get(
+                "selected_symbols",
+                config.get("selected_symbols", run_meta.get("selected_symbols", [])),
+            ),
+        ),
+        "deployment_variant": str(
+            selected.get("deployment_variant")
+            or config.get("deployment_variant")
+            or run_meta.get("deployment_variant")
+            or "",
+        ),
+        "topology_variants": tuple(config.get("topology_variants", run_meta.get("topology_variants", []))),
+        "model_families": tuple(config.get("model_families", run_meta.get("model_families", []))),
         "deploy_threshold": selected.get("threshold"),
         "deploy_min_post_count": selected.get("min_post_count"),
         "deploy_account_weight": selected.get("account_weight"),
     }
+
+
+def _bundle_feature_names(run_bundle: dict[str, Any], variant_name: str | None = None) -> list[str]:
+    run_type = _comparison_settings(run_bundle).get("run_type", "asset_model")
+    if run_type == "asset_model":
+        return list(run_bundle.get("model_artifact").feature_names)
+
+    portfolio_bundle = run_bundle.get("portfolio_model_bundle", {}) or {}
+    deployment_variant = str(
+        variant_name
+        or portfolio_bundle.get("deployment_variant")
+        or _comparison_settings(run_bundle).get("deployment_variant")
+        or "",
+    )
+    variant_payload = (portfolio_bundle.get("variants", {}) or {}).get(deployment_variant, {})
+    models_payload = variant_payload.get("models", {}) or {}
+    feature_names: set[str] = set()
+    for artifact_payload in models_payload.values():
+        if not isinstance(artifact_payload, dict):
+            continue
+        feature_names.update(str(name) for name in artifact_payload.get("feature_names", []) if name)
+    return sorted(feature_names)
 
 
 def _build_metric_comparison_table(base_run_id: str, run_bundles: dict[str, dict[str, Any]]) -> pd.DataFrame:
@@ -1797,7 +2056,7 @@ def _build_metric_comparison_table(base_run_id: str, run_bundles: dict[str, dict
     rows: list[dict[str, Any]] = []
     for run_id, bundle in run_bundles.items():
         metrics = bundle.get("metrics", {}) or {}
-        artifact = bundle.get("model_artifact")
+        feature_names = _bundle_feature_names(bundle)
         rows.append(
             {
                 "run_id": run_id,
@@ -1805,13 +2064,14 @@ def _build_metric_comparison_table(base_run_id: str, run_bundles: dict[str, dict
                 "run_type": _comparison_settings(bundle).get("run_type", "asset_model"),
                 "allocator_mode": _comparison_settings(bundle).get("allocator_mode", ""),
                 "target_asset": _comparison_settings(bundle).get("target_asset", "SPY"),
+                "deployment_variant": _comparison_settings(bundle).get("deployment_variant", ""),
                 "total_return": metrics.get("total_return", 0.0),
                 "sharpe": metrics.get("sharpe", 0.0),
                 "sortino": metrics.get("sortino", 0.0),
                 "max_drawdown": metrics.get("max_drawdown", 0.0),
                 "robust_score": metrics.get("robust_score", 0.0),
                 "trade_count": metrics.get("trade_count", 0.0),
-                "feature_count": len(getattr(artifact, "feature_names", [])),
+                "feature_count": len(feature_names),
                 "delta_total_return_vs_base": metrics.get("total_return", 0.0) - base_metrics.get("total_return", 0.0),
                 "delta_sharpe_vs_base": metrics.get("sharpe", 0.0) - base_metrics.get("sharpe", 0.0),
                 "delta_robust_score_vs_base": metrics.get("robust_score", 0.0) - base_metrics.get("robust_score", 0.0),
@@ -1843,10 +2103,10 @@ def _build_setting_diff_table(base_run_id: str, run_bundles: dict[str, dict[str,
 def _build_feature_diff_table(base_run_id: str, run_bundles: dict[str, dict[str, Any]]) -> pd.DataFrame:
     if base_run_id not in run_bundles:
         return pd.DataFrame()
-    base_features = set(run_bundles[base_run_id]["model_artifact"].feature_names)
+    base_features = set(_bundle_feature_names(run_bundles[base_run_id]))
     rows: list[dict[str, Any]] = []
     for run_id, bundle in run_bundles.items():
-        feature_names = list(bundle["model_artifact"].feature_names)
+        feature_names = _bundle_feature_names(bundle)
         families = Counter(classify_feature_family(feature_name) for feature_name in feature_names)
         features = set(feature_names)
         unique_vs_base = sorted(features - base_features)
@@ -1856,6 +2116,7 @@ def _build_feature_diff_table(base_run_id: str, run_bundles: dict[str, dict[str,
                 "run_id": run_id,
                 "run_name": bundle.get("run", {}).get("run_name", run_id),
                 "target_asset": _comparison_settings(bundle).get("target_asset", "SPY"),
+                "deployment_variant": _comparison_settings(bundle).get("deployment_variant", ""),
                 "feature_count": len(feature_names),
                 "semantic_features": families.get("semantic", 0),
                 "policy_features": families.get("policy", 0),
@@ -1912,14 +2173,14 @@ def _summarize_run_changes(base_run_id: str, run_bundles: dict[str, dict[str, An
         return []
     base_metrics = run_bundles[base_run_id].get("metrics", {}) or {}
     base_settings = _comparison_settings(run_bundles[base_run_id])
-    base_features = set(run_bundles[base_run_id]["model_artifact"].feature_names)
+    base_features = set(_bundle_feature_names(run_bundles[base_run_id]))
     notes: list[str] = []
     for run_id, bundle in run_bundles.items():
         if run_id == base_run_id:
             continue
         metrics = bundle.get("metrics", {}) or {}
         settings = _comparison_settings(bundle)
-        features = set(bundle["model_artifact"].feature_names)
+        features = set(_bundle_feature_names(bundle))
         parts: list[str] = [
             f"robust score {metrics.get('robust_score', 0.0) - base_metrics.get('robust_score', 0.0):+.3f}",
             f"total return {metrics.get('total_return', 0.0) - base_metrics.get('total_return', 0.0):+.2%}",
@@ -1940,6 +2201,8 @@ def _summarize_run_changes(base_run_id: str, run_bundles: dict[str, dict[str, An
             parts.append(f"min posts {base_settings.get('deploy_min_post_count')} -> {settings.get('deploy_min_post_count')}")
         if settings.get("deploy_account_weight") != base_settings.get("deploy_account_weight"):
             parts.append(f"account weight {base_settings.get('deploy_account_weight')} -> {settings.get('deploy_account_weight')}")
+        if settings.get("deployment_variant") != base_settings.get("deployment_variant"):
+            parts.append(f"deployment variant {base_settings.get('deployment_variant') or 'n/a'} -> {settings.get('deployment_variant') or 'n/a'}")
         unique_vs_base = sorted(features - base_features)
         omitted_vs_base = sorted(base_features - features)
         if unique_vs_base:
@@ -2141,91 +2404,218 @@ def render_models_view(
     runs = _normalize_runs_frame(experiment_store.list_runs())
     asset_model_runs = runs.loc[runs["run_type"].astype(str) == "asset_model"].copy() if not runs.empty else pd.DataFrame()
     st.markdown("**Portfolio Allocator**")
-    st.caption(
-        "Build a one-asset-per-session historical allocator from saved SPY and non-SPY runs. "
-        "It reuses each component run's own deployment thresholds and post-count rules.",
+    portfolio_mode = st.radio(
+        "Portfolio workflow",
+        options=["Saved Runs", "Joint Portfolio Model"],
+        horizontal=True,
+        key="portfolio-workflow-mode",
     )
-    if asset_model_runs.empty or asset_model_runs.loc[asset_model_runs["target_asset"] == "SPY"].empty:
-        st.info("Save at least one SPY asset-model run before building a portfolio allocator.")
-    else:
-        portfolio_cols = st.columns(3)
-        portfolio_run_name = portfolio_cols[0].text_input("Portfolio run name", value="portfolio-allocator-run")
-        fallback_mode = portfolio_cols[1].selectbox("Fallback mode", options=["SPY", "FLAT"], index=0)
-        allocator_transaction_cost = portfolio_cols[2].number_input(
-            "Allocator round-trip cost (bps per side)",
-            min_value=0.0,
-            max_value=25.0,
-            value=2.0,
-            step=0.5,
+    if portfolio_mode == "Saved Runs":
+        st.caption(
+            "Build a one-asset-per-session historical allocator from saved SPY and non-SPY runs. "
+            "It reuses each component run's own deployment thresholds and post-count rules.",
         )
-        spy_run_rows = asset_model_runs.loc[asset_model_runs["target_asset"] == "SPY"].copy()
-        selected_spy_run_id = st.selectbox(
-            "Pinned SPY run",
-            options=spy_run_rows["run_id"].tolist(),
-            format_func=lambda run_id: _live_run_option_label(
-                spy_run_rows.loc[spy_run_rows["run_id"] == run_id].iloc[0],
-            ),
-            key="portfolio-spy-run",
-        )
-        non_spy_assets = sorted(
-            asset_model_runs.loc[asset_model_runs["target_asset"] != "SPY", "target_asset"].astype(str).unique().tolist(),
-        )
-        selected_assets = st.multiselect(
-            "Additional assets",
-            options=non_spy_assets,
-            default=non_spy_assets[:2],
-            format_func=lambda symbol: _target_asset_label(store, symbol),
-            key="portfolio-assets",
-        )
-        selected_component_ids = [selected_spy_run_id]
-        for asset_symbol in selected_assets:
-            asset_rows = asset_model_runs.loc[asset_model_runs["target_asset"] == asset_symbol].copy()
-            selected_run_id = st.selectbox(
-                f"{asset_symbol} component run",
-                options=asset_rows["run_id"].tolist(),
-                format_func=lambda run_id, asset_rows=asset_rows: _live_run_option_label(
-                    asset_rows.loc[asset_rows["run_id"] == run_id].iloc[0],
-                ),
-                key=f"portfolio-component-{asset_symbol}",
+        if asset_model_runs.empty or asset_model_runs.loc[asset_model_runs["target_asset"] == "SPY"].empty:
+            st.info("Save at least one SPY asset-model run before building a portfolio allocator.")
+        else:
+            portfolio_cols = st.columns(3)
+            portfolio_run_name = portfolio_cols[0].text_input("Portfolio run name", value="portfolio-allocator-run")
+            fallback_mode = portfolio_cols[1].selectbox("Fallback mode", options=["SPY", "FLAT"], index=0)
+            allocator_transaction_cost = portfolio_cols[2].number_input(
+                "Allocator round-trip cost (bps per side)",
+                min_value=0.0,
+                max_value=25.0,
+                value=2.0,
+                step=0.5,
             )
-            selected_component_ids.append(selected_run_id)
-
-        if st.button("Build saved-run portfolio allocator", use_container_width=True):
-            with st.spinner("Aligning component runs and backtesting the shared portfolio allocator..."):
-                component_bundles = {
-                    run_id: bundle
-                    for run_id in selected_component_ids
-                    if (bundle := experiment_store.load_run(run_id)) is not None
-                }
-                portfolio_config = PortfolioRunConfig(
-                    run_name=portfolio_run_name,
-                    allocator_mode="saved_runs",
-                    fallback_mode=str(fallback_mode).upper(),
-                    transaction_cost_bps=float(allocator_transaction_cost),
-                    component_run_ids=tuple(selected_component_ids),
-                    universe_symbols=tuple(["SPY", *selected_assets]),
+            spy_run_rows = asset_model_runs.loc[asset_model_runs["target_asset"] == "SPY"].copy()
+            selected_spy_run_id = st.selectbox(
+                "Pinned SPY run",
+                options=spy_run_rows["run_id"].tolist(),
+                format_func=lambda run_id: _live_run_option_label(
+                    spy_run_rows.loc[spy_run_rows["run_id"] == run_id].iloc[0],
+                ),
+                key="portfolio-spy-run",
+            )
+            non_spy_assets = sorted(
+                asset_model_runs.loc[asset_model_runs["target_asset"] != "SPY", "target_asset"].astype(str).unique().tolist(),
+            )
+            selected_assets = st.multiselect(
+                "Additional assets",
+                options=non_spy_assets,
+                default=non_spy_assets[:2],
+                format_func=lambda symbol: _target_asset_label(store, symbol),
+                key="portfolio-assets",
+            )
+            selected_component_ids = [selected_spy_run_id]
+            for asset_symbol in selected_assets:
+                asset_rows = asset_model_runs.loc[asset_model_runs["target_asset"] == asset_symbol].copy()
+                selected_run_id = st.selectbox(
+                    f"{asset_symbol} component run",
+                    options=asset_rows["run_id"].tolist(),
+                    format_func=lambda run_id, asset_rows=asset_rows: _live_run_option_label(
+                        asset_rows.loc[asset_rows["run_id"] == run_id].iloc[0],
+                    ),
+                    key=f"portfolio-component-{asset_symbol}",
                 )
-                try:
-                    portfolio_run, portfolio_artifacts = backtest_service.run_saved_run_allocator(
-                        portfolio_config,
-                        component_bundles,
+                selected_component_ids.append(selected_run_id)
+
+            if st.button("Build saved-run portfolio allocator", use_container_width=True):
+                with st.spinner("Aligning component runs and backtesting the shared portfolio allocator..."):
+                    component_bundles = {
+                        run_id: bundle
+                        for run_id in selected_component_ids
+                        if (bundle := experiment_store.load_run(run_id)) is not None
+                    }
+                    portfolio_config = PortfolioRunConfig(
+                        run_name=portfolio_run_name,
+                        allocator_mode="saved_runs",
+                        fallback_mode=str(fallback_mode).upper(),
+                        transaction_cost_bps=float(allocator_transaction_cost),
+                        component_run_ids=tuple(selected_component_ids),
+                        universe_symbols=tuple(["SPY", *selected_assets]),
                     )
-                    experiment_store.save_portfolio_run(
-                        run=portfolio_run,
-                        config=portfolio_artifacts["config"],
-                        trades=portfolio_artifacts["trades"],
-                        decision_history=portfolio_artifacts["predictions"],
-                        candidate_predictions=portfolio_artifacts["candidate_predictions"],
-                        component_summary=portfolio_artifacts["windows"],
-                        benchmarks=portfolio_artifacts["benchmarks"],
-                        benchmark_curves=portfolio_artifacts["benchmark_curves"],
-                        diagnostics=portfolio_artifacts["diagnostics"],
-                        leakage_audit=portfolio_artifacts["leakage_audit"],
-                    )
-                except RuntimeError as exc:
-                    st.error(str(exc))
+                    try:
+                        portfolio_run, portfolio_artifacts = backtest_service.run_saved_run_allocator(
+                            portfolio_config,
+                            component_bundles,
+                        )
+                        experiment_store.save_portfolio_run(
+                            run=portfolio_run,
+                            config=portfolio_artifacts["config"],
+                            trades=portfolio_artifacts["trades"],
+                            decision_history=portfolio_artifacts["predictions"],
+                            candidate_predictions=portfolio_artifacts["candidate_predictions"],
+                            component_summary=portfolio_artifacts["windows"],
+                            benchmarks=portfolio_artifacts["benchmarks"],
+                            benchmark_curves=portfolio_artifacts["benchmark_curves"],
+                            diagnostics=portfolio_artifacts["diagnostics"],
+                            leakage_audit=portfolio_artifacts["leakage_audit"],
+                        )
+                    except RuntimeError as exc:
+                        st.error(str(exc))
+                        return
+                st.success(f"Saved portfolio allocator run `{portfolio_run.run_id}`.")
+    else:
+        st.caption(
+            "Train a portfolio-owned model suite across a selected asset subset, compare `per_asset` and `pooled` variants, "
+            "pick one deployment winner, and save the portfolio run for live use.",
+        )
+        asset_session_features = store.read_frame("asset_session_features")
+        if asset_session_features.empty:
+            st.info("Refresh datasets first so the asset-session feature dataset is available.")
+        else:
+            available_symbols = sorted(asset_session_features["asset_symbol"].dropna().astype(str).str.upper().unique().tolist())
+            if "SPY" in available_symbols:
+                available_symbols = ["SPY", *[symbol for symbol in available_symbols if symbol != "SPY"]]
+            default_symbols = [symbol for symbol in ["SPY", "QQQ", "NVDA"] if symbol in available_symbols]
+            if len(default_symbols) < 2:
+                default_symbols = available_symbols[: min(len(available_symbols), 3)]
+            joint_cols = st.columns(3)
+            joint_run_name = joint_cols[0].text_input("Joint portfolio run name", value="joint-portfolio-run")
+            joint_fallback_mode = joint_cols[1].selectbox("Fallback mode", options=["SPY", "FLAT"], index=0, key="joint-portfolio-fallback")
+            joint_transaction_cost = joint_cols[2].number_input(
+                "Round-trip cost (bps per side)",
+                min_value=0.0,
+                max_value=25.0,
+                value=2.0,
+                step=0.5,
+                key="joint-portfolio-cost",
+            )
+            selected_symbols = st.multiselect(
+                "Selected symbols",
+                options=available_symbols,
+                default=default_symbols,
+                format_func=lambda symbol: _target_asset_label(store, symbol),
+                key="joint-portfolio-symbols",
+            )
+            feature_versions = sorted(asset_session_features.get("feature_version", pd.Series(["asset-v1"])).dropna().astype(str).unique().tolist()) or ["asset-v1"]
+            joint_feature_version = st.selectbox("Feature version", options=feature_versions, index=0)
+            joint_llm_enabled = st.checkbox("Use semantic enrichment rows", value="llm" in joint_feature_version.lower())
+            window_cols = st.columns(4)
+            joint_train_window = int(window_cols[0].number_input("Train window", min_value=20, max_value=252, value=90, step=5))
+            joint_validation_window = int(window_cols[1].number_input("Validation window", min_value=10, max_value=126, value=30, step=5))
+            joint_test_window = int(window_cols[2].number_input("Test window", min_value=10, max_value=126, value=30, step=5))
+            joint_step_size = int(window_cols[3].number_input("Step size", min_value=5, max_value=126, value=30, step=5))
+            grid_cols = st.columns(3)
+            joint_threshold_grid = grid_cols[0].text_input("Threshold grid", value="0.0, 0.001, 0.0025, 0.005")
+            joint_minimum_grid = grid_cols[1].text_input("Min post grid", value="1, 2, 3")
+            joint_account_weight_grid = grid_cols[2].text_input("Tracked-account weight grid", value="0.5, 1.0, 1.5")
+            topology_variants = st.multiselect(
+                "Topology variants",
+                options=["per_asset", "pooled"],
+                default=["per_asset", "pooled"],
+            )
+            model_families = st.multiselect(
+                "Model families",
+                options=list(SUPPORTED_PORTFOLIO_MODEL_FAMILIES),
+                default=["ridge", "elastic_net", "hist_gradient_boosting_regressor"],
+            )
+
+            if st.button("Build joint portfolio model", use_container_width=True):
+                if "SPY" not in selected_symbols and str(joint_fallback_mode).upper() == "SPY":
+                    st.error("Include `SPY` in the selected symbols when fallback mode is `SPY`.")
                     return
-            st.success(f"Saved portfolio allocator run `{portfolio_run.run_id}`.")
+                if len(selected_symbols) < 2:
+                    st.error("Select at least two symbols for a joint portfolio run.")
+                    return
+                if not topology_variants:
+                    st.error("Select at least one topology variant.")
+                    return
+                if not model_families:
+                    st.error("Select at least one model family.")
+                    return
+                try:
+                    portfolio_config = PortfolioRunConfig(
+                        run_name=joint_run_name,
+                        allocator_mode="joint_model",
+                        fallback_mode=str(joint_fallback_mode).upper(),
+                        transaction_cost_bps=float(joint_transaction_cost),
+                        universe_symbols=tuple(selected_symbols),
+                        selected_symbols=tuple(selected_symbols),
+                        llm_enabled=bool(joint_llm_enabled),
+                        feature_version=str(joint_feature_version),
+                        train_window=joint_train_window,
+                        validation_window=joint_validation_window,
+                        test_window=joint_test_window,
+                        step_size=joint_step_size,
+                        threshold_grid=tuple(float(value) for value in _parse_grid(joint_threshold_grid, float)),
+                        minimum_signal_grid=tuple(int(value) for value in _parse_grid(joint_minimum_grid, int)),
+                        account_weight_grid=tuple(float(value) for value in _parse_grid(joint_account_weight_grid, float)),
+                        model_families=tuple(str(value) for value in model_families),
+                        topology_variants=tuple(str(value) for value in topology_variants),
+                    )
+                except ValueError as exc:
+                    st.error(f"Invalid grid input: {exc}")
+                    return
+
+                with st.spinner("Training joint portfolio model variants and selecting a deployment winner..."):
+                    try:
+                        portfolio_run, portfolio_artifacts = backtest_service.run_joint_model_allocator(
+                            portfolio_config,
+                            asset_session_features,
+                        )
+                        experiment_store.save_portfolio_run(
+                            run=portfolio_run,
+                            config=portfolio_artifacts["config"],
+                            trades=portfolio_artifacts["trades"],
+                            decision_history=portfolio_artifacts["predictions"],
+                            candidate_predictions=portfolio_artifacts["candidate_predictions"],
+                            component_summary=portfolio_artifacts["windows"],
+                            benchmarks=portfolio_artifacts["benchmarks"],
+                            benchmark_curves=portfolio_artifacts["benchmark_curves"],
+                            diagnostics=portfolio_artifacts["diagnostics"],
+                            leakage_audit=portfolio_artifacts["leakage_audit"],
+                            variant_summary=portfolio_artifacts["variant_summary"],
+                            portfolio_model_bundle=portfolio_artifacts["portfolio_model_bundle"],
+                        )
+                    except RuntimeError as exc:
+                        st.error(str(exc))
+                        return
+                st.success(
+                    f"Saved joint portfolio run `{portfolio_run.run_id}` with deployment variant "
+                    f"`{portfolio_run.deployment_variant}`.",
+                )
 
     if runs.empty:
         st.info("No experiment runs have been saved yet.")
@@ -2297,7 +2687,13 @@ def render_models_view(
                 account_attribution = pd.DataFrame()
 
     _metric_row(loaded["metrics"])
-    _render_equity_curve(loaded["trades"], title="Walk-forward out-of-sample equity curve")
+    trade_view = loaded["trades"].copy()
+    active_variant = str(selected_settings.get("deployment_variant", "") or "")
+    if "variant_name" in trade_view.columns and active_variant:
+        filtered = trade_view.loc[trade_view["variant_name"].astype(str) == active_variant].copy()
+        if not filtered.empty:
+            trade_view = filtered
+    _render_equity_curve(trade_view, title="Walk-forward out-of-sample equity curve")
 
     compare_ids = st.multiselect(
         "Compare runs",
@@ -2312,7 +2708,14 @@ def render_models_view(
             if run_bundle is None:
                 continue
             compare_bundles[run_id] = run_bundle
-            curves[run_id] = run_bundle["trades"][["next_session_date", "equity_curve"]].copy()
+            curve_frame = run_bundle["trades"].copy()
+            compare_settings = _comparison_settings(run_bundle)
+            compare_variant = str(compare_settings.get("deployment_variant", "") or "")
+            if "variant_name" in curve_frame.columns and compare_variant:
+                filtered = curve_frame.loc[curve_frame["variant_name"].astype(str) == compare_variant].copy()
+                if not filtered.empty:
+                    curve_frame = filtered
+            curves[run_id] = curve_frame[["next_session_date", "equity_curve"]].copy()
         if compare_bundles:
             base_run_id = st.selectbox(
                 "Base run for diffs",
@@ -2350,10 +2753,24 @@ def render_models_view(
 
     if not loaded["benchmarks"].empty:
         st.markdown("**Benchmark suite**")
-        st.dataframe(loaded["benchmarks"], use_container_width=True, hide_index=True)
+        benchmark_view = loaded["benchmarks"].copy()
+        if "variant_name" in benchmark_view.columns:
+            active_variant = str(selected_settings.get("deployment_variant", "") or "")
+            if active_variant:
+                filtered = benchmark_view.loc[benchmark_view["variant_name"].astype(str) == active_variant].copy()
+                if not filtered.empty:
+                    benchmark_view = filtered
+        st.dataframe(benchmark_view, use_container_width=True, hide_index=True)
     if not loaded["benchmark_curves"].empty:
-        curve_fig = go.Figure()
         curves = loaded["benchmark_curves"].copy()
+        if "variant_name" in curves.columns:
+            active_variant = str(selected_settings.get("deployment_variant", "") or "")
+            if active_variant:
+                filtered = curves.loc[curves["variant_name"].astype(str) == active_variant].copy()
+                if not filtered.empty:
+                    curves = filtered
+            curves = curves.drop(columns=["variant_name"], errors="ignore")
+        curve_fig = go.Figure()
         for column in curves.columns:
             if column == "next_session_date":
                 continue
@@ -2362,11 +2779,39 @@ def render_models_view(
         st.plotly_chart(curve_fig, use_container_width=True)
 
     if selected_run_type == "portfolio_allocator":
+        selected_variant = str(selected_settings.get("deployment_variant", "") or "")
+        variant_summary = loaded.get("variant_summary", pd.DataFrame()).copy()
+        if not variant_summary.empty:
+            st.markdown("**Variant comparison**")
+            st.dataframe(variant_summary, use_container_width=True, hide_index=True)
+            variant_options = variant_summary["variant_name"].astype(str).tolist()
+            if variant_options:
+                selected_variant = st.selectbox(
+                    "Inspect topology variant",
+                    options=variant_options,
+                    index=variant_options.index(selected_variant) if selected_variant in variant_options else 0,
+                    key=f"portfolio-variant-{selected_run_id}",
+                )
         if not loaded["windows"].empty:
-            st.markdown("**Allocator components**")
-            st.dataframe(loaded["windows"], use_container_width=True, hide_index=True)
-        candidate_predictions = loaded.get("candidate_predictions", pd.DataFrame())
-        decision_rows = loaded["predictions"].sort_values("signal_session_date", ascending=False).reset_index(drop=True)
+            allocator_windows = loaded["windows"].copy()
+            if "variant_name" in allocator_windows.columns and selected_variant:
+                filtered = allocator_windows.loc[allocator_windows["variant_name"].astype(str) == selected_variant].copy()
+                if not filtered.empty:
+                    allocator_windows = filtered
+            title = "Allocator components" if selected_settings.get("allocator_mode") == "saved_runs" else "Joint portfolio training windows"
+            st.markdown(f"**{title}**")
+            st.dataframe(allocator_windows, use_container_width=True, hide_index=True)
+        candidate_predictions = loaded.get("candidate_predictions", pd.DataFrame()).copy()
+        if "variant_name" in candidate_predictions.columns and selected_variant:
+            filtered = candidate_predictions.loc[candidate_predictions["variant_name"].astype(str) == selected_variant].copy()
+            if not filtered.empty:
+                candidate_predictions = filtered
+        decision_rows = loaded["predictions"].copy()
+        if "variant_name" in decision_rows.columns and selected_variant:
+            filtered = decision_rows.loc[decision_rows["variant_name"].astype(str) == selected_variant].copy()
+            if not filtered.empty:
+                decision_rows = filtered
+        decision_rows = decision_rows.sort_values("signal_session_date", ascending=False).reset_index(drop=True)
         if not decision_rows.empty:
             labels = decision_rows.apply(_portfolio_decision_option_label, axis=1).tolist()
             selected_label = st.selectbox(
@@ -2383,6 +2828,10 @@ def render_models_view(
             _render_portfolio_session_panel(selected_decision, session_candidates)
         if not loaded["diagnostics"].empty:
             allocator_diag = loaded["diagnostics"].copy()
+            if "variant_name" in allocator_diag.columns and selected_variant:
+                filtered = allocator_diag.loc[allocator_diag["variant_name"].astype(str) == selected_variant].copy()
+                if not filtered.empty:
+                    allocator_diag = filtered
             diag_fig = go.Figure()
             diag_fig.add_trace(
                 go.Scatter(
@@ -2464,7 +2913,7 @@ def render_models_view(
         st.json(loaded["leakage_audit"])
 
     with st.expander("Trades", expanded=False):
-        st.dataframe(loaded["trades"], use_container_width=True, hide_index=True)
+        st.dataframe(trade_view, use_container_width=True, hide_index=True)
 
 
 def render_live_monitor(
@@ -2518,42 +2967,40 @@ def render_live_monitor(
         st.success("Polling refresh complete.")
 
     runs = _normalize_runs_frame(experiment_store.list_runs())
-    asset_model_runs = runs.loc[runs["run_type"].astype(str) == "asset_model"].copy() if not runs.empty else pd.DataFrame()
-    if asset_model_runs.empty:
-        st.info("Save at least one run in Models & Backtests before using the live decision console.")
-        return
-
-    run_groups = _runs_by_asset(asset_model_runs)
-    if "SPY" not in run_groups:
-        st.info("Save at least one `SPY` model run first so the live monitor has a required fallback anchor.")
+    joint_portfolio_runs = runs.loc[
+        (runs["run_type"].astype(str) == "portfolio_allocator")
+        & (runs["allocator_mode"].astype(str) == "joint_model")
+    ].copy() if not runs.empty else pd.DataFrame()
+    if joint_portfolio_runs.empty:
+        st.info("Save at least one joint portfolio run in Models & Backtests before using the live decision console.")
         return
 
     saved_config = experiment_store.load_live_monitor_config()
-    seeded_config = seed_live_monitor_config(asset_model_runs)
-    editor_config = saved_config or seeded_config
+    if saved_config is not None and str(saved_config.mode or "portfolio_run") == "asset_model_set":
+        st.warning("A legacy asset-pin live config was found. Save a portfolio-run config below to migrate the live console.")
+    seeded_config = seed_live_monitor_config(runs)
+    editor_config = saved_config if saved_config is not None and str(saved_config.mode or "portfolio_run") == "portfolio_run" else seeded_config
     if editor_config is None:
-        st.info("Save at least one model run before configuring the live decision console.")
+        st.info("Save at least one joint portfolio run before configuring the live decision console.")
         return
 
-    st.markdown("**Pinned Model Set**")
-    if saved_config is None:
-        st.info("The selectors below are seeded from the newest saved run per asset. Save the pinned model set to enable monitoring.")
+    st.markdown("**Pinned Portfolio Run**")
+    if saved_config is None or str(saved_config.mode or "portfolio_run") != "portfolio_run":
+        st.info("The selector below is seeded from the newest saved joint portfolio run. Save it to enable monitoring.")
 
-    saved_config_errors = validate_live_monitor_config(saved_config, asset_model_runs) if saved_config is not None else []
+    saved_config_errors = validate_live_monitor_config(saved_config, runs) if saved_config is not None else []
     if saved_config_errors:
         for message in saved_config_errors:
             st.warning(message)
-        st.caption("Update and save the pinned model set below to restore live monitoring.")
+        st.caption("Update and save the pinned portfolio run below to restore live monitoring.")
 
-    available_non_spy_assets = sorted(asset_symbol for asset_symbol in run_groups if asset_symbol != "SPY")
+    portfolio_run_options = joint_portfolio_runs["run_id"].astype(str).tolist()
+    configured_portfolio_run_id = str(editor_config.portfolio_run_id or "")
+    if configured_portfolio_run_id not in portfolio_run_options:
+        configured_portfolio_run_id = portfolio_run_options[0]
     fallback_default = str(editor_config.fallback_mode or "SPY").upper()
     fallback_index = 0 if fallback_default == "SPY" else 1
-    asset_defaults = [
-        item.asset_symbol
-        for item in editor_config.pinned_runs
-        if item.asset_symbol != "SPY" and item.asset_symbol in available_non_spy_assets
-    ]
-    active_config = saved_config if not saved_config_errors else None
+    active_config = saved_config if not saved_config_errors and saved_config is not None and str(saved_config.mode or "portfolio_run") == "portfolio_run" else None
 
     with st.form("live-monitor-config"):
         fallback_mode = st.radio(
@@ -2562,84 +3009,48 @@ def render_live_monitor(
             index=fallback_index,
             horizontal=True,
         )
-        selected_assets = st.multiselect(
-            "Pinned non-SPY assets",
-            options=available_non_spy_assets,
-            default=asset_defaults,
+        selected_portfolio_run_id = st.selectbox(
+            "Pinned joint portfolio run",
+            options=portfolio_run_options,
+            index=portfolio_run_options.index(configured_portfolio_run_id),
+            format_func=lambda run_id: _live_run_option_label(
+                joint_portfolio_runs.loc[joint_portfolio_runs["run_id"].astype(str) == str(run_id)].iloc[0],
+            ),
         )
-        selected_asset_order = ["SPY"] + selected_assets
-        pinned_runs: list[LiveMonitorPinnedRun] = []
-        for asset_symbol in selected_asset_order:
-            asset_runs = run_groups.get(asset_symbol, pd.DataFrame())
-            if asset_runs.empty:
-                continue
-            run_options = asset_runs["run_id"].astype(str).tolist()
-            configured = next(
-                (
-                    item.run_id
-                    for item in editor_config.pinned_runs
-                    if item.asset_symbol == asset_symbol and item.run_id in run_options
-                ),
-                run_options[0],
-            )
-            selected_run_id = st.selectbox(
-                f"{asset_symbol} pinned run",
-                options=run_options,
-                index=run_options.index(configured) if configured in run_options else 0,
-                format_func=lambda run_id, asset_runs=asset_runs: _live_run_option_label(
-                    asset_runs.loc[asset_runs["run_id"].astype(str) == str(run_id)].iloc[0],
-                ),
-                key=f"live-pinned-run-{asset_symbol}",
-            )
-            selected_row = asset_runs.loc[asset_runs["run_id"].astype(str) == str(selected_run_id)].iloc[0]
-            pinned_runs.append(
-                LiveMonitorPinnedRun(
-                    asset_symbol=asset_symbol,
-                    run_id=str(selected_run_id),
-                    run_name=str(selected_row.get("run_name", selected_run_id) or selected_run_id),
-                    model_version="",
-                    pinned_at=pd.Timestamp.utcnow().floor("s").isoformat(),
-                ),
-            )
-        save_config = st.form_submit_button("Save pinned model set")
+        selected_row = joint_portfolio_runs.loc[
+            joint_portfolio_runs["run_id"].astype(str) == str(selected_portfolio_run_id)
+        ].iloc[0]
+        selected_params = selected_row.get("selected_params_json", {}) or {}
+        selected_symbols = selected_params.get("selected_symbols", [])
+        deployment_variant = str(selected_params.get("deployment_variant", "") or "")
+        st.caption(
+            f"Deployment variant: `{deployment_variant or 'n/a'}` | "
+            f"selected symbols: `{', '.join(selected_symbols) if selected_symbols else 'n/a'}`",
+        )
+        save_config = st.form_submit_button("Save pinned portfolio run")
 
     if save_config:
         candidate_config = LiveMonitorConfig(
+            mode="portfolio_run",
             fallback_mode=str(fallback_mode).upper(),
-            pinned_runs=pinned_runs,
+            portfolio_run_id=str(selected_portfolio_run_id),
+            portfolio_run_name=str(selected_row.get("run_name", selected_portfolio_run_id) or selected_portfolio_run_id),
+            deployment_variant=str(deployment_variant),
         )
-        validation_errors = validate_live_monitor_config(candidate_config, asset_model_runs)
+        validation_errors = validate_live_monitor_config(candidate_config, runs)
         if validation_errors:
             for message in validation_errors:
                 st.error(message)
         else:
-            enriched_pins: list[LiveMonitorPinnedRun] = []
-            for item in candidate_config.pinned_runs:
-                run_bundle = experiment_store.load_run(item.run_id)
-                model_version = ""
-                if run_bundle is not None:
-                    model_version = str(run_bundle["model_artifact"].model_version)
-                enriched_pins.append(
-                    LiveMonitorPinnedRun(
-                        asset_symbol=item.asset_symbol,
-                        run_id=item.run_id,
-                        run_name=item.run_name,
-                        model_version=model_version,
-                        pinned_at=item.pinned_at,
-                    ),
-                )
-            active_config = LiveMonitorConfig(
-                fallback_mode=candidate_config.fallback_mode,
-                pinned_runs=enriched_pins,
-            )
+            active_config = candidate_config
             experiment_store.save_live_monitor_config(active_config)
-            st.success("Saved the pinned live model set.")
+            st.success("Saved the pinned portfolio run.")
 
     if active_config is None:
-        st.info("Save a valid pinned model set above to enable live monitoring.")
+        st.info("Save a valid pinned portfolio run above to enable live monitoring.")
         return
 
-    config_errors = validate_live_monitor_config(active_config, asset_model_runs)
+    config_errors = validate_live_monitor_config(active_config, runs)
     if config_errors:
         for message in config_errors:
             st.error(message)
@@ -2648,7 +3059,7 @@ def render_live_monitor(
     posts = store.read_frame("normalized_posts")
     spy = store.read_frame("spy_daily")
     tracked_accounts = store.read_frame("tracked_accounts")
-    if posts.empty or spy.empty:
+    if str(active_config.mode or "portfolio_run") == "asset_model_set" and (posts.empty or spy.empty):
         st.info("Refresh datasets first so the live decision console has normalized posts and SPY market data.")
         return
     board_generated_at = pd.Timestamp.utcnow().floor("s")
@@ -2666,7 +3077,7 @@ def render_live_monitor(
     for message in live_warnings:
         st.warning(message)
     if board.empty or decision_history_row.empty:
-        st.info("No live candidate rows could be built from the pinned model set.")
+        st.info("No live candidate rows could be built from the pinned portfolio run.")
         return
 
     should_persist_snapshots = bool(refresh_requested)
@@ -2688,7 +3099,7 @@ def render_live_monitor(
     tabs = st.tabs(["Current Decision", "Why This Asset Won", "History"])
 
     with tabs[0]:
-        metric_cols = st.columns(6)
+        metric_cols = st.columns(7)
         metric_cols[0].metric("Winning asset", display_asset)
         metric_cols[1].metric(
             "Signal session",
@@ -2698,6 +3109,7 @@ def render_live_monitor(
         metric_cols[3].metric("Stance", str(decision_row["stance"]))
         metric_cols[4].metric("Winner score", f"{float(decision_row['winner_score']):+.3%}")
         metric_cols[5].metric("Winner confidence", f"{winner_confidence:.2f}")
+        metric_cols[6].metric("Deployment variant", str(decision_row.get("deployment_variant", active_config.deployment_variant) or "n/a"))
 
         st.json(
             {
@@ -2709,6 +3121,7 @@ def render_live_monitor(
         )
         board_view = board.rename(
             columns={
+                "variant_name": "Variant",
                 "asset_symbol": "Asset",
                 "run_name": "Run",
                 "expected_return_score": "Score",
@@ -2727,6 +3140,7 @@ def render_live_monitor(
         st.dataframe(
             board_view[
                 [
+                    "Variant",
                     "Asset",
                     "Run",
                     "Score",
@@ -2792,10 +3206,12 @@ def render_live_monitor(
     with tabs[2]:
         asset_history = store.read_frame("live_asset_snapshots")
         decision_history = store.read_frame("live_decision_snapshots")
-        monitored_assets = {item.asset_symbol for item in active_config.pinned_runs}
+        monitored_assets = set(board["asset_symbol"].astype(str).str.upper().tolist())
         if not asset_history.empty and "asset_symbol" in asset_history.columns:
             asset_history["asset_symbol"] = asset_history["asset_symbol"].astype(str).str.upper()
             asset_history = asset_history.loc[asset_history["asset_symbol"].isin(monitored_assets)].copy()
+        if not asset_history.empty and "run_id" in asset_history.columns:
+            asset_history = asset_history.loc[asset_history["run_id"].astype(str) == str(active_config.portfolio_run_id)].copy()
         if not decision_history.empty:
             decision_history = decision_history.sort_values("generated_at").reset_index(drop=True)
 

@@ -50,6 +50,7 @@ class LiveMonitorLogicTests(unittest.TestCase):
 
         self.assertIsNotNone(config)
         assert config is not None
+        self.assertEqual(config.mode, "asset_model_set")
         self.assertEqual(config.pinned_runs[0].asset_symbol, "SPY")
         self.assertEqual(config.pinned_runs[1].run_id, "qqq-new")
 
@@ -61,6 +62,7 @@ class LiveMonitorLogicTests(unittest.TestCase):
             ],
         )
         bad_config = LiveMonitorConfig(
+            mode="asset_model_set",
             fallback_mode="INVALID",
             pinned_runs=[
                 LiveMonitorPinnedRun(asset_symbol="QQQ", run_id="qqq-run"),
@@ -73,6 +75,29 @@ class LiveMonitorLogicTests(unittest.TestCase):
         self.assertTrue(any("Fallback mode" in error for error in errors))
         self.assertTrue(any("Only one pinned run" in error for error in errors))
         self.assertTrue(any("Exactly one pinned `SPY`" in error for error in errors))
+
+    def test_validate_live_monitor_config_requires_joint_portfolio_run(self) -> None:
+        runs = pd.DataFrame(
+            [
+                {
+                    "run_id": "portfolio-1",
+                    "run_name": "Joint portfolio",
+                    "run_type": "portfolio_allocator",
+                    "allocator_mode": "joint_model",
+                    "target_asset": "PORTFOLIO",
+                },
+            ],
+        )
+        config = LiveMonitorConfig(
+            mode="portfolio_run",
+            fallback_mode="SPY",
+            portfolio_run_id="missing",
+            deployment_variant="pooled",
+        )
+
+        errors = validate_live_monitor_config(config, runs)
+
+        self.assertTrue(any("not available anymore" in error for error in errors))
 
     def test_rank_live_asset_snapshots_multiple_assets_choose_highest_eligible_score(self) -> None:
         board, decision = rank_live_asset_snapshots(
@@ -449,6 +474,7 @@ class LiveMonitorStateIntegrationTests(unittest.TestCase):
         )
 
         live_config = LiveMonitorConfig(
+            mode="asset_model_set",
             fallback_mode="SPY",
             pinned_runs=[
                 LiveMonitorPinnedRun(asset_symbol="SPY", run_id=spy_saved_run.run_id, run_name=spy_saved_run.run_name),
@@ -480,6 +506,202 @@ class LiveMonitorStateIntegrationTests(unittest.TestCase):
         runner_frame = _build_live_runner_up_frame(board, decision.iloc[0])
         self.assertEqual(len(runner_frame), 2)
         self.assertIn("threshold_gap", runner_frame.columns.tolist())
+
+    def test_build_live_monitor_state_from_portfolio_run_uses_saved_models(self) -> None:
+        asset_session_features = pd.DataFrame(
+            [
+                {
+                    "signal_session_date": pd.Timestamp("2025-05-01"),
+                    "next_session_date": pd.Timestamp("2025-05-02"),
+                    "asset_symbol": "SPY",
+                    "feature_version": "asset-v1",
+                    "llm_enabled": False,
+                    "target_available": False,
+                    "tradeable": True,
+                    "next_session_open": 100.0,
+                    "next_session_close": 101.0,
+                    "post_count": 3,
+                    "tracked_weighted_mentions": 1.0,
+                    "tracked_weighted_engagement": 2.0,
+                    "tracked_account_post_count": 1,
+                    "sentiment_avg": 0.1,
+                },
+                {
+                    "signal_session_date": pd.Timestamp("2025-05-01"),
+                    "next_session_date": pd.Timestamp("2025-05-02"),
+                    "asset_symbol": "QQQ",
+                    "feature_version": "asset-v1",
+                    "llm_enabled": False,
+                    "target_available": False,
+                    "tradeable": True,
+                    "next_session_open": 200.0,
+                    "next_session_close": 203.0,
+                    "post_count": 6,
+                    "tracked_weighted_mentions": 2.0,
+                    "tracked_weighted_engagement": 4.0,
+                    "tracked_account_post_count": 2,
+                    "sentiment_avg": 0.6,
+                },
+            ],
+        )
+        asset_post_mappings = pd.DataFrame(
+            [
+                {
+                    "asset_symbol": "SPY",
+                    "session_date": pd.Timestamp("2025-05-01"),
+                    "post_timestamp": pd.Timestamp("2025-05-01 10:00:00"),
+                    "author_account_id": "acct-spy",
+                    "author_handle": "macrospy",
+                    "author_display_name": "Macro Spy",
+                    "source_platform": "X",
+                    "author_is_trump": False,
+                    "is_active_tracked_account": True,
+                    "tracked_account_status": "active",
+                    "mentions_trump": True,
+                    "sentiment_score": 0.1,
+                    "engagement_score": 10.0,
+                    "tracked_discovery_score": 1.0,
+                    "cleaned_text": "Trump broad market chatter",
+                    "post_url": "https://example.com/spy",
+                },
+                {
+                    "asset_symbol": "QQQ",
+                    "session_date": pd.Timestamp("2025-05-01"),
+                    "post_timestamp": pd.Timestamp("2025-05-01 10:05:00"),
+                    "author_account_id": "acct-qqq",
+                    "author_handle": "macroqqq",
+                    "author_display_name": "Macro QQQ",
+                    "source_platform": "X",
+                    "author_is_trump": False,
+                    "is_active_tracked_account": True,
+                    "tracked_account_status": "active",
+                    "mentions_trump": True,
+                    "sentiment_score": 0.6,
+                    "engagement_score": 25.0,
+                    "tracked_discovery_score": 1.5,
+                    "cleaned_text": "Trump tech momentum chatter",
+                    "post_url": "https://example.com/qqq",
+                },
+            ],
+        )
+        self.store.save_frame("asset_session_features", asset_session_features, metadata={"row_count": len(asset_session_features)})
+        self.store.save_frame("asset_post_mappings", asset_post_mappings, metadata={"row_count": len(asset_post_mappings)})
+
+        portfolio_run = BacktestRun(
+            run_id="portfolio-live",
+            run_name="Portfolio live",
+            target_asset="PORTFOLIO",
+            config_hash="portfolio-live",
+            train_window=20,
+            validation_window=10,
+            test_window=10,
+            metrics={"robust_score": 1.0},
+            selected_params={
+                "fallback_mode": "SPY",
+                "deployment_variant": "per_asset",
+                "selected_symbols": ["SPY", "QQQ"],
+            },
+            run_type="portfolio_allocator",
+            allocator_mode="joint_model",
+            fallback_mode="SPY",
+            deployment_variant="per_asset",
+            selected_symbols=["SPY", "QQQ"],
+            universe_symbols=["SPY", "QQQ"],
+            topology_variants=["per_asset", "pooled"],
+            model_families=["ridge"],
+        )
+        self.experiments.save_portfolio_run(
+            run=portfolio_run,
+            config={
+                "allocator_mode": "joint_model",
+                "feature_version": "asset-v1",
+                "llm_enabled": False,
+                "selected_symbols": ["SPY", "QQQ"],
+            },
+            trades=pd.DataFrame(),
+            decision_history=pd.DataFrame(),
+            candidate_predictions=pd.DataFrame(),
+            component_summary=pd.DataFrame(),
+            benchmarks=pd.DataFrame(),
+            benchmark_curves=pd.DataFrame(),
+            diagnostics=pd.DataFrame(),
+            leakage_audit={"overall_pass": True},
+            variant_summary=pd.DataFrame(
+                {
+                    "variant_name": ["per_asset", "pooled"],
+                    "validation_robust_score": [1.2, 1.1],
+                    "deployment_winner": [True, False],
+                },
+            ),
+            portfolio_model_bundle={
+                "deployment_variant": "per_asset",
+                "selected_symbols": ["SPY", "QQQ"],
+                "feature_version": "asset-v1",
+                "llm_enabled": False,
+                "variants": {
+                    "per_asset": {
+                        "variant_name": "per_asset",
+                        "topology": "per_asset",
+                        "model_family": "ridge",
+                        "threshold": 0.0,
+                        "min_post_count": 1,
+                        "account_weight": 1.0,
+                        "selected_symbols": ["SPY", "QQQ"],
+                        "models": {
+                            "SPY": {
+                                "model_version": "spy-live-model",
+                                "feature_names": ["post_count", "sentiment_avg"],
+                                "intercept": -0.01,
+                                "coefficients": [0.001, 0.002],
+                                "means": [0.0, 0.0],
+                                "stds": [1.0, 1.0],
+                                "residual_std": 0.1,
+                                "train_rows": 10,
+                                "metadata": {"target_asset": "SPY"},
+                            },
+                            "QQQ": {
+                                "model_version": "qqq-live-model",
+                                "feature_names": ["post_count", "sentiment_avg"],
+                                "intercept": -0.01,
+                                "coefficients": [0.002, 0.01],
+                                "means": [0.0, 0.0],
+                                "stds": [1.0, 1.0],
+                                "residual_std": 0.1,
+                                "train_rows": 10,
+                                "metadata": {"target_asset": "QQQ"},
+                            },
+                        },
+                    },
+                },
+            },
+        )
+
+        live_config = LiveMonitorConfig(
+            mode="portfolio_run",
+            fallback_mode="SPY",
+            portfolio_run_id="portfolio-live",
+            portfolio_run_name="Portfolio live",
+            deployment_variant="per_asset",
+        )
+        board, decision, explanation_lookup, warnings = _build_live_monitor_state(
+            store=self.store,
+            feature_service=self.features,
+            model_service=self.model_service,
+            experiment_store=self.experiments,
+            posts=pd.DataFrame(),
+            spy_market=pd.DataFrame(),
+            tracked_accounts=pd.DataFrame(),
+            config=live_config,
+            generated_at=pd.Timestamp("2026-04-14 10:00:00"),
+        )
+
+        self.assertFalse(warnings)
+        self.assertEqual(decision.iloc[0]["winning_asset"], "QQQ")
+        self.assertEqual(decision.iloc[0]["deployment_variant"], "per_asset")
+        self.assertSetEqual(set(board["asset_symbol"].astype(str)), {"SPY", "QQQ"})
+        self.assertIn("QQQ", explanation_lookup)
+        self.assertFalse(explanation_lookup["QQQ"]["feature_contributions"].empty)
+        self.assertFalse(explanation_lookup["QQQ"]["post_attribution"].empty)
 
 
 if __name__ == "__main__":

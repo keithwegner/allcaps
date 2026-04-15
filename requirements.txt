@@ -8,3 +8,4 @@ yfinance>=0.2.52
 vaderSentiment>=3.3.2
 duckdb>=1.1
 pyarrow>=15.0
+scikit-learn>=1.5

@@ -10,10 +10,12 @@ from .portfolio import PORTFOLIO_CANDIDATE_COLUMNS, PORTFOLIO_DECISION_COLUMNS, 
 LIVE_MONITOR_CONFIG_PATH = "live_monitor/config.json"
 LIVE_ASSET_SNAPSHOT_COLUMNS = [
     "generated_at",
+    "variant_name",
     *PORTFOLIO_CANDIDATE_COLUMNS,
 ]
 LIVE_DECISION_SNAPSHOT_COLUMNS = [
     "generated_at",
+    "deployment_variant",
     *PORTFOLIO_DECISION_COLUMNS,
 ]
 
@@ -22,14 +24,35 @@ def seed_live_monitor_config(runs: pd.DataFrame) -> LiveMonitorConfig | None:
     if runs.empty or "run_id" not in runs.columns:
         return None
     normalized = runs.copy()
+    if "created_at" in normalized.columns:
+        normalized = normalized.sort_values("created_at", ascending=False)
+    if "run_type" not in normalized.columns:
+        normalized["run_type"] = "asset_model"
+    if "allocator_mode" not in normalized.columns:
+        normalized["allocator_mode"] = ""
+    portfolio_runs = normalized.loc[
+        (normalized["run_type"].astype(str) == "portfolio_allocator")
+        & (normalized["allocator_mode"].astype(str) == "joint_model")
+    ].copy()
+    if not portfolio_runs.empty:
+        row = portfolio_runs.iloc[0]
+        selected = row.get("selected_params_json", {}) or {}
+        return LiveMonitorConfig(
+            mode="portfolio_run",
+            fallback_mode=str(selected.get("fallback_mode", "SPY") or "SPY").upper(),
+            portfolio_run_id=str(row.get("run_id", "") or ""),
+            portfolio_run_name=str(row.get("run_name", "") or ""),
+            deployment_variant=str(selected.get("deployment_variant", "") or ""),
+        )
+
     if "target_asset" not in normalized.columns:
         normalized["target_asset"] = "SPY"
     normalized["target_asset"] = normalized["target_asset"].fillna("SPY").astype(str).str.upper()
-    if "created_at" in normalized.columns:
-        normalized = normalized.sort_values("created_at", ascending=False)
-
+    asset_model_runs = normalized.loc[normalized["run_type"].astype(str) == "asset_model"].copy()
+    if asset_model_runs.empty:
+        return None
     pinned_runs: list[LiveMonitorPinnedRun] = []
-    for asset_symbol, group in normalized.groupby("target_asset", sort=False):
+    for asset_symbol, group in asset_model_runs.groupby("target_asset", sort=False):
         row = group.iloc[0]
         pinned_runs.append(
             LiveMonitorPinnedRun(
@@ -39,17 +62,44 @@ def seed_live_monitor_config(runs: pd.DataFrame) -> LiveMonitorConfig | None:
             ),
         )
     pinned_runs = sorted(pinned_runs, key=lambda item: (item.asset_symbol != "SPY", item.asset_symbol))
-    return LiveMonitorConfig(fallback_mode="SPY", pinned_runs=pinned_runs)
+    return LiveMonitorConfig(mode="asset_model_set", fallback_mode="SPY", pinned_runs=pinned_runs)
 
 
 def validate_live_monitor_config(config: LiveMonitorConfig | None, runs: pd.DataFrame) -> list[str]:
     if config is None:
-        return ["Save a pinned live model set before using the decision console."]
+        return ["Save a pinned live portfolio configuration before using the decision console."]
 
     errors: list[str] = []
     fallback_mode = str(config.fallback_mode or "SPY").upper()
     if fallback_mode not in VALID_FALLBACK_MODES:
         errors.append("Fallback mode must be `SPY` or `FLAT`.")
+
+    mode = str(config.mode or "portfolio_run")
+    if mode == "portfolio_run":
+        portfolio_runs = runs.copy()
+        if portfolio_runs.empty:
+            errors.append("Save at least one joint portfolio run before configuring the live console.")
+            return errors
+        if "run_type" not in portfolio_runs.columns:
+            portfolio_runs["run_type"] = "asset_model"
+        if "allocator_mode" not in portfolio_runs.columns:
+            portfolio_runs["allocator_mode"] = ""
+        portfolio_runs = portfolio_runs.loc[
+            (portfolio_runs["run_type"].astype(str) == "portfolio_allocator")
+            & (portfolio_runs["allocator_mode"].astype(str) == "joint_model")
+        ].copy()
+        if portfolio_runs.empty:
+            errors.append("No joint portfolio runs are available yet.")
+            return errors
+        portfolio_run_id = str(config.portfolio_run_id or "")
+        if not portfolio_run_id:
+            errors.append("A saved joint portfolio run must be selected.")
+            return errors
+        portfolio_lookup = portfolio_runs.set_index("run_id", drop=False)
+        if portfolio_run_id not in portfolio_lookup.index:
+            errors.append(f"Portfolio run `{portfolio_run_id}` is not available anymore.")
+            return errors
+        return errors
 
     if not config.pinned_runs:
         errors.append("At least one pinned run is required.")
