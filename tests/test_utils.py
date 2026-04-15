@@ -26,6 +26,11 @@ from trump_workbench.utils import (
 
 
 class UtilsTests(unittest.TestCase):
+    def assert_timezone_name(self, ts: pd.Timestamp, expected: str) -> None:
+        tz = ts.tz
+        name = getattr(tz, "zone", None) or getattr(tz, "key", None) or str(tz)
+        self.assertEqual(name, expected)
+
     def test_clean_text_strips_html_and_mojibake(self) -> None:
         raw = "Hello<br>world &amp; team ‚Äî test"
         self.assertEqual(clean_text(raw), "Hello world & team — test")
@@ -35,7 +40,7 @@ class UtilsTests(unittest.TestCase):
 
     def test_parse_timestamp_to_eastern_normalizes_timezone(self) -> None:
         ts = parse_timestamp_to_eastern("2025-02-01T15:00:00Z")
-        self.assertEqual(ts.tz.zone, "America/New_York")
+        self.assert_timezone_name(ts, "America/New_York")
 
     def test_infer_mentions_trump(self) -> None:
         self.assertTrue(infer_mentions_trump("Markets are reacting to Trump again"))
@@ -52,7 +57,7 @@ class UtilsTests(unittest.TestCase):
 
         localized = parse_timestamp_to_eastern("2025-02-01 15:00:00")
         self.assertFalse(pd.isna(localized))
-        self.assertEqual(localized.tz.zone, EASTERN)
+        self.assert_timezone_name(localized, EASTERN)
 
     def test_normalize_boolean_handles_empty_boolean_and_string_inputs(self) -> None:
         empty = normalize_boolean(pd.Series(dtype=object))
