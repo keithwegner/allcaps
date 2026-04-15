@@ -1,0 +1,162 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 560" role="img" aria-labelledby="title desc">
+  <title id="title">Trump Social Trading Research Workbench logo</title>
+  <desc id="desc">A red baseball cap with the words Make Trading Great Again.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fcfbfa" />
+      <stop offset="100%" stop-color="#f2f1ef" />
+    </linearGradient>
+    <linearGradient id="capFront" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#d52a22" />
+      <stop offset="55%" stop-color="#c91f1e" />
+      <stop offset="100%" stop-color="#b51b1a" />
+    </linearGradient>
+    <linearGradient id="capSide" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#e04135" />
+      <stop offset="100%" stop-color="#bb1b1c" />
+    </linearGradient>
+    <linearGradient id="brimTop" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#d92f29" />
+      <stop offset="100%" stop-color="#b11a1a" />
+    </linearGradient>
+    <linearGradient id="brimUnderside" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#84201a" />
+      <stop offset="100%" stop-color="#5f1714" />
+    </linearGradient>
+    <filter id="dropShadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="10" result="blur" />
+      <feOffset in="blur" dx="0" dy="14" result="offset" />
+      <feColorMatrix
+        in="offset"
+        type="matrix"
+        values="0 0 0 0 0
+                0 0 0 0 0
+                0 0 0 0 0
+                0 0 0 0.28 0"
+        result="shadow"
+      />
+      <feMerge>
+        <feMergeNode in="shadow" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+    <filter id="textShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feOffset dx="0" dy="2" />
+      <feGaussianBlur stdDeviation="2.4" result="blur" />
+      <feColorMatrix
+        in="blur"
+        type="matrix"
+        values="0 0 0 0 0
+                0 0 0 0 0
+                0 0 0 0 0
+                0 0 0 0.55 0"
+      />
+    </filter>
+  </defs>
+
+  <rect width="960" height="560" fill="url(#bg)" />
+  <ellipse cx="480" cy="430" rx="205" ry="32" fill="#000" opacity="0.18" />
+
+  <g filter="url(#dropShadow)">
+    <ellipse cx="480" cy="54" rx="28" ry="16" fill="#c42520" stroke="#8f1616" stroke-width="3" />
+
+    <path
+      d="M279 214
+         C296 120 370 61 480 55
+         C590 61 664 120 681 214
+         L700 321
+         C707 360 690 384 651 389
+         L309 389
+         C270 384 253 360 260 321
+         Z"
+      fill="url(#capSide)"
+      stroke="#991816"
+      stroke-width="4"
+    />
+
+    <path
+      d="M326 219
+         C335 130 390 84 480 79
+         C570 84 625 130 634 219
+         L643 328
+         C646 354 631 368 604 369
+         L356 369
+         C329 368 314 354 317 328
+         Z"
+      fill="url(#capFront)"
+      stroke="#ea6c5d"
+      stroke-width="2"
+      opacity="0.97"
+    />
+
+    <path d="M480 83 L480 368" fill="none" stroke="#ef7b6d" stroke-width="3" opacity="0.7" />
+    <path d="M364 126 C339 154 328 190 324 242" fill="none" stroke="#ef7b6d" stroke-width="3" opacity="0.55" />
+    <path d="M596 126 C621 154 632 190 636 242" fill="none" stroke="#ef7b6d" stroke-width="3" opacity="0.55" />
+
+    <ellipse cx="392" cy="126" rx="10" ry="7" fill="#be2a22" stroke="#8f1514" stroke-width="2" />
+    <ellipse cx="568" cy="126" rx="10" ry="7" fill="#be2a22" stroke="#8f1514" stroke-width="2" />
+    <ellipse cx="392" cy="126" rx="3" ry="2" fill="#93201c" />
+    <ellipse cx="568" cy="126" rx="3" ry="2" fill="#93201c" />
+
+    <path
+      d="M259 305
+         C339 278 407 267 480 267
+         C553 267 621 278 701 305
+         C733 316 751 337 748 367
+         L739 456
+         C735 496 699 518 660 510
+         C586 495 541 486 480 481
+         C419 486 374 495 300 510
+         C261 518 225 496 221 456
+         L212 367
+         C209 337 227 316 259 305
+         Z"
+      fill="url(#brimTop)"
+      stroke="#991816"
+      stroke-width="4"
+    />
+
+    <path
+      d="M242 392
+         C334 365 398 354 480 352
+         C562 354 626 365 718 392
+         C710 434 671 458 622 456
+         C567 453 531 445 480 441
+         C429 445 393 453 338 456
+         C289 458 250 434 242 392
+         Z"
+      fill="url(#brimUnderside)"
+      opacity="0.92"
+    />
+
+    <path d="M235 344 C317 320 390 310 480 309 C570 310 643 320 725 344" fill="none" stroke="#f08a7c" stroke-width="3" opacity="0.65" />
+    <path d="M248 357 C327 336 395 326 480 325 C565 326 633 336 712 357" fill="none" stroke="#ef8d7f" stroke-width="2.4" opacity="0.6" />
+    <path d="M260 371 C336 353 401 345 480 344 C559 345 624 353 700 371" fill="none" stroke="#ef8d7f" stroke-width="2.1" opacity="0.58" />
+    <path d="M272 386 C345 370 406 363 480 362 C554 363 615 370 688 386" fill="none" stroke="#ef8d7f" stroke-width="1.9" opacity="0.55" />
+    <path d="M284 401 C354 387 412 381 480 380 C548 381 606 387 676 401" fill="none" stroke="#ef8d7f" stroke-width="1.8" opacity="0.52" />
+    <path d="M296 417 C363 405 417 399 480 398 C543 399 597 405 664 417" fill="none" stroke="#ef8d7f" stroke-width="1.7" opacity="0.5" />
+
+    <g fill="#fffaf5" filter="url(#textShadow)" text-anchor="middle">
+      <text
+        x="480"
+        y="216"
+        font-family="Georgia, 'Times New Roman', serif"
+        font-size="56"
+        font-weight="700"
+        letter-spacing="1.8"
+      >
+        MAKE TRADING
+      </text>
+      <text
+        x="480"
+        y="280"
+        font-family="Georgia, 'Times New Roman', serif"
+        font-size="58"
+        font-weight="700"
+        letter-spacing="1.5"
+      >
+        GREAT AGAIN
+      </text>
+    </g>
+  </g>
+</svg>

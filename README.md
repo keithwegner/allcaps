@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="Make Trading Great Again project logo" width="420" />
+</p>
+
 # Trump Social Trading Research Workbench
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
