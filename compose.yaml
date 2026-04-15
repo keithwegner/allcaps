@@ -1,0 +1,20 @@
+services:
+  allcaps:
+    build:
+      context: .
+    container_name: allcaps
+    ports:
+      - "127.0.0.1:8501:8501"
+    environment:
+      PORT: "8501"
+      ALLCAPS_STATE_DIR: /var/data
+      ALLCAPS_PUBLIC_MODE: "false"
+      ALLCAPS_AUTO_BOOTSTRAP_ON_START: "true"
+      ALLCAPS_SCHEDULER_ENABLED: "false"
+      ALLCAPS_REMOTE_X_CSV_URL: ${ALLCAPS_REMOTE_X_CSV_URL:-}
+      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-}
+    volumes:
+      - allcaps_state:/var/data
+
+volumes:
+  allcaps_state:

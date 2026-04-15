@@ -4,8 +4,11 @@
 .coverage.*
 coverage.xml
 htmlcov/
+.env
+.env.local
 .pytest_cache/
 .venv/
 .workbench/
+docker-state/
 __pycache__/
 *.pyc
