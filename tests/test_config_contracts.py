@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import pandas as pd
 
@@ -29,6 +31,8 @@ class ConfigAndContractsTests(unittest.TestCase):
             self.assertEqual(settings.title, APP_TITLE)
             self.assertEqual(settings.timezone, EASTERN)
             self.assertEqual(settings.term_start, CURRENT_TERM_START)
+            self.assertEqual(settings.code_root, settings.base_dir)
+            self.assertEqual(settings.state_root, settings.base_dir)
             self.assertTrue(settings.cache_dir.exists())
             self.assertTrue(settings.workbench_dir.exists())
             self.assertTrue(settings.lake_dir.exists())
@@ -40,6 +44,40 @@ class ConfigAndContractsTests(unittest.TestCase):
             self.assertEqual(settings.x_template_path, settings.base_dir / "templates" / "x_posts_template.csv")
             self.assertEqual(settings.mention_template_path, settings.base_dir / "templates" / "x_mentions_template.csv")
             self.assertEqual(DEFAULT_ETF_SYMBOLS, ("SPY", "QQQ", "XLK", "XLF", "XLE", "SMH"))
+            self.assertFalse(settings.public_mode)
+            self.assertTrue(settings.auto_bootstrap_on_start)
+
+    def test_app_settings_supports_state_root_and_hosting_env_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as code_dir, tempfile.TemporaryDirectory() as state_dir:
+            env = {
+                "ALLCAPS_STATE_DIR": state_dir,
+                "ALLCAPS_PUBLIC_MODE": "true",
+                "ALLCAPS_ADMIN_PASSWORD": "secret",
+                "ALLCAPS_AUTO_BOOTSTRAP_ON_START": "false",
+                "ALLCAPS_SCHEDULER_ENABLED": "true",
+                "ALLCAPS_SCHEDULER_INCREMENTAL_MINUTES": "45",
+                "ALLCAPS_SCHEDULER_FULL_HOUR": "4",
+                "ALLCAPS_SCHEDULER_FULL_MINUTE": "15",
+                "ALLCAPS_SCHEDULER_LOOP_SECONDS": "90",
+                "ALLCAPS_REMOTE_X_CSV_URL": "https://example.com/mentions.csv",
+            }
+            with mock.patch.dict(os.environ, env, clear=False):
+                settings = AppSettings(base_dir=Path(code_dir))
+
+            self.assertEqual(settings.code_root, Path(code_dir))
+            self.assertEqual(settings.state_root, Path(state_dir).resolve())
+            self.assertEqual(settings.cache_dir, Path(state_dir).resolve() / ".cache")
+            self.assertEqual(settings.db_path, Path(state_dir).resolve() / ".workbench" / "workbench.duckdb")
+            self.assertEqual(settings.local_x_path, Path(code_dir) / "data" / "realDonaldTrump_x_current_term.csv")
+            self.assertTrue(settings.public_mode)
+            self.assertEqual(settings.admin_password, "secret")
+            self.assertFalse(settings.auto_bootstrap_on_start)
+            self.assertTrue(settings.scheduler_enabled)
+            self.assertEqual(settings.scheduler_incremental_minutes, 45)
+            self.assertEqual(settings.scheduler_full_hour, 4)
+            self.assertEqual(settings.scheduler_full_minute, 15)
+            self.assertEqual(settings.scheduler_loop_seconds, 90)
+            self.assertEqual(settings.remote_x_csv_url, "https://example.com/mentions.csv")
 
     def test_contracts_round_trip_to_dict_helpers(self) -> None:
         post = NormalizedPost(

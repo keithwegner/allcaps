@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: allcaps
+    env: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash scripts/start_render.sh
+    healthCheckPath: /
+    disk:
+      name: allcaps-data
+      mountPath: /var/data
+      sizeGB: 10
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: ALLCAPS_STATE_DIR
+        value: /var/data
+      - key: ALLCAPS_PUBLIC_MODE
+        value: "true"
+      - key: ALLCAPS_AUTO_BOOTSTRAP_ON_START
+        value: "false"
+      - key: ALLCAPS_SCHEDULER_ENABLED
+        value: "true"
+      - key: ALLCAPS_SCHEDULER_INCREMENTAL_MINUTES
+        value: "30"
+      - key: ALLCAPS_SCHEDULER_FULL_HOUR
+        value: "3"
+      - key: ALLCAPS_SCHEDULER_FULL_MINUTE
+        value: "0"
+      - key: ALLCAPS_ADMIN_PASSWORD
+        sync: false
+      - key: ALPHA_VANTAGE_API_KEY
+        sync: false
+      - key: ALLCAPS_REMOTE_X_CSV_URL
+        sync: false

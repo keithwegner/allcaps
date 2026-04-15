@@ -22,6 +22,8 @@ In plain English, the app helps you:
 - [What You Need Before You Start](#what-you-need-before-you-start)
 - [Quick Start](#quick-start)
 - [Contributor Workflow](#contributor-workflow)
+- [Hosting On Render](#hosting-on-render)
+- [Hosted Environment Variables](#hosted-environment-variables)
 - [Recommended First Run](#recommended-first-run)
 - [How To Work With Each Page](#how-to-work-with-each-page)
   - [`Datasets`](#datasets)
@@ -86,6 +88,45 @@ The app opens as a multi-page Streamlit workbench with these sections:
 - `Discovery`
 - `Models & Backtests`
 - `Live Monitor`
+
+## Hosting On Render
+
+The repo includes a first-pass Render deployment blueprint in `render.yaml` plus a startup script at `scripts/start_render.sh`.
+
+This deployment shape assumes:
+
+- one Render web service
+- one persistent disk mounted at `/var/data`
+- public read-only browsing by default
+- admin-only writes for dataset refreshes, watchlist edits, and run creation
+- a background scheduler inside the same service for nightly full refreshes and 30-minute incremental refreshes
+
+Basic deployment flow:
+
+1. Create a new Render web service from this repo using `render.yaml`.
+2. Add a persistent disk.
+3. Set `ALLCAPS_ADMIN_PASSWORD` in Render.
+4. Optionally set `ALPHA_VANTAGE_API_KEY` and `ALLCAPS_REMOTE_X_CSV_URL`.
+5. Deploy and then bootstrap datasets from the app as an admin, or let the scheduler do the first bootstrap if the instance starts empty.
+
+Important note:
+
+- hosted state does **not** live in the repo checkout; it lives under `ALLCAPS_STATE_DIR`, which defaults to `/var/data` in Render
+
+## Hosted Environment Variables
+
+The hosted deployment uses these env vars:
+
+- `ALLCAPS_STATE_DIR`: persistent writable state root, such as `/var/data`
+- `ALLCAPS_PUBLIC_MODE`: when `true`, visitors are read-only until an admin unlocks the session
+- `ALLCAPS_ADMIN_PASSWORD`: admin password for mutating actions
+- `ALLCAPS_AUTO_BOOTSTRAP_ON_START`: keep `false` for Render so empty instances still start quickly
+- `ALLCAPS_SCHEDULER_ENABLED`: enables the in-process scheduler
+- `ALLCAPS_SCHEDULER_INCREMENTAL_MINUTES`: incremental refresh cadence, default `30`
+- `ALLCAPS_SCHEDULER_FULL_HOUR`: nightly full-refresh hour in app time zone
+- `ALLCAPS_SCHEDULER_FULL_MINUTE`: nightly full-refresh minute
+- `ALLCAPS_REMOTE_X_CSV_URL`: optional remote X/mentions CSV URL for scheduled refreshes
+- `ALPHA_VANTAGE_API_KEY`: optional intraday research key
 
 ## Recommended First Run
 
@@ -244,6 +285,8 @@ The app stores working data in:
 Truth Social raw archive caching uses:
 
 - `.cache/truth_archive.csv`
+
+For hosted deployments, the same paths are created under `ALLCAPS_STATE_DIR` instead of the repo root.
 
 ## Typical User Workflow
 
