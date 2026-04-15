@@ -82,6 +82,7 @@ class ExperimentStoreTests(unittest.TestCase):
         self.assertEqual(loaded["config"]["feature_version"], "v1")
         self.assertEqual(loaded["config"]["target_asset"], "SPY")
         self.assertEqual(loaded["run"]["target_asset"], "SPY")
+        self.assertEqual(loaded["run"]["run_type"], "asset_model")
         self.assertEqual(loaded["run"]["run_name"], "unit-test-run")
         self.assertEqual(loaded["model_artifact"].feature_names, ["x1"])
         self.assertFalse(loaded["feature_contributions"].empty)
@@ -227,6 +228,111 @@ class ExperimentStoreTests(unittest.TestCase):
         self.assertEqual(len(stored_asset_snapshots), 2)
         self.assertEqual(len(stored_decision_snapshots), 1)
         self.assertEqual(stored_decision_snapshots.iloc[0]["winning_asset"], "QQQ")
+
+        portfolio_run = BacktestRun(
+            run_id="portfolio-1",
+            run_name="portfolio-test",
+            target_asset="PORTFOLIO",
+            config_hash="portfolio-hash",
+            train_window=0,
+            validation_window=0,
+            test_window=0,
+            metrics={"robust_score": 2.0, "total_return": 0.05},
+            selected_params={"fallback_mode": "SPY", "component_run_ids": ["run-123", "run-qqq"]},
+            run_type="portfolio_allocator",
+            allocator_mode="saved_runs",
+            fallback_mode="SPY",
+            component_run_ids=["run-123", "run-qqq"],
+            universe_symbols=["SPY", "QQQ"],
+        )
+        portfolio_saved = self.experiments.save_portfolio_run(
+            run=portfolio_run,
+            config={
+                "run_name": "portfolio-test",
+                "allocator_mode": "saved_runs",
+                "fallback_mode": "SPY",
+                "transaction_cost_bps": 2.0,
+                "component_run_ids": ["run-123", "run-qqq"],
+                "universe_symbols": ["SPY", "QQQ"],
+            },
+            trades=pd.DataFrame(
+                {
+                    "signal_session_date": [pd.Timestamp("2025-02-03")],
+                    "next_session_date": [pd.Timestamp("2025-02-04")],
+                    "selected_asset": ["QQQ"],
+                    "trade_taken": [True],
+                    "net_return": [0.01],
+                    "equity_curve": [1.01],
+                },
+            ),
+            decision_history=pd.DataFrame(
+                {
+                    "signal_session_date": [pd.Timestamp("2025-02-03")],
+                    "next_session_date": [pd.Timestamp("2025-02-04")],
+                    "winning_asset": ["QQQ"],
+                    "winning_run_id": ["run-qqq"],
+                    "decision_source": ["eligible"],
+                    "fallback_mode": ["SPY"],
+                    "stance": ["LONG QQQ NEXT SESSION"],
+                    "eligible_asset_count": [2],
+                    "runner_up_asset": ["SPY"],
+                    "winner_score": [0.02],
+                    "runner_up_score": [0.01],
+                },
+            ),
+            candidate_predictions=pd.DataFrame(
+                {
+                    "signal_session_date": [pd.Timestamp("2025-02-03"), pd.Timestamp("2025-02-03")],
+                    "next_session_date": [pd.Timestamp("2025-02-04"), pd.Timestamp("2025-02-04")],
+                    "asset_symbol": ["SPY", "QQQ"],
+                    "run_id": ["run-123", "run-qqq"],
+                    "run_name": ["unit-test-run", "unit-test-run"],
+                    "expected_return_score": [0.01, 0.02],
+                    "confidence": [0.6, 0.7],
+                    "threshold": [0.001, 0.001],
+                    "min_post_count": [1, 1],
+                    "post_count": [5, 6],
+                    "target_available": [True, True],
+                    "tradeable": [True, True],
+                    "signal_qualifies": [True, True],
+                    "qualifies": [True, True],
+                    "eligible_rank": [2, 1],
+                    "is_winner": [False, True],
+                    "decision_source": ["eligible", "eligible"],
+                    "stance": ["FLAT", "LONG QQQ NEXT SESSION"],
+                },
+            ),
+            component_summary=pd.DataFrame(
+                {
+                    "asset_symbol": ["SPY", "QQQ"],
+                    "run_id": ["run-123", "run-qqq"],
+                    "run_name": ["unit-test-run", "unit-test-run"],
+                },
+            ),
+            benchmarks=pd.DataFrame({"benchmark_name": ["strategy", "always_long_spy"]}),
+            benchmark_curves=pd.DataFrame(
+                {
+                    "next_session_date": [pd.Timestamp("2025-02-04")],
+                    "strategy": [1.01],
+                    "always_long_spy": [1.005],
+                },
+            ),
+            diagnostics=pd.DataFrame({"winner_gap_vs_runner_up": [0.01]}),
+            leakage_audit={"overall_pass": True},
+        )
+        self.assertTrue(portfolio_saved.candidate_predictions_path is not None and portfolio_saved.candidate_predictions_path.exists())
+        loaded_portfolio = self.experiments.load_run("portfolio-1")
+        self.assertIsNotNone(loaded_portfolio)
+        assert loaded_portfolio is not None
+        self.assertEqual(loaded_portfolio["run"]["run_type"], "portfolio_allocator")
+        self.assertEqual(loaded_portfolio["config"]["allocator_mode"], "saved_runs")
+        self.assertFalse(loaded_portfolio["candidate_predictions"].empty)
+        self.assertEqual(loaded_portfolio["benchmarks"]["benchmark_name"].tolist(), ["strategy", "always_long_spy"])
+        self.assertEqual(loaded_portfolio["model_artifact"].metadata["run_type"], "portfolio_allocator")
+        latest_after_portfolio = self.experiments.load_latest_model_artifact(target_asset="SPY")
+        self.assertIsNotNone(latest_after_portfolio)
+        assert latest_after_portfolio is not None
+        self.assertEqual(latest_after_portfolio[0].metadata["target_asset"], "SPY")
 
         saved.benchmarks_path.unlink()
         saved.diagnostics_path.unlink()

@@ -14,6 +14,7 @@ from trump_workbench.contracts import (
     LiveMonitorPinnedRun,
     ModelRunConfig,
     NormalizedPost,
+    PortfolioRunConfig,
     PredictionSnapshot,
     SessionFeatureRow,
     TrackedAccount,
@@ -92,6 +93,11 @@ class ConfigAndContractsTests(unittest.TestCase):
             target_next_session_return=0.01,
         )
         config = ModelRunConfig(run_name="test")
+        portfolio_config = PortfolioRunConfig(
+            run_name="portfolio",
+            component_run_ids=("spy-run", "qqq-run"),
+            universe_symbols=("SPY", "QQQ"),
+        )
         snapshot = PredictionSnapshot(
             signal_session_date=pd.Timestamp("2025-02-03"),
             next_session_date=pd.Timestamp("2025-02-04"),
@@ -143,9 +149,11 @@ class ConfigAndContractsTests(unittest.TestCase):
         self.assertEqual(feature_row.to_dict()["post_count"], 2)
         self.assertEqual(config.to_dict()["target_asset"], "SPY")
         self.assertEqual(config.to_dict()["threshold_grid"], list(config.threshold_grid))
+        self.assertEqual(portfolio_config.to_dict()["component_run_ids"], ["spy-run", "qqq-run"])
         self.assertEqual(snapshot.to_dict()["target_asset"], "SPY")
         self.assertEqual(snapshot.to_dict()["stance"], "long")
         self.assertEqual(backtest_run.to_dict()["run_id"], "run-1")
+        self.assertEqual(backtest_run.to_dict()["run_type"], "asset_model")
         self.assertEqual(LiveMonitorConfig.from_dict(live_config.to_dict()).pinned_runs[0].asset_symbol, "SPY")
         self.assertEqual(LinearModelArtifact.from_dict(artifact.to_dict()).feature_names, ["x1"])
 

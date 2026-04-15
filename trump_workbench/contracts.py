@@ -214,10 +214,69 @@ class BacktestRun:
     test_window: int
     metrics: dict[str, float]
     selected_params: dict[str, Any]
+    run_type: str = "asset_model"
+    allocator_mode: str = ""
+    fallback_mode: str = ""
+    component_run_ids: list[str] = field(default_factory=list)
+    universe_symbols: list[str] = field(default_factory=list)
     artifact_paths: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class PortfolioCandidatePrediction:
+    signal_session_date: pd.Timestamp
+    next_session_date: Optional[pd.Timestamp]
+    asset_symbol: str
+    run_id: str
+    run_name: str
+    expected_return_score: float
+    confidence: float
+    threshold: float
+    min_post_count: int
+    post_count: int
+    tradeable: bool = False
+    target_available: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class PortfolioDecision:
+    signal_session_date: pd.Timestamp
+    next_session_date: Optional[pd.Timestamp]
+    winning_asset: str
+    winning_run_id: str
+    decision_source: str
+    fallback_mode: str
+    stance: str
+    eligible_asset_count: int
+    runner_up_asset: str = ""
+    winner_score: float = 0.0
+    runner_up_score: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class PortfolioRunConfig:
+    run_name: str
+    allocator_mode: str = "saved_runs"
+    fallback_mode: str = "SPY"
+    transaction_cost_bps: float = 2.0
+    component_run_ids: tuple[str, ...] = ()
+    universe_symbols: tuple[str, ...] = ()
+    notes: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["component_run_ids"] = list(self.component_run_ids)
+        payload["universe_symbols"] = list(self.universe_symbols)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -294,3 +353,4 @@ class SavedRunArtifacts:
     diagnostics_path: Path
     benchmark_curves_path: Path
     leakage_audit_path: Path
+    candidate_predictions_path: Optional[Path] = None

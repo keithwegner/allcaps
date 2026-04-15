@@ -43,6 +43,8 @@ class DuckDBStore:
                     run_id varchar primary key,
                     run_name varchar,
                     target_asset varchar,
+                    run_type varchar,
+                    allocator_mode varchar,
                     created_at timestamp,
                     config_hash varchar,
                     metrics_json varchar,
@@ -57,6 +59,8 @@ class DuckDBStore:
                 """,
             )
             conn.execute("alter table experiment_runs add column if not exists target_asset varchar")
+            conn.execute("alter table experiment_runs add column if not exists run_type varchar")
+            conn.execute("alter table experiment_runs add column if not exists allocator_mode varchar")
 
     def dataset_path(self, dataset_name: str) -> Path:
         return self.settings.lake_dir / f"{dataset_name}.parquet"
@@ -137,6 +141,8 @@ class DuckDBStore:
         run_id: str,
         run_name: str,
         target_asset: str,
+        run_type: str,
+        allocator_mode: str,
         config_hash: str,
         metrics: dict[str, Any],
         selected_params: dict[str, Any],
@@ -147,14 +153,16 @@ class DuckDBStore:
             conn.execute(
                 """
                 insert into experiment_runs
-                (run_id, run_name, target_asset, created_at, config_hash, metrics_json, selected_params_json,
+                (run_id, run_name, target_asset, run_type, allocator_mode, created_at, config_hash, metrics_json, selected_params_json,
                  summary_path, trades_path, predictions_path, windows_path, importance_path, model_path)
-                values (?, ?, ?, current_timestamp, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                values (?, ?, ?, ?, ?, current_timestamp, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     run_id,
                     run_name,
                     target_asset,
+                    run_type,
+                    allocator_mode,
                     config_hash,
                     json.dumps(metrics, default=str),
                     json.dumps(selected_params, default=str),
@@ -178,6 +186,14 @@ class DuckDBStore:
             ).fetchdf()
         if df.empty:
             return df
+        if "run_type" not in df.columns:
+            df["run_type"] = "asset_model"
+        else:
+            df["run_type"] = df["run_type"].fillna("asset_model").replace("", "asset_model")
+        if "allocator_mode" not in df.columns:
+            df["allocator_mode"] = ""
+        else:
+            df["allocator_mode"] = df["allocator_mode"].fillna("")
         df["metrics_json"] = df["metrics_json"].map(json.loads)
         df["selected_params_json"] = df["selected_params_json"].map(json.loads)
         return df

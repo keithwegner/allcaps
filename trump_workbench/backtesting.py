@@ -9,8 +9,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .contracts import BacktestRun, ModelRunConfig
+from .contracts import BacktestRun, ModelRunConfig, PortfolioRunConfig
 from .modeling import ModelService
+from .portfolio import build_portfolio_decision_history
 
 
 def compute_metrics(returns: pd.Series, positions: pd.Series) -> dict[str, float]:
@@ -72,6 +73,28 @@ def simulate_position_mask(
     trades["trade_taken"] = position_mask.astype(bool)
     trades["position"] = trades["trade_taken"].astype(float)
     trades["gross_return"] = (trades["next_session_close"] / trades["next_session_open"] - 1.0).fillna(0.0)
+    round_trip_cost = (transaction_cost_bps / 10000.0) * 2.0
+    trades["net_return"] = np.where(trades["trade_taken"], trades["gross_return"] - round_trip_cost, 0.0)
+    trades["benchmark_return"] = trades["gross_return"].fillna(0.0)
+    trades["equity_curve"] = (1.0 + trades["net_return"]).cumprod()
+    trades["signal_name"] = signal_name
+    metrics = compute_metrics(trades["net_return"], trades["position"])
+    return trades.reset_index(drop=True), metrics
+
+
+def simulate_position_mask_aligned(
+    frame: pd.DataFrame,
+    signal_name: str,
+    position_mask: pd.Series,
+    transaction_cost_bps: float,
+) -> tuple[pd.DataFrame, dict[str, float]]:
+    trades = frame.copy().reset_index(drop=True)
+    position_mask = position_mask.reindex(trades.index).fillna(False)
+    valid_rows = trades["next_session_open"].notna() & trades["next_session_close"].notna()
+    trades["trade_taken"] = position_mask.astype(bool) & valid_rows
+    trades["position"] = trades["trade_taken"].astype(float)
+    gross_return = (trades["next_session_close"] / trades["next_session_open"] - 1.0).replace([np.inf, -np.inf], np.nan)
+    trades["gross_return"] = np.where(trades["trade_taken"], gross_return.fillna(0.0), 0.0)
     round_trip_cost = (transaction_cost_bps / 10000.0) * 2.0
     trades["net_return"] = np.where(trades["trade_taken"], trades["gross_return"] - round_trip_cost, 0.0)
     trades["benchmark_return"] = trades["gross_return"].fillna(0.0)
@@ -221,6 +244,204 @@ def build_benchmark_suite(
         curve[name] = trades["equity_curve"].to_numpy()
     benchmarks = pd.DataFrame(metric_rows).sort_values("robust_score", ascending=False).reset_index(drop=True)
     return benchmarks, curve
+
+
+def build_portfolio_trade_log(
+    decision_history: pd.DataFrame,
+    candidate_predictions: pd.DataFrame,
+    transaction_cost_bps: float,
+) -> tuple[pd.DataFrame, dict[str, float]]:
+    if decision_history.empty:
+        return pd.DataFrame(), compute_metrics(pd.Series(dtype=float), pd.Series(dtype=float))
+
+    decisions = decision_history.sort_values("signal_session_date").reset_index(drop=True).copy()
+    winner_fields = candidate_predictions[
+        [
+            "signal_session_date",
+            "asset_symbol",
+            "run_id",
+            "run_name",
+            "expected_return_score",
+            "confidence",
+            "threshold",
+            "min_post_count",
+            "post_count",
+            "next_session_open",
+            "next_session_close",
+            "tradeable",
+        ]
+    ].copy()
+    trades = decisions.merge(
+        winner_fields,
+        left_on=["signal_session_date", "winning_asset", "winning_run_id"],
+        right_on=["signal_session_date", "asset_symbol", "run_id"],
+        how="left",
+        suffixes=("", "_winner"),
+    )
+    trades, metrics = simulate_position_mask_aligned(
+        trades,
+        signal_name="portfolio_strategy",
+        position_mask=trades["winning_asset"].fillna("").astype(str) != "",
+        transaction_cost_bps=transaction_cost_bps,
+    )
+    trades["selected_asset"] = trades["winning_asset"]
+    trades["selected_run_name"] = trades["run_name"].fillna("")
+    trades["winner_confidence"] = pd.to_numeric(trades["confidence"], errors="coerce")
+    trades["winner_threshold"] = pd.to_numeric(trades["threshold"], errors="coerce")
+    trades["winner_post_count"] = pd.to_numeric(trades["post_count"], errors="coerce").fillna(0).astype(int)
+    return trades.reset_index(drop=True), metrics
+
+
+def build_portfolio_benchmark_suite(
+    decision_history: pd.DataFrame,
+    candidate_predictions: pd.DataFrame,
+    strategy_trades: pd.DataFrame,
+    strategy_metrics: dict[str, float],
+    transaction_cost_bps: float,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if decision_history.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    base_sessions = decision_history.sort_values("signal_session_date").reset_index(drop=True).copy()
+    base_sessions["next_session_open"] = np.nan
+    base_sessions["next_session_close"] = np.nan
+    curve = pd.DataFrame({"next_session_date": base_sessions["next_session_date"]})
+    metric_rows: list[dict[str, Any]] = []
+    strategies: list[tuple[str, pd.DataFrame, pd.Series, dict[str, float] | None]] = [
+        ("strategy", strategy_trades.copy(), strategy_trades["trade_taken"].astype(bool), strategy_metrics),
+        ("always_flat", base_sessions.copy(), pd.Series(False, index=base_sessions.index), None),
+    ]
+    for asset_symbol in sorted(
+        candidate_predictions["asset_symbol"].dropna().astype(str).str.upper().unique().tolist(),
+    ):
+        asset_frame = base_sessions[["signal_session_date", "next_session_date"]].merge(
+            candidate_predictions.loc[
+                candidate_predictions["asset_symbol"].astype(str).str.upper() == asset_symbol,
+                ["signal_session_date", "next_session_open", "next_session_close", "tradeable"],
+            ],
+            on="signal_session_date",
+            how="left",
+        )
+        strategies.append(
+            (
+                f"always_long_{asset_symbol.lower()}",
+                asset_frame,
+                pd.Series(asset_frame["tradeable"], dtype="boolean").fillna(False).astype(bool),
+                None,
+            ),
+        )
+
+    strategy_total_return = strategy_metrics.get("total_return", 0.0)
+    for name, frame, mask, precomputed_metrics in strategies:
+        if precomputed_metrics is not None:
+            metrics = precomputed_metrics
+            trades = strategy_trades.copy().reset_index(drop=True)
+        else:
+            trades, metrics = simulate_position_mask_aligned(
+                frame,
+                signal_name=name,
+                position_mask=mask,
+                transaction_cost_bps=transaction_cost_bps,
+            )
+        row = {"benchmark_name": name, **metrics, "target_asset": "PORTFOLIO"}
+        row["excess_total_return_vs_strategy"] = float(metrics["total_return"] - strategy_total_return)
+        metric_rows.append(row)
+        curve[name] = trades["equity_curve"].to_numpy()
+
+    benchmarks = pd.DataFrame(metric_rows).sort_values("robust_score", ascending=False).reset_index(drop=True)
+    return benchmarks, curve
+
+
+def build_portfolio_decision_diagnostics(
+    decision_history: pd.DataFrame,
+    candidate_predictions: pd.DataFrame,
+) -> pd.DataFrame:
+    if decision_history.empty:
+        return pd.DataFrame()
+
+    winner_lookup = candidate_predictions[
+        [
+            "signal_session_date",
+            "asset_symbol",
+            "run_id",
+            "confidence",
+            "threshold",
+            "post_count",
+            "tradeable",
+            "signal_qualifies",
+            "qualifies",
+        ]
+    ].copy()
+    diagnostics = decision_history.merge(
+        winner_lookup,
+        left_on=["signal_session_date", "winning_asset", "winning_run_id"],
+        right_on=["signal_session_date", "asset_symbol", "run_id"],
+        how="left",
+    )
+    diagnostics["winner_gap_vs_runner_up"] = (
+        pd.to_numeric(diagnostics["winner_score"], errors="coerce")
+        - pd.to_numeric(diagnostics["runner_up_score"], errors="coerce")
+    )
+    diagnostics["winner_gap_vs_threshold"] = (
+        pd.to_numeric(diagnostics["winner_score"], errors="coerce")
+        - pd.to_numeric(diagnostics["threshold"], errors="coerce")
+    )
+    keep = [
+        "signal_session_date",
+        "next_session_date",
+        "winning_asset",
+        "winning_run_id",
+        "decision_source",
+        "fallback_mode",
+        "eligible_asset_count",
+        "runner_up_asset",
+        "winner_score",
+        "runner_up_score",
+        "winner_gap_vs_runner_up",
+        "winner_gap_vs_threshold",
+        "confidence",
+        "post_count",
+        "tradeable",
+        "signal_qualifies",
+        "qualifies",
+    ]
+    return diagnostics[keep].sort_values("signal_session_date").reset_index(drop=True)
+
+
+def build_portfolio_leakage_audit(
+    component_bundles: dict[str, dict[str, Any]],
+    candidate_predictions: pd.DataFrame,
+    decision_history: pd.DataFrame,
+) -> dict[str, Any]:
+    duplicate_candidate_rows = int(
+        candidate_predictions.duplicated(subset=["signal_session_date", "asset_symbol"], keep=False).sum(),
+    ) if not candidate_predictions.empty else 0
+    component_audits = {
+        run_id: bool((bundle.get("leakage_audit", {}) or {}).get("overall_pass", True))
+        for run_id, bundle in component_bundles.items()
+    }
+    untradable_winner_rows = 0
+    if not decision_history.empty and not candidate_predictions.empty:
+        winner_rows = decision_history.merge(
+            candidate_predictions[["signal_session_date", "asset_symbol", "run_id", "tradeable"]],
+            left_on=["signal_session_date", "winning_asset", "winning_run_id"],
+            right_on=["signal_session_date", "asset_symbol", "run_id"],
+            how="left",
+        )
+        untradable_winner_rows = int(
+            (
+                winner_rows["winning_asset"].fillna("").astype(str).ne("")
+                & ~winner_rows["tradeable"].fillna(False).astype(bool)
+            ).sum(),
+        )
+    overall_pass = duplicate_candidate_rows == 0 and untradable_winner_rows == 0 and all(component_audits.values())
+    return {
+        "overall_pass": overall_pass,
+        "duplicate_candidate_rows": duplicate_candidate_rows,
+        "untradable_winner_rows": untradable_winner_rows,
+        "component_runs": component_audits,
+        "rows_audited": int(len(candidate_predictions)),
+    }
 
 
 class BacktestService:
@@ -477,6 +698,78 @@ class BacktestService:
         }
         return run, artifacts
 
+    def run_saved_run_allocator(
+        self,
+        run_config: PortfolioRunConfig,
+        component_bundles: dict[str, dict[str, Any]],
+    ) -> tuple[BacktestRun, dict[str, Any]]:
+        candidate_predictions = self._build_candidate_predictions_from_saved_runs(component_bundles)
+        if candidate_predictions.empty:
+            raise RuntimeError("No eligible saved-run predictions were available for the portfolio allocator.")
+
+        candidate_board, decision_history = build_portfolio_decision_history(
+            candidate_predictions,
+            fallback_mode=run_config.fallback_mode,
+            require_tradeable=True,
+        )
+        if decision_history.empty:
+            raise RuntimeError("The portfolio allocator could not produce any session decisions.")
+
+        trades, metrics = build_portfolio_trade_log(
+            decision_history=decision_history,
+            candidate_predictions=candidate_board,
+            transaction_cost_bps=run_config.transaction_cost_bps,
+        )
+        diagnostics = build_portfolio_decision_diagnostics(decision_history, candidate_board)
+        benchmarks, benchmark_curves = build_portfolio_benchmark_suite(
+            decision_history=decision_history,
+            candidate_predictions=candidate_board,
+            strategy_trades=trades,
+            strategy_metrics=metrics,
+            transaction_cost_bps=run_config.transaction_cost_bps,
+        )
+        leakage_audit = build_portfolio_leakage_audit(component_bundles, candidate_board, decision_history)
+        component_summary = self._build_component_summary(component_bundles)
+
+        config_hash = hashlib.sha1(str(run_config.to_dict()).encode("utf-8")).hexdigest()[:12]
+        run_id = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{config_hash}"
+        run = BacktestRun(
+            run_id=run_id,
+            run_name=run_config.run_name,
+            target_asset="PORTFOLIO",
+            config_hash=config_hash,
+            train_window=0,
+            validation_window=0,
+            test_window=0,
+            metrics=metrics,
+            selected_params={
+                "fallback_mode": run_config.fallback_mode,
+                "transaction_cost_bps": float(run_config.transaction_cost_bps),
+                "component_run_ids": list(run_config.component_run_ids),
+                "universe_symbols": list(run_config.universe_symbols),
+                "component_deployments": component_summary.to_dict("records"),
+            },
+            run_type="portfolio_allocator",
+            allocator_mode=run_config.allocator_mode,
+            fallback_mode=run_config.fallback_mode,
+            component_run_ids=list(run_config.component_run_ids),
+            universe_symbols=list(run_config.universe_symbols),
+        )
+        artifacts = {
+            "run": asdict(run),
+            "config": run_config.to_dict(),
+            "trades": trades,
+            "predictions": decision_history,
+            "candidate_predictions": candidate_board,
+            "windows": component_summary,
+            "importance": pd.DataFrame(),
+            "benchmarks": benchmarks,
+            "diagnostics": diagnostics,
+            "benchmark_curves": benchmark_curves,
+            "leakage_audit": leakage_audit,
+        }
+        return run, artifacts
+
     @staticmethod
     def _apply_account_weight(df: pd.DataFrame, account_weight: float) -> pd.DataFrame:
         adjusted = df.copy()
@@ -484,3 +777,65 @@ class BacktestService:
             if column in adjusted.columns:
                 adjusted[column] = adjusted[column] * account_weight
         return adjusted
+
+    @staticmethod
+    def _build_candidate_predictions_from_saved_runs(
+        component_bundles: dict[str, dict[str, Any]],
+    ) -> pd.DataFrame:
+        rows: list[pd.DataFrame] = []
+        for run_id, bundle in component_bundles.items():
+            run_meta = bundle.get("run", {}) or {}
+            run_type = str(run_meta.get("run_type") or "asset_model")
+            if run_type != "asset_model":
+                continue
+            config = bundle.get("config", {}) or {}
+            selected = bundle.get("selected_params", {}) or {}
+            predictions = bundle.get("predictions", pd.DataFrame()).copy()
+            if predictions.empty:
+                continue
+            target_asset = str(config.get("target_asset") or run_meta.get("target_asset") or "SPY").upper()
+            predictions["asset_symbol"] = target_asset
+            predictions["run_id"] = str(run_id)
+            predictions["run_name"] = str(run_meta.get("run_name") or run_id)
+            predictions["confidence"] = pd.to_numeric(
+                predictions.get("prediction_confidence", pd.Series(0.0, index=predictions.index)),
+                errors="coerce",
+            ).fillna(0.0)
+            predictions["threshold"] = float(selected.get("threshold", 0.0) or 0.0)
+            min_post_count = selected.get("min_post_count", 1)
+            predictions["min_post_count"] = int(min_post_count if min_post_count is not None else 1)
+            if "tradeable" not in predictions.columns:
+                predictions["tradeable"] = predictions.get("target_available", False)
+            predictions["tradeable"] = predictions["tradeable"].fillna(predictions.get("target_available", False)).astype(bool)
+            predictions["source_run_type"] = run_type
+            rows.append(predictions)
+        if not rows:
+            return pd.DataFrame()
+        combined = pd.concat(rows, ignore_index=True)
+        combined["signal_session_date"] = pd.to_datetime(combined["signal_session_date"], errors="coerce")
+        combined = combined.dropna(subset=["signal_session_date"]).copy()
+        combined = combined.drop_duplicates(subset=["signal_session_date", "asset_symbol", "run_id"], keep="last")
+        return combined.sort_values(["signal_session_date", "asset_symbol"]).reset_index(drop=True)
+
+    @staticmethod
+    def _build_component_summary(component_bundles: dict[str, dict[str, Any]]) -> pd.DataFrame:
+        rows: list[dict[str, Any]] = []
+        for run_id, bundle in component_bundles.items():
+            run_meta = bundle.get("run", {}) or {}
+            config = bundle.get("config", {}) or {}
+            selected = bundle.get("selected_params", {}) or {}
+            predictions = bundle.get("predictions", pd.DataFrame())
+            rows.append(
+                {
+                    "asset_symbol": str(config.get("target_asset") or run_meta.get("target_asset") or "SPY").upper(),
+                    "run_id": str(run_id),
+                    "run_name": str(run_meta.get("run_name") or run_id),
+                    "run_type": str(run_meta.get("run_type") or "asset_model"),
+                    "feature_version": str(config.get("feature_version", "v1")),
+                    "model_version": str(predictions.get("model_version", pd.Series(dtype=str)).iloc[-1]) if not predictions.empty and "model_version" in predictions.columns else "",
+                    "threshold": float(selected.get("threshold", 0.0) or 0.0),
+                    "min_post_count": int(selected.get("min_post_count", 1) if selected.get("min_post_count", 1) is not None else 1),
+                    "prediction_rows": int(len(predictions)),
+                },
+            )
+        return pd.DataFrame(rows).sort_values(["asset_symbol", "run_id"]).reset_index(drop=True) if rows else pd.DataFrame()

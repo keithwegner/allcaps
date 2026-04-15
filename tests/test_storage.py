@@ -53,6 +53,8 @@ class StorageTests(unittest.TestCase):
             run_id="run-1",
             run_name="coverage test",
             target_asset="SPY",
+            run_type="asset_model",
+            allocator_mode="",
             config_hash="hash-1",
             metrics={"sharpe": 1.2},
             selected_params={"threshold": 0.001},
@@ -69,6 +71,8 @@ class StorageTests(unittest.TestCase):
         records = self.store.list_run_records()
         self.assertEqual(len(records), 1)
         self.assertEqual(records.iloc[0]["target_asset"], "SPY")
+        self.assertEqual(records.iloc[0]["run_type"], "asset_model")
+        self.assertEqual(records.iloc[0]["allocator_mode"], "")
         self.assertEqual(records.iloc[0]["metrics_json"]["sharpe"], 1.2)
         self.assertEqual(records.iloc[0]["selected_params_json"]["threshold"], 0.001)
 
