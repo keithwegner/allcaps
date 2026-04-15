@@ -11,7 +11,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from .backtesting import BacktestService
-from .config import AppSettings, DEFAULT_ETF_SYMBOLS
+from .config import AppSettings, DEFAULT_ETF_SYMBOLS, EASTERN
 from .contracts import (
     LiveMonitorConfig,
     LiveMonitorPinnedRun,
@@ -26,6 +26,16 @@ from .enrichment import LLMEnrichmentService
 from .explanations import build_account_attribution, build_post_attribution
 from .experiments import ExperimentStore
 from .features import FeatureService, latest_feature_preview, map_posts_to_trade_sessions
+from .health import (
+    HEALTH_CHECK_COLUMNS,
+    REFRESH_HISTORY_COLUMNS,
+    DataHealthService,
+    build_health_summary,
+    build_health_trend_frame,
+    create_refresh_id,
+    ensure_refresh_history_frame,
+    make_refresh_history_frame,
+)
 from .ingestion import IngestionService, TruthSocialArchiveAdapter, XCsvAdapter
 from .market import MarketDataService, build_asset_universe, build_watchlist_frame, normalize_symbols
 from .modeling import (
@@ -625,87 +635,118 @@ def _refresh_datasets(
     market_service: MarketDataService,
     discovery_service: DiscoveryService,
     feature_service: FeatureService,
+    health_service: DataHealthService,
     remote_url: str,
     uploaded_files: list[Any],
     incremental: bool = False,
+    refresh_mode: str = "full",
 ) -> dict[str, Any]:
-    adapters = _build_adapters(settings, remote_url, uploaded_files)
-    existing_posts = store.read_frame("normalized_posts")
-    last_cursor = pd.to_datetime(existing_posts["post_timestamp"], errors="coerce").max() if not existing_posts.empty else None
-    if incremental and last_cursor is not None:
-        new_posts, source_manifest = ingestion_service.run_incremental_refresh(adapters, last_cursor=last_cursor)
-        posts = pd.concat([existing_posts, new_posts], ignore_index=True) if not existing_posts.empty else new_posts
-        posts = posts.drop_duplicates(subset=["post_id"], keep="last").sort_values("post_timestamp").reset_index(drop=True)
-    else:
-        posts, source_manifest = ingestion_service.run_refresh(adapters)
-    store.save_frame("normalized_posts", posts, metadata={"row_count": int(len(posts))})
-    store.save_frame("source_manifests", source_manifest, metadata={"row_count": int(len(source_manifest))})
+    started_at = pd.Timestamp.now(tz="UTC")
+    resolved_mode = str(refresh_mode or ("incremental" if incremental else "full"))
+    refresh_id = create_refresh_id(resolved_mode, started_at)
 
-    start = settings.term_start.strftime("%Y-%m-%d")
-    end = pd.Timestamp.now(tz=settings.timezone).strftime("%Y-%m-%d")
-    sp500 = market_service.load_sp500_daily(start, end)
-    spy = market_service.load_spy_daily(start, end)
-    store.save_frame("sp500_daily", sp500, metadata={"row_count": int(len(sp500))})
-    store.save_frame("spy_daily", spy, metadata={"row_count": int(len(spy))})
+    try:
+        adapters = _build_adapters(settings, remote_url, uploaded_files)
+        existing_posts = store.read_frame("normalized_posts")
+        last_cursor = pd.to_datetime(existing_posts["post_timestamp"], errors="coerce").max() if not existing_posts.empty else None
+        if incremental and last_cursor is not None:
+            new_posts, source_manifest = ingestion_service.run_incremental_refresh(adapters, last_cursor=last_cursor)
+            posts = pd.concat([existing_posts, new_posts], ignore_index=True) if not existing_posts.empty else new_posts
+            posts = posts.drop_duplicates(subset=["post_id"], keep="last").sort_values("post_timestamp").reset_index(drop=True)
+        else:
+            posts, source_manifest = ingestion_service.run_refresh(adapters)
+        store.save_frame("normalized_posts", posts, metadata={"row_count": int(len(posts))})
+        store.save_frame("source_manifests", source_manifest, metadata={"row_count": int(len(source_manifest))})
 
-    watchlist_symbols = _watchlist_symbols(store)
-    watchlist, asset_universe = _save_watchlist(store, watchlist_symbols)
-    asset_symbols = asset_universe["symbol"].astype(str).tolist() if not asset_universe.empty else list(DEFAULT_ETF_SYMBOLS)
-    asset_daily, daily_manifest = market_service.load_assets_daily(asset_symbols, start, end)
-    asset_intraday, intraday_manifest = market_service.load_assets_intraday(asset_symbols, interval="5m", lookback_days=30)
-    asset_market_manifest = pd.concat([daily_manifest, intraday_manifest], ignore_index=True)
-    store.save_frame("asset_daily", asset_daily, metadata={"row_count": int(len(asset_daily)), "symbols": asset_symbols})
-    store.save_frame(
-        "asset_intraday",
-        asset_intraday,
-        metadata={"row_count": int(len(asset_intraday)), "symbols": asset_symbols, "interval": "5m", "lookback_days": 30},
-    )
-    store.save_frame("asset_market_manifest", asset_market_manifest, metadata={"row_count": int(len(asset_market_manifest))})
+        start = settings.term_start.strftime("%Y-%m-%d")
+        end = pd.Timestamp.now(tz=settings.timezone).strftime("%Y-%m-%d")
+        sp500 = market_service.load_sp500_daily(start, end)
+        spy = market_service.load_spy_daily(start, end)
+        store.save_frame("sp500_daily", sp500, metadata={"row_count": int(len(sp500))})
+        store.save_frame("spy_daily", spy, metadata={"row_count": int(len(spy))})
 
-    as_of = posts["post_timestamp"].max() if not posts.empty else pd.Timestamp.now(tz=settings.timezone)
-    tracked_accounts, ranking_history = _rebuild_discovery_state(store, discovery_service, posts, as_of)
-    prepared_posts = feature_service.prepare_session_posts(
-        posts=posts,
-        market_calendar=spy,
-        tracked_accounts=tracked_accounts,
-        llm_enabled=True,
-    )
-    asset_post_mappings = feature_service.build_asset_post_mappings(
-        prepared_posts=prepared_posts,
-        asset_universe=asset_universe,
-        llm_enabled=True,
-    )
-    asset_session_features = feature_service.build_asset_session_dataset(
-        asset_post_mappings=asset_post_mappings,
-        asset_market=asset_daily,
-        feature_version="asset-v1",
-        llm_enabled=True,
-        asset_universe=asset_universe,
-    )
-    store.save_frame(
-        "asset_post_mappings",
-        asset_post_mappings,
-        metadata={"row_count": int(len(asset_post_mappings)), "match_mode": "rules_plus_semantic"},
-    )
-    store.save_frame(
-        "asset_session_features",
-        asset_session_features,
-        metadata={"row_count": int(len(asset_session_features)), "feature_version": "asset-v1"},
-    )
-    return {
-        "posts": posts,
-        "source_manifest": source_manifest,
-        "sp500": sp500,
-        "spy": spy,
-        "asset_watchlist": watchlist,
-        "asset_universe": asset_universe,
-        "asset_daily": asset_daily,
-        "asset_intraday": asset_intraday,
-        "asset_market_manifest": asset_market_manifest,
-        "asset_post_mappings": asset_post_mappings,
-        "asset_session_features": asset_session_features,
-        "tracked_accounts": tracked_accounts,
-    }
+        watchlist_symbols = _watchlist_symbols(store)
+        watchlist, asset_universe = _save_watchlist(store, watchlist_symbols)
+        asset_symbols = asset_universe["symbol"].astype(str).tolist() if not asset_universe.empty else list(DEFAULT_ETF_SYMBOLS)
+        asset_daily, daily_manifest = market_service.load_assets_daily(asset_symbols, start, end)
+        asset_intraday, intraday_manifest = market_service.load_assets_intraday(asset_symbols, interval="5m", lookback_days=30)
+        asset_market_manifest = pd.concat([daily_manifest, intraday_manifest], ignore_index=True)
+        store.save_frame("asset_daily", asset_daily, metadata={"row_count": int(len(asset_daily)), "symbols": asset_symbols})
+        store.save_frame(
+            "asset_intraday",
+            asset_intraday,
+            metadata={"row_count": int(len(asset_intraday)), "symbols": asset_symbols, "interval": "5m", "lookback_days": 30},
+        )
+        store.save_frame("asset_market_manifest", asset_market_manifest, metadata={"row_count": int(len(asset_market_manifest))})
+
+        as_of = posts["post_timestamp"].max() if not posts.empty else pd.Timestamp.now(tz=settings.timezone)
+        tracked_accounts, ranking_history = _rebuild_discovery_state(store, discovery_service, posts, as_of)
+        prepared_posts = feature_service.prepare_session_posts(
+            posts=posts,
+            market_calendar=spy,
+            tracked_accounts=tracked_accounts,
+            llm_enabled=True,
+        )
+        asset_post_mappings = feature_service.build_asset_post_mappings(
+            prepared_posts=prepared_posts,
+            asset_universe=asset_universe,
+            llm_enabled=True,
+        )
+        asset_session_features = feature_service.build_asset_session_dataset(
+            asset_post_mappings=asset_post_mappings,
+            asset_market=asset_daily,
+            feature_version="asset-v1",
+            llm_enabled=True,
+            asset_universe=asset_universe,
+        )
+        store.save_frame(
+            "asset_post_mappings",
+            asset_post_mappings,
+            metadata={"row_count": int(len(asset_post_mappings)), "match_mode": "rules_plus_semantic"},
+        )
+        store.save_frame(
+            "asset_session_features",
+            asset_session_features,
+            metadata={"row_count": int(len(asset_session_features)), "feature_version": "asset-v1"},
+        )
+        completed_at = pd.Timestamp.now(tz="UTC")
+        health_latest = health_service.persist_snapshot(store, refresh_id=refresh_id, generated_at=completed_at)
+        refresh_history = _append_refresh_history(
+            store=store,
+            refresh_id=refresh_id,
+            refresh_mode=resolved_mode,
+            status="success",
+            started_at=started_at,
+            completed_at=completed_at,
+        )
+        return {
+            "posts": posts,
+            "source_manifest": source_manifest,
+            "sp500": sp500,
+            "spy": spy,
+            "asset_watchlist": watchlist,
+            "asset_universe": asset_universe,
+            "asset_daily": asset_daily,
+            "asset_intraday": asset_intraday,
+            "asset_market_manifest": asset_market_manifest,
+            "asset_post_mappings": asset_post_mappings,
+            "asset_session_features": asset_session_features,
+            "tracked_accounts": tracked_accounts,
+            "data_health_latest": health_latest,
+            "refresh_history": refresh_history,
+            "refresh_id": refresh_id,
+        }
+    except Exception as exc:
+        _append_refresh_history(
+            store=store,
+            refresh_id=refresh_id,
+            refresh_mode=resolved_mode,
+            status="error",
+            started_at=started_at,
+            completed_at=pd.Timestamp.now(tz="UTC"),
+            error_message=str(exc),
+        )
+        raise
 
 
 def _ensure_bootstrap(
@@ -715,6 +756,7 @@ def _ensure_bootstrap(
     market_service: MarketDataService,
     discovery_service: DiscoveryService,
     feature_service: FeatureService,
+    health_service: DataHealthService,
 ) -> None:
     if store.read_frame("asset_watchlist").empty and store.read_frame("asset_universe").empty:
         _save_watchlist(store, [])
@@ -734,9 +776,11 @@ def _ensure_bootstrap(
             market_service=market_service,
             discovery_service=discovery_service,
             feature_service=feature_service,
+            health_service=health_service,
             remote_url=st.session_state.get("remote_x_url", ""),
             uploaded_files=[],
             incremental=False,
+            refresh_mode="bootstrap",
         )
 
 
@@ -827,6 +871,66 @@ def _render_equity_curve_comparison(curves_by_run: dict[str, pd.DataFrame], titl
     st.plotly_chart(fig, use_container_width=True)
 
 
+def _append_refresh_history(
+    store: DuckDBStore,
+    refresh_id: str,
+    refresh_mode: str,
+    status: str,
+    started_at: pd.Timestamp,
+    completed_at: pd.Timestamp,
+    error_message: str = "",
+) -> pd.DataFrame:
+    refresh_row = make_refresh_history_frame(
+        refresh_id=refresh_id,
+        refresh_mode=refresh_mode,
+        status=status,
+        started_at=started_at,
+        completed_at=completed_at,
+        error_message=error_message,
+    )
+    store.append_frame(
+        "refresh_history",
+        refresh_row,
+        dedupe_on=["refresh_id"],
+        metadata={"latest_status": status, "latest_refresh_mode": refresh_mode},
+    )
+    return ensure_refresh_history_frame(store.read_frame("refresh_history"))
+
+
+def _load_data_health_view_state(
+    store: DuckDBStore,
+    health_service: DataHealthService,
+) -> dict[str, pd.DataFrame | dict[str, Any]]:
+    latest = store.read_frame("data_health_latest")
+    if latest.empty:
+        latest = health_service.evaluate_store(store)
+    history = store.read_frame("data_health_history")
+    refresh_history = ensure_refresh_history_frame(store.read_frame("refresh_history"))
+    trend_source = history if not history.empty else latest
+    return {
+        "latest": latest if not latest.empty else pd.DataFrame(columns=HEALTH_CHECK_COLUMNS),
+        "history": history if not history.empty else pd.DataFrame(columns=HEALTH_CHECK_COLUMNS),
+        "refresh_history": refresh_history,
+        "summary": build_health_summary(latest, refresh_history),
+        "trend": build_health_trend_frame(trend_source),
+    }
+
+
+def _filter_health_rows(
+    health_rows: pd.DataFrame,
+    severities: list[str] | tuple[str, ...],
+    scope_kind: str,
+) -> pd.DataFrame:
+    if health_rows.empty:
+        return pd.DataFrame(columns=HEALTH_CHECK_COLUMNS)
+    filtered = health_rows.copy()
+    if severities:
+        filtered = filtered.loc[filtered["severity"].astype(str).isin([str(item).lower() for item in severities])].copy()
+    if scope_kind and scope_kind != "All":
+        filtered = filtered.loc[filtered["scope_kind"].astype(str) == str(scope_kind)].copy()
+    return filtered.reset_index(drop=True)
+
+
 def render_datasets_view(
     settings: AppSettings,
     store: DuckDBStore,
@@ -834,6 +938,7 @@ def render_datasets_view(
     market_service: MarketDataService,
     discovery_service: DiscoveryService,
     feature_service: FeatureService,
+    health_service: DataHealthService,
 ) -> None:
     st.subheader("Datasets")
     st.caption("Refresh historical sources, store normalized datasets, and inspect the local DuckDB + Parquet catalog.")
@@ -880,8 +985,10 @@ def render_datasets_view(
                 market_service=market_service,
                 discovery_service=discovery_service,
                 feature_service=feature_service,
+                health_service=health_service,
                 remote_url=remote_url,
                 uploaded_files=uploaded_files or [],
+                refresh_mode="full",
             )
         st.success(
             f"Refreshed {len(summary['posts']):,} normalized posts, {len(summary['asset_daily']):,} daily market rows, "
@@ -896,13 +1003,118 @@ def render_datasets_view(
                 market_service=market_service,
                 discovery_service=discovery_service,
                 feature_service=feature_service,
+                health_service=health_service,
                 remote_url=remote_url,
                 uploaded_files=uploaded_files or [],
                 incremental=True,
+                refresh_mode="incremental",
             )
         st.success(
             f"Incremental refresh complete. Total posts stored: {len(summary['posts']):,}. "
             f"Asset intraday rows stored: {len(summary['asset_intraday']):,}.",
+        )
+
+    health_state = _load_data_health_view_state(store, health_service)
+    latest_health = health_state["latest"]
+    refresh_history = health_state["refresh_history"]
+    trend = health_state["trend"]
+    summary = health_state["summary"]
+
+    st.markdown("**Data Health**")
+    st.caption("Warn-only checks for freshness, completeness, manifest errors, duplicates, and anomaly drift across refresh history.")
+    overall_severity = str(summary.get("overall_severity", "ok"))
+    if overall_severity == "severe":
+        st.error("Severe data health issues are present. Workflows remain available, but the stored datasets need inspection.")
+    elif overall_severity == "warn":
+        st.warning("Dataset health warnings are present. Workflows remain available, but review the checks below.")
+    else:
+        st.success("No current warning or severe data health checks are active.")
+
+    last_refresh_at = summary.get("last_refresh_at", pd.NaT)
+    if pd.notna(last_refresh_at):
+        last_refresh_label = pd.Timestamp(last_refresh_at).tz_convert(EASTERN).strftime("%Y-%m-%d %H:%M")
+    else:
+        last_refresh_label = "n/a"
+    metric_cols = st.columns(6)
+    metric_cols[0].metric("Overall", str(summary.get("overall_severity", "ok")).upper())
+    metric_cols[1].metric("Severe", f"{int(summary.get('severe_count', 0))}")
+    metric_cols[2].metric("Warn", f"{int(summary.get('warn_count', 0))}")
+    metric_cols[3].metric("Anomalies", f"{int(summary.get('anomaly_count', 0))}")
+    metric_cols[4].metric("Last refresh", last_refresh_label)
+    metric_cols[5].metric(
+        "Refresh status",
+        str(summary.get("last_refresh_status", "n/a")).upper(),
+        str(summary.get("last_refresh_mode", "")).upper(),
+    )
+
+    latest_health = latest_health.copy() if isinstance(latest_health, pd.DataFrame) else pd.DataFrame(columns=HEALTH_CHECK_COLUMNS)
+    if not latest_health.empty:
+        latest_health["generated_at"] = pd.to_datetime(latest_health["generated_at"], errors="coerce", utc=True)
+        latest_health["observed_value"] = pd.to_numeric(latest_health["observed_value"], errors="coerce")
+        latest_health["baseline_value"] = pd.to_numeric(latest_health["baseline_value"], errors="coerce")
+        latest_health["severity"] = latest_health["severity"].astype(str)
+        latest_health["generated_at"] = latest_health["generated_at"].dt.tz_convert(EASTERN)
+
+    filter_cols = st.columns([2, 2, 3])
+    default_severities = [severity for severity in ["warn", "severe"] if latest_health.empty or severity in latest_health["severity"].astype(str).unique()]
+    selected_severities = filter_cols[0].multiselect(
+        "Health severities",
+        options=["warn", "severe", "ok"],
+        default=default_severities or ["warn", "severe"],
+        key="datasets_health_severities",
+    )
+    scope_options = ["All"]
+    if not latest_health.empty and "scope_kind" in latest_health.columns:
+        scope_options.extend(sorted(latest_health["scope_kind"].dropna().astype(str).unique().tolist()))
+    selected_scope = filter_cols[1].selectbox("Scope kind", options=scope_options, index=0, key="datasets_health_scope")
+    filter_cols[2].caption("The table defaults to current warnings and severe checks. Add `ok` to inspect the full snapshot.")
+    filtered_health = _filter_health_rows(latest_health, selected_severities, selected_scope)
+    if filtered_health.empty:
+        st.info("No health rows match the current filters.")
+    else:
+        st.dataframe(filtered_health, use_container_width=True, hide_index=True)
+
+    st.markdown("**Health history**")
+    trend_frame = trend.copy() if isinstance(trend, pd.DataFrame) else pd.DataFrame()
+    if not trend_frame.empty:
+        trend_frame["generated_at"] = pd.to_datetime(trend_frame["generated_at"], errors="coerce", utc=True)
+        trend_frame["generated_at"] = trend_frame["generated_at"].dt.tz_convert(EASTERN)
+        trend_fig = go.Figure()
+        trend_fig.add_trace(
+            go.Scatter(
+                x=trend_frame["generated_at"],
+                y=trend_frame["warn_count"],
+                mode="lines+markers",
+                name="Warn checks",
+            ),
+        )
+        trend_fig.add_trace(
+            go.Scatter(
+                x=trend_frame["generated_at"],
+                y=trend_frame["severe_count"],
+                mode="lines+markers",
+                name="Severe checks",
+            ),
+        )
+        trend_fig.update_layout(
+            title="Health severity counts by snapshot",
+            xaxis_title="Snapshot time",
+            yaxis_title="Check count",
+            margin={"l": 20, "r": 20, "t": 60, "b": 20},
+        )
+        st.plotly_chart(trend_fig, use_container_width=True)
+    else:
+        st.info("Health trend history will appear after at least one persisted refresh snapshot is available.")
+
+    if not refresh_history.empty:
+        refresh_history = refresh_history.copy()
+        for column in ["started_at", "completed_at"]:
+            refresh_history[column] = pd.to_datetime(refresh_history[column], errors="coerce", utc=True).dt.tz_convert(EASTERN)
+        st.markdown("**Refresh history**")
+        st.dataframe(
+            refresh_history.sort_values("completed_at", ascending=False),
+            use_container_width=True,
+            hide_index=True,
         )
 
     registry = store.dataset_registry()
@@ -2923,6 +3135,7 @@ def render_live_monitor(
     market_service: MarketDataService,
     discovery_service: DiscoveryService,
     feature_service: FeatureService,
+    health_service: DataHealthService,
     model_service: ModelService,
     experiment_store: ExperimentStore,
 ) -> None:
@@ -2960,9 +3173,11 @@ def render_live_monitor(
                 market_service=market_service,
                 discovery_service=discovery_service,
                 feature_service=feature_service,
+                health_service=health_service,
                 remote_url=remote_url,
                 uploaded_files=[],
                 incremental=True,
+                refresh_mode="incremental",
             )
         st.success("Polling refresh complete.")
 
@@ -3432,13 +3647,14 @@ def main() -> None:
     ingestion_service = IngestionService()
     market_service = MarketDataService()
     discovery_service = DiscoveryService()
+    health_service = DataHealthService()
     enrichment_service = LLMEnrichmentService(store)
     feature_service = FeatureService(enrichment_service)
     model_service = ModelService()
     backtest_service = BacktestService(model_service)
     experiment_store = ExperimentStore(store)
 
-    _ensure_bootstrap(settings, store, ingestion_service, market_service, discovery_service, feature_service)
+    _ensure_bootstrap(settings, store, ingestion_service, market_service, discovery_service, feature_service, health_service)
 
     page = st.sidebar.radio(
         "Workbench",
@@ -3451,7 +3667,7 @@ def main() -> None:
     if page == "Research View":
         render_research_view(settings, store, market_service, feature_service)
     elif page == "Datasets":
-        render_datasets_view(settings, store, ingestion_service, market_service, discovery_service, feature_service)
+        render_datasets_view(settings, store, ingestion_service, market_service, discovery_service, feature_service, health_service)
     elif page == "Discovery":
         render_discovery_view(settings, store, discovery_service)
     elif page == "Models & Backtests":
@@ -3466,6 +3682,7 @@ def main() -> None:
             market_service,
             discovery_service,
             feature_service,
+            health_service,
             model_service,
             experiment_store,
         )
