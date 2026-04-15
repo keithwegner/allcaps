@@ -3,6 +3,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![UI: Streamlit](https://img.shields.io/badge/ui-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
 [![Storage: DuckDB + Parquet](https://img.shields.io/badge/storage-DuckDB%20%2B%20Parquet-FFF000?logo=duckdb&logoColor=black)](https://duckdb.org/)
+[![CI](https://github.com/keithwegner/allcaps/actions/workflows/ci.yml/badge.svg)](https://github.com/keithwegner/allcaps/actions/workflows/ci.yml)
 [![Status: Experimental](https://img.shields.io/badge/status-experimental-orange)](https://github.com/keithwegner/allcaps)
 
 This is a local Streamlit workbench for researching whether President Donald Trump's social posts, plus posts from influential X accounts that mention him, help predict the **next trading session's SPY return**.
@@ -40,6 +41,19 @@ source .venv/bin/activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+## Contributor Workflow
+
+Use Python `3.11` for local development and CI parity.
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+bash scripts/ci.sh
+```
+
+`main` is intended to stay behind pull requests with a green `ci` check, so `bash scripts/ci.sh` is the local pre-push baseline.
 
 On the first launch, the app may take a little longer because it can bootstrap local working datasets automatically.
 

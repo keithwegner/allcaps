@@ -86,18 +86,20 @@ def normalize_boolean(series: pd.Series, default: bool = False) -> pd.Series:
     if series.dtype == bool:
         return series.fillna(default)
 
-    lowered = series.astype(str).str.strip().str.lower()
     truthy = {"1", "true", "yes", "y", "t"}
-    falsy = {"0", "false", "no", "n", "f", "nan", "none", ""}
+    falsy = {"0", "false", "no", "n", "f", "nan", "none", "", "<na>", "null"}
 
-    def parse(value: str) -> bool:
-        if value in truthy:
+    def parse(value: object) -> bool:
+        if pd.isna(value):
+            return False
+        lowered = str(value).strip().lower()
+        if lowered in truthy:
             return True
-        if value in falsy:
+        if lowered in falsy:
             return False
         return default
 
-    return lowered.map(parse)
+    return series.map(parse)
 
 
 def read_csv_bytes(raw: bytes) -> pd.DataFrame:
