@@ -10,7 +10,11 @@ import numpy as np
 import pandas as pd
 
 from .contracts import BacktestRun, ModelRunConfig, PortfolioRunConfig
-from .modeling import ModelService
+from .modeling import (
+    SUPPORTED_PORTFOLIO_MODEL_FAMILIES,
+    ModelService,
+    add_asset_indicator_columns,
+)
 from .portfolio import build_portfolio_decision_history
 
 
@@ -136,11 +140,19 @@ def build_leakage_audit(feature_rows: pd.DataFrame, window_rows: pd.DataFrame) -
             "next_session_order_violations": 0,
             "tradeable_without_target_violations": 0,
             "window_order_violations": 0,
-        }
+    }
     next_date = pd.to_datetime(feature_rows["next_session_date"], errors="coerce")
     signal_date = pd.to_datetime(feature_rows["signal_session_date"], errors="coerce")
-    next_open_ts = pd.to_datetime(feature_rows["next_session_open_ts"], errors="coerce", utc=True)
-    feature_max_ts = pd.to_datetime(feature_rows["feature_source_max_ts"], errors="coerce", utc=True)
+    next_open_ts = pd.to_datetime(
+        feature_rows.get("next_session_open_ts", pd.Series(pd.NaT, index=feature_rows.index)),
+        errors="coerce",
+        utc=True,
+    )
+    feature_max_ts = pd.to_datetime(
+        feature_rows.get("feature_source_max_ts", pd.Series(pd.NaT, index=feature_rows.index)),
+        errors="coerce",
+        utc=True,
+    )
     future_feature_violations = int(
         (feature_max_ts.notna() & next_open_ts.notna() & (feature_max_ts >= next_open_ts)).sum(),
     )
@@ -440,6 +452,79 @@ def build_portfolio_leakage_audit(
         "duplicate_candidate_rows": duplicate_candidate_rows,
         "untradable_winner_rows": untradable_winner_rows,
         "component_runs": component_audits,
+        "rows_audited": int(len(candidate_predictions)),
+    }
+
+
+def _metrics_rank_key(metrics: dict[str, float]) -> tuple[float, float, float]:
+    robust_score = float(metrics.get("robust_score", 0.0) or 0.0)
+    max_drawdown = abs(float(metrics.get("max_drawdown", 0.0) or 0.0))
+    total_return = float(metrics.get("total_return", 0.0) or 0.0)
+    return robust_score, -max_drawdown, total_return
+
+
+def _is_better_metrics(candidate: dict[str, float], incumbent: dict[str, float] | None) -> bool:
+    if incumbent is None:
+        return True
+    return _metrics_rank_key(candidate) > _metrics_rank_key(incumbent)
+
+
+def _flatten_metric_payload(prefix: str, metrics: dict[str, float]) -> dict[str, float]:
+    return {
+        f"{prefix}_{key}": float(value)
+        for key, value in metrics.items()
+    }
+
+
+def build_joint_portfolio_leakage_audit(
+    feature_rows: pd.DataFrame,
+    candidate_predictions: pd.DataFrame,
+    decision_history: pd.DataFrame,
+    variant_summary: pd.DataFrame,
+) -> dict[str, Any]:
+    duplicate_candidate_rows = int(
+        candidate_predictions.duplicated(
+            subset=["variant_name", "signal_session_date", "asset_symbol"],
+            keep=False,
+        ).sum(),
+    ) if not candidate_predictions.empty else 0
+    untradable_winner_rows = 0
+    if not decision_history.empty and not candidate_predictions.empty:
+        winner_rows = decision_history.merge(
+            candidate_predictions[
+                ["variant_name", "signal_session_date", "asset_symbol", "run_id", "tradeable"]
+            ],
+            left_on=["variant_name", "signal_session_date", "winning_asset", "winning_run_id"],
+            right_on=["variant_name", "signal_session_date", "asset_symbol", "run_id"],
+            how="left",
+        )
+        tradeable_series = pd.Series(winner_rows.get("tradeable", False), dtype="boolean").fillna(False).astype(bool)
+        untradable_winner_rows = int(
+            (
+                winner_rows["winning_asset"].fillna("").astype(str).ne("")
+                & ~tradeable_series
+            ).sum(),
+        )
+    trained_variants = (
+        variant_summary["variant_name"].astype(str).tolist()
+        if not variant_summary.empty and "variant_name" in variant_summary.columns
+        else []
+    )
+    base_audit = build_leakage_audit(feature_rows, pd.DataFrame())
+    overall_pass = (
+        base_audit.get("overall_pass", True)
+        and duplicate_candidate_rows == 0
+        and untradable_winner_rows == 0
+        and bool(trained_variants)
+    )
+    return {
+        "overall_pass": overall_pass,
+        "duplicate_candidate_rows": duplicate_candidate_rows,
+        "untradable_winner_rows": untradable_winner_rows,
+        "future_feature_timestamp_violations": base_audit.get("future_feature_timestamp_violations", 0),
+        "next_session_order_violations": base_audit.get("next_session_order_violations", 0),
+        "tradeable_without_target_violations": base_audit.get("tradeable_without_target_violations", 0),
+        "trained_variants": trained_variants,
         "rows_audited": int(len(candidate_predictions)),
     }
 
@@ -770,6 +855,175 @@ class BacktestService:
         }
         return run, artifacts
 
+    def run_joint_model_allocator(
+        self,
+        run_config: PortfolioRunConfig,
+        feature_rows: pd.DataFrame,
+    ) -> tuple[BacktestRun, dict[str, Any]]:
+        usable = self._prepare_joint_feature_rows(feature_rows, run_config)
+        if usable.empty:
+            raise RuntimeError("No asset-session feature rows are available for joint portfolio modeling.")
+
+        window_plan = self._resolve_joint_window_plan(run_config, usable)
+        if not window_plan["windows"]:
+            raise RuntimeError("Joint portfolio modeling requires enough target-available sessions to build walk-forward windows.")
+
+        selected_symbols = tuple(window_plan["selected_symbols"])
+        topology_variants = tuple(run_config.topology_variants or ("per_asset", "pooled"))
+        model_families = tuple(run_config.model_families or SUPPORTED_PORTFOLIO_MODEL_FAMILIES)
+
+        all_variant_predictions: list[pd.DataFrame] = []
+        all_variant_decisions: list[pd.DataFrame] = []
+        all_variant_trades: list[pd.DataFrame] = []
+        all_variant_benchmarks: list[pd.DataFrame] = []
+        all_variant_curves: list[pd.DataFrame] = []
+        all_variant_diagnostics: list[pd.DataFrame] = []
+        all_variant_importance: list[pd.DataFrame] = []
+        all_window_rows: list[pd.DataFrame] = []
+        variant_summary_rows: list[dict[str, Any]] = []
+        variant_bundles: dict[str, dict[str, Any]] = {}
+        variant_test_metrics: dict[str, dict[str, float]] = {}
+        variant_validation_metrics: dict[str, dict[str, float]] = {}
+
+        for variant_name in topology_variants:
+            variant_result = self._train_joint_variant(
+                run_config=run_config,
+                feature_rows=usable,
+                variant_name=variant_name,
+                model_families=model_families,
+                selected_symbols=selected_symbols,
+                windows=window_plan["windows"],
+            )
+            variant_bundles[variant_name] = variant_result["portfolio_model_bundle"]
+            variant_validation_metrics[variant_name] = variant_result["validation_metrics"]
+            variant_test_metrics[variant_name] = variant_result["test_metrics"]
+            all_variant_predictions.append(variant_result["candidate_predictions"])
+            all_variant_decisions.append(variant_result["decision_history"])
+            all_variant_trades.append(variant_result["trades"])
+            all_variant_benchmarks.append(variant_result["benchmarks"])
+            all_variant_curves.append(variant_result["benchmark_curves"])
+            all_variant_diagnostics.append(variant_result["diagnostics"])
+            all_variant_importance.append(variant_result["importance"])
+            all_window_rows.append(variant_result["window_summary"])
+            variant_summary_rows.append(variant_result["variant_summary"])
+
+        variant_summary = pd.DataFrame(variant_summary_rows).reset_index(drop=True)
+        if variant_summary.empty:
+            raise RuntimeError("Joint portfolio modeling could not train any portfolio variants.")
+
+        deployment_variant = max(
+            variant_validation_metrics,
+            key=lambda name: _metrics_rank_key(variant_validation_metrics[name]),
+        )
+        variant_summary["validation_abs_max_drawdown"] = (
+            pd.to_numeric(variant_summary.get("validation_max_drawdown", 0.0), errors="coerce")
+            .abs()
+            .fillna(0.0)
+        )
+        variant_summary["deployment_winner"] = variant_summary["variant_name"].astype(str) == deployment_variant
+        variant_summary = variant_summary.sort_values(
+            ["deployment_winner", "validation_robust_score", "validation_abs_max_drawdown", "validation_total_return"],
+            ascending=[False, False, True, False],
+        ).reset_index(drop=True)
+
+        candidate_predictions = pd.concat(all_variant_predictions, ignore_index=True) if all_variant_predictions else pd.DataFrame()
+        decision_history = pd.concat(all_variant_decisions, ignore_index=True) if all_variant_decisions else pd.DataFrame()
+        trades = pd.concat(all_variant_trades, ignore_index=True) if all_variant_trades else pd.DataFrame()
+        benchmarks = pd.concat(all_variant_benchmarks, ignore_index=True) if all_variant_benchmarks else pd.DataFrame()
+        benchmark_curves = pd.concat(all_variant_curves, ignore_index=True) if all_variant_curves else pd.DataFrame()
+        diagnostics = pd.concat(all_variant_diagnostics, ignore_index=True) if all_variant_diagnostics else pd.DataFrame()
+        importance = pd.concat(all_variant_importance, ignore_index=True) if all_variant_importance else pd.DataFrame()
+        window_summary = pd.concat(all_window_rows, ignore_index=True) if all_window_rows else pd.DataFrame()
+
+        run_config_payload = run_config.to_dict()
+        run_config_payload["selected_symbols"] = list(selected_symbols)
+        run_config_payload["topology_variants"] = list(topology_variants)
+        run_config_payload["model_families"] = list(model_families)
+        run_config_payload["deployment_variant"] = deployment_variant
+
+        chosen_summary = variant_summary.loc[variant_summary["variant_name"].astype(str) == deployment_variant].iloc[0]
+        chosen_test_metrics = variant_test_metrics.get(deployment_variant, {})
+        leakage_audit = build_joint_portfolio_leakage_audit(
+            feature_rows=usable,
+            candidate_predictions=candidate_predictions,
+            decision_history=decision_history,
+            variant_summary=variant_summary,
+        )
+
+        config_hash = hashlib.sha1(str(run_config_payload).encode("utf-8")).hexdigest()[:12]
+        run_id = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{config_hash}"
+        run = BacktestRun(
+            run_id=run_id,
+            run_name=run_config.run_name,
+            target_asset="PORTFOLIO",
+            config_hash=config_hash,
+            train_window=int(window_plan["train_window"]),
+            validation_window=int(window_plan["validation_window"]),
+            test_window=int(window_plan["test_window"]),
+            metrics=chosen_test_metrics,
+            selected_params={
+                "fallback_mode": run_config.fallback_mode,
+                "transaction_cost_bps": float(run_config.transaction_cost_bps),
+                "selected_symbols": list(selected_symbols),
+                "deployment_variant": deployment_variant,
+                "deployment_model_family": str(chosen_summary.get("model_family", "")),
+                "deployment_threshold": float(chosen_summary.get("threshold", 0.0) or 0.0),
+                "deployment_min_post_count": int(chosen_summary.get("min_post_count", 1) or 1),
+                "deployment_account_weight": float(chosen_summary.get("account_weight", 1.0) or 1.0),
+                "variant_summary": variant_summary.to_dict("records"),
+            },
+            run_type="portfolio_allocator",
+            allocator_mode="joint_model",
+            fallback_mode=run_config.fallback_mode,
+            deployment_variant=deployment_variant,
+            universe_symbols=list(selected_symbols),
+            topology_variants=list(topology_variants),
+            model_families=list(model_families),
+            selected_symbols=list(selected_symbols),
+        )
+
+        portfolio_model_bundle = {
+            "deployment_variant": deployment_variant,
+            "selected_symbols": list(selected_symbols),
+            "fallback_mode": run_config.fallback_mode,
+            "feature_version": run_config.feature_version,
+            "llm_enabled": bool(run_config.llm_enabled),
+            "variants": variant_bundles,
+        }
+        placeholder_model_artifact = {
+            "model_version": f"{run.run_name}-portfolio-{deployment_variant}",
+            "feature_names": [],
+            "intercept": 0.0,
+            "coefficients": [],
+            "means": [],
+            "stds": [],
+            "residual_std": 0.0,
+            "train_rows": int(len(candidate_predictions)),
+            "metadata": {
+                "run_type": run.run_type,
+                "allocator_mode": run.allocator_mode,
+                "target_asset": run.target_asset,
+                "deployment_variant": deployment_variant,
+            },
+        }
+        artifacts = {
+            "run": asdict(run),
+            "config": run_config_payload,
+            "trades": trades,
+            "predictions": decision_history,
+            "candidate_predictions": candidate_predictions,
+            "windows": window_summary,
+            "importance": importance,
+            "model_artifact": placeholder_model_artifact,
+            "benchmarks": benchmarks,
+            "diagnostics": diagnostics,
+            "benchmark_curves": benchmark_curves,
+            "leakage_audit": leakage_audit,
+            "variant_summary": variant_summary,
+            "portfolio_model_bundle": portfolio_model_bundle,
+        }
+        return run, artifacts
+
     @staticmethod
     def _apply_account_weight(df: pd.DataFrame, account_weight: float) -> pd.DataFrame:
         adjusted = df.copy()
@@ -839,3 +1093,521 @@ class BacktestService:
                 },
             )
         return pd.DataFrame(rows).sort_values(["asset_symbol", "run_id"]).reset_index(drop=True) if rows else pd.DataFrame()
+
+    @staticmethod
+    def _prepare_joint_feature_rows(
+        feature_rows: pd.DataFrame,
+        run_config: PortfolioRunConfig,
+    ) -> pd.DataFrame:
+        usable = feature_rows.copy()
+        usable["signal_session_date"] = pd.to_datetime(usable.get("signal_session_date"), errors="coerce")
+        usable["next_session_date"] = pd.to_datetime(usable.get("next_session_date"), errors="coerce")
+        usable["asset_symbol"] = usable.get("asset_symbol", pd.Series("", index=usable.index)).astype(str).str.upper()
+        usable = usable.dropna(subset=["signal_session_date"]).copy()
+        selected_symbols = tuple(str(symbol).upper() for symbol in (run_config.selected_symbols or run_config.universe_symbols or ()))
+        if selected_symbols:
+            usable = usable.loc[usable["asset_symbol"].isin(selected_symbols)].copy()
+        if "feature_version" in usable.columns and run_config.feature_version:
+            matching = usable.loc[usable["feature_version"].astype(str) == str(run_config.feature_version)].copy()
+            if not matching.empty:
+                usable = matching
+        if "llm_enabled" in usable.columns:
+            matching = usable.loc[usable["llm_enabled"].fillna(False).astype(bool) == bool(run_config.llm_enabled)].copy()
+            if not matching.empty:
+                usable = matching
+        usable["target_available"] = pd.Series(usable.get("target_available", False), dtype="boolean").fillna(False).astype(bool)
+        usable["tradeable"] = pd.Series(usable.get("tradeable", usable["target_available"]), dtype="boolean").fillna(usable["target_available"]).astype(bool)
+        usable["post_count"] = pd.to_numeric(usable.get("post_count", 0), errors="coerce").fillna(0).astype(int)
+        usable = usable.sort_values(["signal_session_date", "asset_symbol"]).reset_index(drop=True)
+        return usable
+
+    @staticmethod
+    def _resolve_joint_window_plan(
+        run_config: PortfolioRunConfig,
+        feature_rows: pd.DataFrame,
+    ) -> dict[str, Any]:
+        target_rows = feature_rows.loc[feature_rows["target_available"]].copy()
+        signal_dates = pd.to_datetime(target_rows["signal_session_date"], errors="coerce").dt.normalize()
+        unique_dates = sorted(signal_dates.dropna().unique().tolist())
+        if not unique_dates:
+            return {
+                "windows": [],
+                "train_window": run_config.train_window,
+                "validation_window": run_config.validation_window,
+                "test_window": run_config.test_window,
+                "selected_symbols": sorted(feature_rows["asset_symbol"].dropna().astype(str).str.upper().unique().tolist()),
+            }
+
+        total_needed = run_config.train_window + run_config.validation_window + run_config.test_window
+        if len(unique_dates) < total_needed:
+            train_window = max(8, int(len(unique_dates) * 0.5))
+            validation_window = max(4, int(len(unique_dates) * 0.25))
+            remaining = len(unique_dates) - train_window - validation_window
+            test_window = max(2, remaining)
+            while train_window + validation_window + test_window > len(unique_dates) and train_window > 8:
+                train_window -= 1
+            while train_window + validation_window + test_window > len(unique_dates) and validation_window > 4:
+                validation_window -= 1
+            while train_window + validation_window + test_window > len(unique_dates) and test_window > 2:
+                test_window -= 1
+        else:
+            train_window = run_config.train_window
+            validation_window = run_config.validation_window
+            test_window = run_config.test_window
+
+        last_start = len(unique_dates) - (train_window + validation_window + test_window)
+        starts = list(range(0, max(last_start, 0) + 1, max(int(run_config.step_size), 1)))
+        if not starts:
+            starts = [0]
+
+        windows: list[dict[str, Any]] = []
+        for window_id, start in enumerate(starts, start=1):
+            train_dates = unique_dates[start : start + train_window]
+            validation_dates = unique_dates[start + train_window : start + train_window + validation_window]
+            test_dates = unique_dates[start + train_window + validation_window : start + train_window + validation_window + test_window]
+            if not train_dates or not validation_dates or not test_dates:
+                continue
+            windows.append(
+                {
+                    "window_id": window_id,
+                    "train_dates": tuple(pd.Timestamp(value) for value in train_dates),
+                    "validation_dates": tuple(pd.Timestamp(value) for value in validation_dates),
+                    "test_dates": tuple(pd.Timestamp(value) for value in test_dates),
+                },
+            )
+        return {
+            "windows": windows,
+            "train_window": train_window,
+            "validation_window": validation_window,
+            "test_window": test_window,
+            "selected_symbols": sorted(feature_rows["asset_symbol"].dropna().astype(str).str.upper().unique().tolist()),
+        }
+
+    def _train_joint_variant(
+        self,
+        *,
+        run_config: PortfolioRunConfig,
+        feature_rows: pd.DataFrame,
+        variant_name: str,
+        model_families: tuple[str, ...],
+        selected_symbols: tuple[str, ...],
+        windows: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        best_candidate: dict[str, Any] | None = None
+        candidate_rows: list[dict[str, Any]] = []
+        importance_rows: list[pd.DataFrame] = []
+
+        for model_family in model_families:
+            for account_weight in run_config.account_weight_grid:
+                validation_predictions: list[pd.DataFrame] = []
+                test_predictions: list[pd.DataFrame] = []
+                window_rows: list[dict[str, Any]] = []
+                window_importance: list[pd.DataFrame] = []
+                for window in windows:
+                    train_rows = self._slice_joint_window(feature_rows, window["train_dates"], require_target=True)
+                    validation_rows = self._slice_joint_window(feature_rows, window["validation_dates"], require_target=True)
+                    test_rows = self._slice_joint_window(feature_rows, window["test_dates"], require_target=True)
+                    if train_rows.empty or validation_rows.empty or test_rows.empty:
+                        continue
+
+                    weighted_train = self._apply_account_weight(train_rows, float(account_weight))
+                    weighted_validation = self._apply_account_weight(validation_rows, float(account_weight))
+                    weighted_test = self._apply_account_weight(test_rows, float(account_weight))
+
+                    trained = self._fit_joint_variant_models(
+                        variant_name=variant_name,
+                        train_rows=weighted_train,
+                        model_family=model_family,
+                        llm_enabled=bool(run_config.llm_enabled),
+                        run_name=run_config.run_name,
+                        window_suffix=f"window-{window['window_id']}",
+                        selected_symbols=selected_symbols,
+                    )
+                    validation_prediction = self._predict_joint_variant_models(
+                        trained_models=trained,
+                        prediction_rows=weighted_validation,
+                        variant_name=variant_name,
+                        selected_symbols=selected_symbols,
+                    )
+                    test_prediction = self._predict_joint_variant_models(
+                        trained_models=trained,
+                        prediction_rows=weighted_test,
+                        variant_name=variant_name,
+                        selected_symbols=selected_symbols,
+                    )
+                    if validation_prediction.empty or test_prediction.empty:
+                        continue
+                    validation_prediction["window_id"] = int(window["window_id"])
+                    test_prediction["window_id"] = int(window["window_id"])
+                    validation_predictions.append(validation_prediction)
+                    test_predictions.append(test_prediction)
+                    trained_importance = trained.get("importance", pd.DataFrame()).copy()
+                    if not trained_importance.empty:
+                        trained_importance["window_id"] = int(window["window_id"])
+                        trained_importance["variant_name"] = variant_name
+                        window_importance.append(trained_importance)
+                    window_rows.append(
+                        {
+                            "variant_name": variant_name,
+                            "window_id": int(window["window_id"]),
+                            "model_family": model_family,
+                            "account_weight": float(account_weight),
+                            "train_start": min(window["train_dates"]),
+                            "train_end": max(window["train_dates"]),
+                            "validation_start": min(window["validation_dates"]),
+                            "validation_end": max(window["validation_dates"]),
+                            "test_start": min(window["test_dates"]),
+                            "test_end": max(window["test_dates"]),
+                            "train_rows": int(len(train_rows)),
+                            "validation_rows": int(len(validation_rows)),
+                            "test_rows": int(len(test_rows)),
+                        },
+                    )
+                if not validation_predictions or not test_predictions:
+                    continue
+
+                validation_frame = pd.concat(validation_predictions, ignore_index=True)
+                test_frame = pd.concat(test_predictions, ignore_index=True)
+                best_params, validation_metrics, validation_board, validation_decisions = self._search_portfolio_deployment_params(
+                    predictions=validation_frame,
+                    fallback_mode=run_config.fallback_mode,
+                    thresholds=run_config.threshold_grid,
+                    minimum_signal_grid=run_config.minimum_signal_grid,
+                    transaction_cost_bps=float(run_config.transaction_cost_bps),
+                    run_name=run_config.run_name,
+                    variant_name=variant_name,
+                    default_feature_version=run_config.feature_version,
+                    default_model_version=f"{run_config.run_name}-{variant_name}-{model_family}",
+                )
+                test_board = self._prepare_portfolio_prediction_board(
+                    predictions=test_frame,
+                    run_name=run_config.run_name,
+                    variant_name=variant_name,
+                    threshold=float(best_params["threshold"]),
+                    min_post_count=int(best_params["min_post_count"]),
+                    default_feature_version=run_config.feature_version,
+                    default_model_version=f"{run_config.run_name}-{variant_name}-{model_family}",
+                )
+                test_board, test_decisions = build_portfolio_decision_history(
+                    test_board,
+                    fallback_mode=run_config.fallback_mode,
+                    require_tradeable=True,
+                )
+                test_trades, test_metrics = build_portfolio_trade_log(
+                    decision_history=test_decisions,
+                    candidate_predictions=test_board,
+                    transaction_cost_bps=float(run_config.transaction_cost_bps),
+                )
+                candidate_rows.append(
+                    {
+                        "variant_name": variant_name,
+                        "model_family": model_family,
+                        "account_weight": float(account_weight),
+                        "threshold": float(best_params["threshold"]),
+                        "min_post_count": int(best_params["min_post_count"]),
+                        "validation_metrics": validation_metrics,
+                        "test_metrics": test_metrics,
+                        "validation_board": validation_board,
+                        "validation_decisions": validation_decisions,
+                        "test_board": test_board,
+                        "test_decisions": test_decisions,
+                        "test_trades": test_trades,
+                        "window_summary": pd.DataFrame(window_rows),
+                    },
+                )
+                if window_importance:
+                    importance_rows.append(pd.concat(window_importance, ignore_index=True))
+                if best_candidate is None or _is_better_metrics(validation_metrics, best_candidate.get("validation_metrics")):
+                    best_candidate = candidate_rows[-1]
+
+        if best_candidate is None:
+            raise RuntimeError(f"Joint portfolio variant `{variant_name}` could not train any candidate models.")
+
+        final_rows = self._apply_account_weight(feature_rows, float(best_candidate["account_weight"]))
+        final_target_rows = final_rows.loc[final_rows["target_available"]].copy()
+        final_models = self._fit_joint_variant_models(
+            variant_name=variant_name,
+            train_rows=final_target_rows,
+            model_family=str(best_candidate["model_family"]),
+            llm_enabled=bool(run_config.llm_enabled),
+            run_name=run_config.run_name,
+            window_suffix="final",
+            selected_symbols=selected_symbols,
+        )
+        final_predictions = self._predict_joint_variant_models(
+            trained_models=final_models,
+            prediction_rows=final_rows,
+            variant_name=variant_name,
+            selected_symbols=selected_symbols,
+        )
+        final_board = self._prepare_portfolio_prediction_board(
+            predictions=final_predictions,
+            run_name=run_config.run_name,
+            variant_name=variant_name,
+            threshold=float(best_candidate["threshold"]),
+            min_post_count=int(best_candidate["min_post_count"]),
+            default_feature_version=run_config.feature_version,
+            default_model_version=f"{run_config.run_name}-{variant_name}-final",
+        )
+        final_board, final_decisions = build_portfolio_decision_history(
+            final_board,
+            fallback_mode=run_config.fallback_mode,
+            require_tradeable=True,
+        )
+        final_trades, final_metrics = build_portfolio_trade_log(
+            decision_history=final_decisions,
+            candidate_predictions=final_board,
+            transaction_cost_bps=float(run_config.transaction_cost_bps),
+        )
+        final_trades["variant_name"] = variant_name
+        final_benchmarks, final_curves = build_portfolio_benchmark_suite(
+            decision_history=final_decisions,
+            candidate_predictions=final_board,
+            strategy_trades=final_trades,
+            strategy_metrics=final_metrics,
+            transaction_cost_bps=float(run_config.transaction_cost_bps),
+        )
+        final_benchmarks["variant_name"] = variant_name
+        final_diagnostics = build_portfolio_decision_diagnostics(final_decisions, final_board)
+        final_diagnostics["variant_name"] = variant_name
+        final_decisions["variant_name"] = variant_name
+        final_board["variant_name"] = variant_name
+        final_curves = final_curves.copy()
+        if not final_curves.empty:
+            final_curves["variant_name"] = variant_name
+
+        final_importance = final_models.get("importance", pd.DataFrame()).copy()
+        if not final_importance.empty:
+            final_importance["variant_name"] = variant_name
+        if importance_rows:
+            final_importance = pd.concat([*importance_rows, final_importance], ignore_index=True)
+
+        variant_summary = {
+            "variant_name": variant_name,
+            "model_family": str(best_candidate["model_family"]),
+            "threshold": float(best_candidate["threshold"]),
+            "min_post_count": int(best_candidate["min_post_count"]),
+            "account_weight": float(best_candidate["account_weight"]),
+            "selected_symbols": list(selected_symbols),
+            **_flatten_metric_payload("validation", best_candidate["validation_metrics"]),
+            **_flatten_metric_payload("test", best_candidate["test_metrics"]),
+        }
+        portfolio_model_bundle = {
+            "variant_name": variant_name,
+            "topology": variant_name,
+            "model_family": str(best_candidate["model_family"]),
+            "threshold": float(best_candidate["threshold"]),
+            "min_post_count": int(best_candidate["min_post_count"]),
+            "account_weight": float(best_candidate["account_weight"]),
+            "selected_symbols": list(selected_symbols),
+            "llm_enabled": bool(run_config.llm_enabled),
+            "feature_version": run_config.feature_version,
+            "models": final_models["models"],
+        }
+        return {
+            "candidate_predictions": final_board,
+            "decision_history": final_decisions,
+            "trades": final_trades,
+            "benchmarks": final_benchmarks,
+            "benchmark_curves": final_curves,
+            "diagnostics": final_diagnostics,
+            "importance": final_importance,
+            "window_summary": best_candidate["window_summary"],
+            "variant_summary": variant_summary,
+            "portfolio_model_bundle": portfolio_model_bundle,
+            "validation_metrics": best_candidate["validation_metrics"],
+            "test_metrics": best_candidate["test_metrics"],
+        }
+
+    @staticmethod
+    def _slice_joint_window(
+        feature_rows: pd.DataFrame,
+        window_dates: tuple[pd.Timestamp, ...],
+        *,
+        require_target: bool,
+    ) -> pd.DataFrame:
+        normalized_dates = {pd.Timestamp(value).normalize() for value in window_dates}
+        dates = pd.to_datetime(feature_rows["signal_session_date"], errors="coerce").dt.normalize()
+        window_rows = feature_rows.loc[dates.isin(normalized_dates)].copy()
+        if require_target:
+            window_rows = window_rows.loc[window_rows["target_available"]].copy()
+        return window_rows.sort_values(["signal_session_date", "asset_symbol"]).reset_index(drop=True)
+
+    def _fit_joint_variant_models(
+        self,
+        *,
+        variant_name: str,
+        train_rows: pd.DataFrame,
+        model_family: str,
+        llm_enabled: bool,
+        run_name: str,
+        window_suffix: str,
+        selected_symbols: tuple[str, ...],
+    ) -> dict[str, Any]:
+        if variant_name == "pooled":
+            pooled_train = add_asset_indicator_columns(train_rows, selected_symbols)
+            artifact, importance = self.model_service.train_with_family(
+                pooled_train,
+                llm_enabled=llm_enabled,
+                model_family=model_family,
+                model_version=f"{run_name}-{variant_name}-{model_family}-{window_suffix}",
+                metadata={"variant_name": variant_name, "selected_symbols": list(selected_symbols)},
+            )
+            return {
+                "variant_name": variant_name,
+                "model_family": model_family,
+                "models": {
+                    "pooled": artifact.to_dict(),
+                },
+                "importance": importance,
+            }
+
+        models: dict[str, Any] = {}
+        importance_frames: list[pd.DataFrame] = []
+        for asset_symbol in selected_symbols:
+            asset_train = train_rows.loc[train_rows["asset_symbol"].astype(str).str.upper() == asset_symbol].copy()
+            if asset_train.empty:
+                continue
+            artifact, importance = self.model_service.train_with_family(
+                asset_train,
+                llm_enabled=llm_enabled,
+                model_family=model_family,
+                model_version=f"{run_name}-{variant_name}-{asset_symbol.lower()}-{model_family}-{window_suffix}",
+                metadata={"variant_name": variant_name, "asset_symbol": asset_symbol},
+            )
+            models[asset_symbol] = artifact.to_dict()
+            if not importance.empty:
+                importance = importance.copy()
+                importance["asset_symbol"] = asset_symbol
+                importance_frames.append(importance)
+        if not models:
+            raise RuntimeError(f"No trainable asset rows were available for `{variant_name}`.")
+        return {
+            "variant_name": variant_name,
+            "model_family": model_family,
+            "models": models,
+            "importance": pd.concat(importance_frames, ignore_index=True) if importance_frames else pd.DataFrame(),
+        }
+
+    def _predict_joint_variant_models(
+        self,
+        *,
+        trained_models: dict[str, Any],
+        prediction_rows: pd.DataFrame,
+        variant_name: str,
+        selected_symbols: tuple[str, ...],
+    ) -> pd.DataFrame:
+        if prediction_rows.empty:
+            return pd.DataFrame()
+
+        rows: list[pd.DataFrame] = []
+        if variant_name == "pooled":
+            artifact_payload = (trained_models.get("models", {}) or {}).get("pooled")
+            if not artifact_payload:
+                return pd.DataFrame()
+            artifact = self._load_model_artifact(artifact_payload)
+            pooled_rows = add_asset_indicator_columns(prediction_rows, selected_symbols)
+            predictions = self.model_service.predict(artifact, pooled_rows)
+            rows.append(predictions)
+        else:
+            for asset_symbol in selected_symbols:
+                asset_rows = prediction_rows.loc[
+                    prediction_rows["asset_symbol"].astype(str).str.upper() == asset_symbol
+                ].copy()
+                if asset_rows.empty:
+                    continue
+                artifact_payload = (trained_models.get("models", {}) or {}).get(asset_symbol)
+                if not artifact_payload:
+                    continue
+                artifact = self._load_model_artifact(artifact_payload)
+                rows.append(self.model_service.predict(artifact, asset_rows))
+        if not rows:
+            return pd.DataFrame()
+        combined = pd.concat(rows, ignore_index=True)
+        return combined.sort_values(["signal_session_date", "asset_symbol"]).reset_index(drop=True)
+
+    @staticmethod
+    def _load_model_artifact(payload: dict[str, Any]) -> Any:
+        from .contracts import LinearModelArtifact
+
+        return LinearModelArtifact.from_dict(payload)
+
+    def _search_portfolio_deployment_params(
+        self,
+        *,
+        predictions: pd.DataFrame,
+        fallback_mode: str,
+        thresholds: tuple[float, ...],
+        minimum_signal_grid: tuple[int, ...],
+        transaction_cost_bps: float,
+        run_name: str,
+        variant_name: str,
+        default_feature_version: str,
+        default_model_version: str,
+    ) -> tuple[dict[str, Any], dict[str, float], pd.DataFrame, pd.DataFrame]:
+        best_params: dict[str, Any] | None = None
+        best_metrics: dict[str, float] | None = None
+        best_board = pd.DataFrame()
+        best_decisions = pd.DataFrame()
+
+        for threshold in thresholds:
+            for min_post_count in minimum_signal_grid:
+                candidate_board = self._prepare_portfolio_prediction_board(
+                    predictions=predictions,
+                    run_name=run_name,
+                    variant_name=variant_name,
+                    threshold=float(threshold),
+                    min_post_count=int(min_post_count),
+                    default_feature_version=default_feature_version,
+                    default_model_version=default_model_version,
+                )
+                candidate_board, decision_history = build_portfolio_decision_history(
+                    candidate_board,
+                    fallback_mode=fallback_mode,
+                    require_tradeable=True,
+                )
+                trades, metrics = build_portfolio_trade_log(
+                    decision_history=decision_history,
+                    candidate_predictions=candidate_board,
+                    transaction_cost_bps=transaction_cost_bps,
+                )
+                if _is_better_metrics(metrics, best_metrics):
+                    best_params = {
+                        "threshold": float(threshold),
+                        "min_post_count": int(min_post_count),
+                    }
+                    best_metrics = metrics
+                    best_board = candidate_board
+                    best_decisions = decision_history
+        if best_params is None or best_metrics is None:
+            raise RuntimeError("Joint portfolio deployment search did not produce any candidate settings.")
+        return best_params, best_metrics, best_board, best_decisions
+
+    @staticmethod
+    def _prepare_portfolio_prediction_board(
+        *,
+        predictions: pd.DataFrame,
+        run_name: str,
+        variant_name: str,
+        threshold: float,
+        min_post_count: int,
+        default_feature_version: str,
+        default_model_version: str,
+    ) -> pd.DataFrame:
+        board = predictions.copy()
+        if board.empty:
+            return board
+        board["run_id"] = f"{run_name}:{variant_name}"
+        board["run_name"] = f"{run_name} [{variant_name}]"
+        board["feature_version"] = board.get("feature_version", default_feature_version)
+        board["model_version"] = board.get("model_version", default_model_version)
+        board["confidence"] = pd.to_numeric(
+            board.get("prediction_confidence", board.get("confidence", 0.0)),
+            errors="coerce",
+        ).fillna(0.0)
+        board["threshold"] = float(threshold)
+        board["min_post_count"] = int(min_post_count)
+        board["tradeable"] = pd.Series(board.get("tradeable", board.get("target_available", False)), dtype="boolean").fillna(False).astype(bool)
+        board["target_available"] = pd.Series(board.get("target_available", False), dtype="boolean").fillna(False).astype(bool)
+        board["variant_name"] = variant_name
+        return board

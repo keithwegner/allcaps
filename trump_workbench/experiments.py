@@ -113,6 +113,8 @@ class ExperimentStore:
         benchmark_curves: pd.DataFrame,
         diagnostics: pd.DataFrame,
         leakage_audit: dict[str, Any],
+        variant_summary: pd.DataFrame | None = None,
+        portfolio_model_bundle: dict[str, Any] | None = None,
     ) -> SavedRunArtifacts:
         run_dir = self.store.artifact_path("runs", run.run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -131,6 +133,8 @@ class ExperimentStore:
         feature_contributions_path = run_dir / "feature_contributions.parquet"
         post_attribution_path = run_dir / "post_attribution.parquet"
         account_attribution_path = run_dir / "account_attribution.parquet"
+        variant_summary_path = run_dir / "variant_summary.parquet"
+        portfolio_model_bundle_path = run_dir / "portfolio_model_bundle.json"
 
         summary_payload = {
             "run": run.to_dict(),
@@ -148,6 +152,12 @@ class ExperimentStore:
         pd.DataFrame().to_parquet(feature_contributions_path, index=False)
         pd.DataFrame().to_parquet(post_attribution_path, index=False)
         pd.DataFrame().to_parquet(account_attribution_path, index=False)
+        (variant_summary if variant_summary is not None else pd.DataFrame()).to_parquet(variant_summary_path, index=False)
+        if portfolio_model_bundle is not None:
+            portfolio_model_bundle_path.write_text(
+                json.dumps(portfolio_model_bundle, indent=2, default=str),
+                encoding="utf-8",
+            )
         model_path.write_text(
             json.dumps(
                 {
@@ -205,6 +215,8 @@ class ExperimentStore:
             benchmark_curves_path=benchmark_curves_path,
             leakage_audit_path=leakage_audit_path,
             candidate_predictions_path=candidate_predictions_path,
+            variant_summary_path=variant_summary_path,
+            portfolio_model_bundle_path=portfolio_model_bundle_path if portfolio_model_bundle is not None else None,
         )
 
     def list_runs(self) -> pd.DataFrame:
@@ -234,6 +246,8 @@ class ExperimentStore:
             "metrics": record["metrics_json"],
             "selected_params": record["selected_params_json"],
             "candidate_predictions": self._read_optional_parquet(Path(record["summary_path"]).parent / "candidate_predictions.parquet"),
+            "variant_summary": self._read_optional_parquet(Path(record["summary_path"]).parent / "variant_summary.parquet"),
+            "portfolio_model_bundle": self._read_optional_json(Path(record["summary_path"]).parent / "portfolio_model_bundle.json"),
             "benchmarks": self._read_optional_parquet_paths(
                 [
                     Path(record["summary_path"]).parent / "benchmarks.parquet",

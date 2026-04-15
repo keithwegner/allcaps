@@ -95,8 +95,13 @@ class ConfigAndContractsTests(unittest.TestCase):
         config = ModelRunConfig(run_name="test")
         portfolio_config = PortfolioRunConfig(
             run_name="portfolio",
+            allocator_mode="joint_model",
             component_run_ids=("spy-run", "qqq-run"),
             universe_symbols=("SPY", "QQQ"),
+            selected_symbols=("SPY", "QQQ"),
+            model_families=("ridge", "hist_gradient_boosting_regressor"),
+            topology_variants=("per_asset", "pooled"),
+            deployment_variant="pooled",
         )
         snapshot = PredictionSnapshot(
             signal_session_date=pd.Timestamp("2025-02-03"),
@@ -132,7 +137,11 @@ class ConfigAndContractsTests(unittest.TestCase):
             metadata={"source": "unit-test"},
         )
         live_config = LiveMonitorConfig(
+            mode="portfolio_run",
             fallback_mode="FLAT",
+            portfolio_run_id="portfolio-1",
+            portfolio_run_name="Portfolio baseline",
+            deployment_variant="pooled",
             pinned_runs=[
                 LiveMonitorPinnedRun(
                     asset_symbol="SPY",
@@ -150,12 +159,23 @@ class ConfigAndContractsTests(unittest.TestCase):
         self.assertEqual(config.to_dict()["target_asset"], "SPY")
         self.assertEqual(config.to_dict()["threshold_grid"], list(config.threshold_grid))
         self.assertEqual(portfolio_config.to_dict()["component_run_ids"], ["spy-run", "qqq-run"])
+        self.assertEqual(portfolio_config.to_dict()["selected_symbols"], ["SPY", "QQQ"])
         self.assertEqual(snapshot.to_dict()["target_asset"], "SPY")
         self.assertEqual(snapshot.to_dict()["stance"], "long")
         self.assertEqual(backtest_run.to_dict()["run_id"], "run-1")
         self.assertEqual(backtest_run.to_dict()["run_type"], "asset_model")
-        self.assertEqual(LiveMonitorConfig.from_dict(live_config.to_dict()).pinned_runs[0].asset_symbol, "SPY")
-        self.assertEqual(LinearModelArtifact.from_dict(artifact.to_dict()).feature_names, ["x1"])
+        round_trip_live = LiveMonitorConfig.from_dict(live_config.to_dict())
+        self.assertEqual(round_trip_live.mode, "portfolio_run")
+        self.assertEqual(round_trip_live.portfolio_run_id, "portfolio-1")
+        self.assertEqual(round_trip_live.deployment_variant, "pooled")
+        self.assertEqual(round_trip_live.pinned_runs[0].asset_symbol, "SPY")
+        round_trip_artifact = LinearModelArtifact.from_dict(artifact.to_dict())
+        self.assertEqual(round_trip_artifact.feature_names, ["x1"])
+        self.assertEqual(round_trip_artifact.model_family, "custom_linear")
+        self.assertEqual(
+            LiveMonitorConfig.from_dict({"fallback_mode": "SPY", "pinned_runs": [live_config.pinned_runs[0].to_dict()]}).mode,
+            "asset_model_set",
+        )
 
 
 if __name__ == "__main__":

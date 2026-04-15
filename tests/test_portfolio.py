@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import unittest
+import warnings
 
+import numpy as np
 import pandas as pd
 
 from trump_workbench.backtesting import BacktestService
@@ -219,6 +221,91 @@ class PortfolioAllocatorIntegrationTests(unittest.TestCase):
         self.assertIn("always_long_qqq", artifacts["benchmarks"]["benchmark_name"].tolist())
         self.assertIn("always_long_aapl", artifacts["benchmarks"]["benchmark_name"].tolist())
         self.assertFalse(artifacts["candidate_predictions"].empty)
+        self.assertTrue(artifacts["leakage_audit"]["overall_pass"])
+
+    @staticmethod
+    def _joint_feature_rows(symbols: list[str], periods: int = 72) -> pd.DataFrame:
+        signal_dates = pd.bdate_range("2025-02-03", periods=periods)
+        rows: list[dict[str, object]] = []
+        for idx, signal_date in enumerate(signal_dates):
+            next_session_date = signal_dates[idx + 1] if idx + 1 < len(signal_dates) else pd.NaT
+            regime = idx % len(symbols)
+            for asset_offset, asset_symbol in enumerate(symbols):
+                strong_asset = symbols[regime]
+                score = 0.8 if asset_symbol == strong_asset else -0.2
+                target_return = 0.012 if asset_symbol == strong_asset else -0.002
+                open_price = 100.0 + asset_offset * 25.0 + idx
+                close_price = open_price * (1.0 + target_return) if pd.notna(next_session_date) else np.nan
+                rows.append(
+                    {
+                        "signal_session_date": signal_date,
+                        "next_session_date": next_session_date,
+                        "asset_symbol": asset_symbol,
+                        "feature_version": "asset-v1",
+                        "llm_enabled": False,
+                        "target_next_session_return": target_return if pd.notna(next_session_date) else np.nan,
+                        "target_available": pd.notna(next_session_date),
+                        "tradeable": pd.notna(next_session_date),
+                        "next_session_open": open_price if pd.notna(next_session_date) else np.nan,
+                        "next_session_close": close_price,
+                        "post_count": 4 + asset_offset,
+                        "trump_post_count": 1,
+                        "tracked_account_post_count": 2,
+                        "tracked_weighted_mentions": 1.0 + score,
+                        "tracked_weighted_engagement": 5.0 + score,
+                        "sentiment_avg": score,
+                        "sentiment_close": score * 0.9,
+                        "sentiment_range": 0.2 + asset_offset * 0.05,
+                        "mention_concentration": 0.3 + asset_offset * 0.02,
+                        "author_diversity": 2.0 + asset_offset,
+                        "session_return": 0.001 * (idx % 5),
+                        "rolling_vol_5d": 0.01 + asset_offset * 0.001,
+                        "close_vs_ma_5": score * 0.1,
+                        "volume_z_5": 0.2 + asset_offset * 0.03,
+                    },
+                )
+        return pd.DataFrame(rows)
+
+    def test_joint_model_allocator_trains_variants_and_selects_deployment(self) -> None:
+        feature_rows = self._joint_feature_rows(["SPY", "QQQ", "NVDA"])
+        config = PortfolioRunConfig(
+            run_name="joint-portfolio",
+            allocator_mode="joint_model",
+            fallback_mode="SPY",
+            transaction_cost_bps=2.0,
+            universe_symbols=("SPY", "QQQ", "NVDA"),
+            selected_symbols=("SPY", "QQQ", "NVDA"),
+            llm_enabled=False,
+            feature_version="asset-v1",
+            train_window=24,
+            validation_window=12,
+            test_window=12,
+            step_size=12,
+            threshold_grid=(0.0, 0.001),
+            minimum_signal_grid=(1, 2),
+            account_weight_grid=(0.5, 1.0),
+            model_families=("ridge", "hist_gradient_boosting_regressor"),
+            topology_variants=("per_asset", "pooled"),
+        )
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning, module="sklearn")
+            run, artifacts = self.backtests.run_joint_model_allocator(config, feature_rows)
+
+        self.assertEqual(run.run_type, "portfolio_allocator")
+        self.assertEqual(run.allocator_mode, "joint_model")
+        self.assertIn(run.deployment_variant, {"per_asset", "pooled"})
+        self.assertSetEqual(set(artifacts["variant_summary"]["variant_name"].astype(str)), {"per_asset", "pooled"})
+        self.assertIn("deployment_winner", artifacts["variant_summary"].columns)
+        self.assertSetEqual(set(artifacts["candidate_predictions"]["variant_name"].astype(str)), {"per_asset", "pooled"})
+        self.assertSetEqual(set(artifacts["predictions"]["variant_name"].astype(str)), {"per_asset", "pooled"})
+        self.assertSetEqual(set(artifacts["trades"]["variant_name"].astype(str)), {"per_asset", "pooled"})
+        self.assertSetEqual(set(artifacts["benchmarks"]["variant_name"].astype(str)), {"per_asset", "pooled"})
+        self.assertIn(run.deployment_variant, artifacts["portfolio_model_bundle"]["variants"])
+        self.assertEqual(
+            artifacts["portfolio_model_bundle"]["deployment_variant"],
+            run.deployment_variant,
+        )
         self.assertTrue(artifacts["leakage_audit"]["overall_pass"])
 
 
