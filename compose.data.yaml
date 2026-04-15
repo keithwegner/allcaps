@@ -1,0 +1,4 @@
+services:
+  allcaps:
+    volumes:
+      - ./data:/app/data:ro

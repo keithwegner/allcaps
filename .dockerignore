@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+.cache
+.workbench
+__pycache__
+*.pyc
+.coverage
+.coverage.*
+coverage.xml
+htmlcov
+.pytest_cache
+.env
+.env.local
+docker-state

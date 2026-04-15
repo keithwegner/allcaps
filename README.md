@@ -22,6 +22,7 @@ In plain English, the app helps you:
 - [What You Need Before You Start](#what-you-need-before-you-start)
 - [Quick Start](#quick-start)
 - [Contributor Workflow](#contributor-workflow)
+- [Run With Docker](#run-with-docker)
 - [Hosting On Render](#hosting-on-render)
 - [Hosted Environment Variables](#hosted-environment-variables)
 - [Recommended First Run](#recommended-first-run)
@@ -88,6 +89,69 @@ The app opens as a multi-page Streamlit workbench with these sections:
 - `Discovery`
 - `Models & Backtests`
 - `Live Monitor`
+
+## Run With Docker
+
+The repo includes local Docker packaging for a single-user browser workflow.
+
+Default behavior:
+
+- runs the app on [http://127.0.0.1:8501](http://127.0.0.1:8501)
+- keeps the app private and writable by default
+- stores runtime state in a named Docker volume mounted at `/var/data`
+- leaves the scheduler off by default
+
+Start it:
+
+```bash
+docker compose up --build
+```
+
+Open:
+
+- [http://127.0.0.1:8501](http://127.0.0.1:8501)
+
+Stop it:
+
+```bash
+docker compose down
+```
+
+Remove the container and the named state volume:
+
+```bash
+docker compose down -v
+```
+
+Optional env vars:
+
+1. Copy `.env.docker.example` to `.env`
+2. Set any values you want, such as:
+   - `ALPHA_VANTAGE_API_KEY`
+   - `ALLCAPS_REMOTE_X_CSV_URL`
+
+Optional local CSV mount:
+
+If you want the container to read local CSV files from `./data`, start with the extra Compose file:
+
+```bash
+docker compose -f compose.yaml -f compose.data.yaml up --build
+```
+
+That mounts:
+
+- `./data` -> `/app/data` (read-only)
+
+Optional host bind mount for persistent state:
+
+The default setup uses a named Docker volume. If you prefer to keep state in a visible host folder, replace the volume mapping in `compose.yaml` with:
+
+```yaml
+volumes:
+  - ./docker-state:/var/data
+```
+
+That will store DuckDB, parquet data, cache files, and run artifacts in `./docker-state`.
 
 ## Hosting On Render
 
