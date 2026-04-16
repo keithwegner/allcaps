@@ -21,6 +21,7 @@ PORTFOLIO_CANDIDATE_COLUMNS = [
     "tradeable",
     "next_session_open",
     "next_session_close",
+    "next_session_open_ts",
     "signal_qualifies",
     "qualifies",
     "eligible_rank",
@@ -50,6 +51,7 @@ def _normalize_portfolio_candidates(candidates: pd.DataFrame) -> pd.DataFrame:
             board[column] = pd.NA
     board["signal_session_date"] = pd.to_datetime(board["signal_session_date"], errors="coerce")
     board["next_session_date"] = pd.to_datetime(board["next_session_date"], errors="coerce")
+    board["next_session_open_ts"] = pd.to_datetime(board["next_session_open_ts"], errors="coerce", utc=True)
     board["asset_symbol"] = board["asset_symbol"].fillna("").astype(str).str.upper()
     board["run_id"] = board["run_id"].fillna("").astype(str)
     board["run_name"] = board["run_name"].fillna("").astype(str)
