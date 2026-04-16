@@ -2687,7 +2687,11 @@ def render_models_view(
             if len(default_symbols) < 2:
                 default_symbols = available_symbols[: min(len(available_symbols), 3)]
             joint_cols = st.columns(3)
-            joint_run_name = joint_cols[0].text_input("Joint portfolio run name", value="joint-portfolio-run")
+            joint_run_name = joint_cols[0].text_input(
+                "Joint portfolio run name",
+                value="joint-portfolio-run",
+                key="joint-portfolio-run-name",
+            )
             joint_fallback_mode = joint_cols[1].selectbox("Fallback mode", options=["SPY", "FLAT"], index=0, key="joint-portfolio-fallback")
             joint_transaction_cost = joint_cols[2].number_input(
                 "Round-trip cost (bps per side)",
@@ -2705,8 +2709,17 @@ def render_models_view(
                 key="joint-portfolio-symbols",
             )
             feature_versions = sorted(asset_session_features.get("feature_version", pd.Series(["asset-v1"])).dropna().astype(str).unique().tolist()) or ["asset-v1"]
-            joint_feature_version = st.selectbox("Feature version", options=feature_versions, index=0)
-            joint_llm_enabled = st.checkbox("Use semantic enrichment rows", value="llm" in joint_feature_version.lower())
+            joint_feature_version = st.selectbox(
+                "Feature version",
+                options=feature_versions,
+                index=0,
+                key="joint-portfolio-feature-version",
+            )
+            joint_llm_enabled = st.checkbox(
+                "Use semantic enrichment rows",
+                value="llm" in joint_feature_version.lower(),
+                key="joint-portfolio-llm-enabled",
+            )
             narrative_mode_labels = {
                 "baseline": "Baseline",
                 "narrative_only": "Narrative only",
@@ -2719,27 +2732,78 @@ def render_models_view(
                 default=default_narrative_modes,
                 format_func=lambda mode: narrative_mode_labels.get(str(mode), str(mode)),
                 disabled=not joint_llm_enabled,
+                key="joint-portfolio-narrative-feature-modes",
             )
             if not joint_llm_enabled:
                 joint_narrative_feature_modes = ["baseline"]
             window_cols = st.columns(4)
-            joint_train_window = int(window_cols[0].number_input("Train window", min_value=20, max_value=252, value=90, step=5))
-            joint_validation_window = int(window_cols[1].number_input("Validation window", min_value=10, max_value=126, value=30, step=5))
-            joint_test_window = int(window_cols[2].number_input("Test window", min_value=10, max_value=126, value=30, step=5))
-            joint_step_size = int(window_cols[3].number_input("Step size", min_value=5, max_value=126, value=30, step=5))
+            joint_train_window = int(
+                window_cols[0].number_input(
+                    "Train window",
+                    min_value=20,
+                    max_value=252,
+                    value=90,
+                    step=5,
+                    key="joint-portfolio-train-window",
+                ),
+            )
+            joint_validation_window = int(
+                window_cols[1].number_input(
+                    "Validation window",
+                    min_value=10,
+                    max_value=126,
+                    value=30,
+                    step=5,
+                    key="joint-portfolio-validation-window",
+                ),
+            )
+            joint_test_window = int(
+                window_cols[2].number_input(
+                    "Test window",
+                    min_value=10,
+                    max_value=126,
+                    value=30,
+                    step=5,
+                    key="joint-portfolio-test-window",
+                ),
+            )
+            joint_step_size = int(
+                window_cols[3].number_input(
+                    "Step size",
+                    min_value=5,
+                    max_value=126,
+                    value=30,
+                    step=5,
+                    key="joint-portfolio-step-size",
+                ),
+            )
             grid_cols = st.columns(3)
-            joint_threshold_grid = grid_cols[0].text_input("Threshold grid", value="0.0, 0.001, 0.0025, 0.005")
-            joint_minimum_grid = grid_cols[1].text_input("Min post grid", value="1, 2, 3")
-            joint_account_weight_grid = grid_cols[2].text_input("Tracked-account weight grid", value="0.5, 1.0, 1.5")
+            joint_threshold_grid = grid_cols[0].text_input(
+                "Threshold grid",
+                value="0.0, 0.001, 0.0025, 0.005",
+                key="joint-portfolio-threshold-grid",
+            )
+            joint_minimum_grid = grid_cols[1].text_input(
+                "Min post grid",
+                value="1, 2, 3",
+                key="joint-portfolio-minimum-grid",
+            )
+            joint_account_weight_grid = grid_cols[2].text_input(
+                "Tracked-account weight grid",
+                value="0.5, 1.0, 1.5",
+                key="joint-portfolio-account-weight-grid",
+            )
             topology_variants = st.multiselect(
                 "Topology variants",
                 options=["per_asset", "pooled"],
                 default=["per_asset", "pooled"],
+                key="joint-portfolio-topology-variants",
             )
             model_families = st.multiselect(
                 "Model families",
                 options=list(SUPPORTED_PORTFOLIO_MODEL_FAMILIES),
                 default=["ridge", "elastic_net", "hist_gradient_boosting_regressor"],
+                key="joint-portfolio-model-families",
             )
 
             if st.button("Build joint portfolio model", use_container_width=True, disabled=not can_write):

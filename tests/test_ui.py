@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,6 +29,7 @@ from trump_workbench.ui import (
     _variant_summary_with_narrative_defaults,
     _watchlist_symbols,
     _watchlist_text_value,
+    render_models_view,
 )
 
 
@@ -336,6 +338,27 @@ class UiHelperTests(unittest.TestCase):
         family_summary = _build_feature_family_summary(bundle, variant_name="per_asset_hybrid", importance=importance)
         self.assertEqual(family_summary.iloc[0]["feature_family"], "semantic")
         self.assertIn("policy", family_summary["feature_family"].tolist())
+
+    def test_joint_portfolio_controls_have_unique_widget_keys(self) -> None:
+        source = inspect.getsource(render_models_view)
+        required_keys = [
+            "joint-portfolio-run-name",
+            "joint-portfolio-feature-version",
+            "joint-portfolio-llm-enabled",
+            "joint-portfolio-narrative-feature-modes",
+            "joint-portfolio-train-window",
+            "joint-portfolio-validation-window",
+            "joint-portfolio-test-window",
+            "joint-portfolio-step-size",
+            "joint-portfolio-threshold-grid",
+            "joint-portfolio-minimum-grid",
+            "joint-portfolio-account-weight-grid",
+            "joint-portfolio-topology-variants",
+            "joint-portfolio-model-families",
+        ]
+
+        for widget_key in required_keys:
+            self.assertIn(widget_key, source)
 
     def test_replay_helpers_build_session_list_config_and_summary(self) -> None:
         feature_rows = pd.DataFrame(
