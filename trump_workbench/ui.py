@@ -3714,14 +3714,21 @@ def main() -> None:
     _ensure_bootstrap(settings, store, ingestion_service, market_service, discovery_service, feature_service, health_service)
 
     _render_sidebar_access_panel(settings)
-    page = st.sidebar.radio(
+    pages = ["Research View", "Datasets", "Discovery", "Models & Backtests", "Historical Replay", "Live Monitor"]
+    page = st.segmented_control(
         "Workbench",
-        options=["Research View", "Datasets", "Discovery", "Models & Backtests", "Historical Replay", "Live Monitor"],
+        options=pages,
+        default=pages[0],
+        key="workbench_page",
+        label_visibility="collapsed",
+        width="stretch",
     )
     st.sidebar.markdown("---")
     st.sidebar.caption("Storage: DuckDB + Parquet")
     st.sidebar.code(str(settings.state_root))
     st.sidebar.code(str(settings.db_path))
+    if page is None:
+        page = pages[0]
 
     if page == "Research View":
         render_research_view(settings, store, market_service, feature_service)
