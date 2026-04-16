@@ -243,6 +243,7 @@ class PortfolioCandidatePrediction:
     post_count: int
     tradeable: bool = False
     target_available: bool = False
+    next_session_open_ts: Optional[pd.Timestamp] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -353,6 +354,104 @@ class LiveMonitorConfig:
             deployment_variant=str(payload.get("deployment_variant", "") or ""),
             pinned_runs=pinned_runs,
         )
+
+
+@dataclass(frozen=True)
+class PaperPortfolioConfig:
+    paper_portfolio_id: str
+    portfolio_run_id: str
+    portfolio_run_name: str = ""
+    deployment_variant: str = ""
+    fallback_mode: str = "SPY"
+    transaction_cost_bps: float = 0.0
+    starting_cash: float = 100000.0
+    enabled: bool = False
+    created_at: str = ""
+    archived_at: str = ""
+
+    @property
+    def is_archived(self) -> bool:
+        return bool(self.archived_at)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "PaperPortfolioConfig":
+        return cls(
+            paper_portfolio_id=str(payload.get("paper_portfolio_id", "") or ""),
+            portfolio_run_id=str(payload.get("portfolio_run_id", "") or ""),
+            portfolio_run_name=str(payload.get("portfolio_run_name", "") or ""),
+            deployment_variant=str(payload.get("deployment_variant", "") or ""),
+            fallback_mode=str(payload.get("fallback_mode", "SPY") or "SPY").upper(),
+            transaction_cost_bps=float(payload.get("transaction_cost_bps", 0.0) or 0.0),
+            starting_cash=float(payload.get("starting_cash", 100000.0) or 100000.0),
+            enabled=bool(payload.get("enabled", False)),
+            created_at=str(payload.get("created_at", "") or ""),
+            archived_at=str(payload.get("archived_at", "") or ""),
+        )
+
+
+@dataclass(frozen=True)
+class PaperDecisionRecord:
+    paper_portfolio_id: str
+    generated_at: pd.Timestamp
+    signal_session_date: pd.Timestamp
+    next_session_date: Optional[pd.Timestamp]
+    decision_cutoff_ts: Optional[pd.Timestamp]
+    portfolio_run_id: str
+    portfolio_run_name: str
+    deployment_variant: str
+    winning_asset: str
+    winning_run_id: str
+    decision_source: str
+    fallback_mode: str
+    stance: str
+    winner_score: float
+    runner_up_asset: str = ""
+    runner_up_score: float = 0.0
+    eligible_asset_count: int = 0
+    settlement_status: str = "pending"
+    settled_at: Optional[pd.Timestamp] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class PaperTradeRecord:
+    paper_portfolio_id: str
+    signal_session_date: pd.Timestamp
+    next_session_date: Optional[pd.Timestamp]
+    asset_symbol: str
+    run_id: str
+    decision_source: str
+    stance: str
+    next_session_open: float
+    next_session_close: float
+    gross_return: float
+    net_return: float
+    benchmark_return: float
+    transaction_cost_bps: float
+    starting_equity: float
+    ending_equity: float
+    settled_at: pd.Timestamp
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class PaperEquityPoint:
+    paper_portfolio_id: str
+    signal_session_date: pd.Timestamp
+    next_session_date: Optional[pd.Timestamp]
+    equity: float
+    return_pct: float
+    settled_at: pd.Timestamp
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(frozen=True)

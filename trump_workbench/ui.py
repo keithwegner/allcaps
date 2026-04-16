@@ -49,9 +49,24 @@ from .modeling import (
 from .live_monitor import (
     LIVE_ASSET_SNAPSHOT_COLUMNS,
     LIVE_DECISION_SNAPSHOT_COLUMNS,
+    build_live_portfolio_run_state,
     seed_live_monitor_config,
     rank_live_asset_snapshots,
     validate_live_monitor_config,
+)
+from .paper_trading import (
+    PAPER_BENCHMARK_CURVE_COLUMNS,
+    PAPER_DECISION_JOURNAL_COLUMNS,
+    PAPER_EQUITY_CURVE_COLUMNS,
+    PAPER_PORTFOLIO_REGISTRY_COLUMNS,
+    PAPER_TRADE_LEDGER_COLUMNS,
+    PaperTradingService,
+    ensure_paper_benchmark_curve_frame,
+    ensure_paper_decision_journal_frame,
+    ensure_paper_equity_curve_frame,
+    ensure_paper_portfolio_registry_frame,
+    ensure_paper_trade_ledger_frame,
+    paper_config_matches_live,
 )
 from .runtime import (
     append_refresh_history as runtime_append_refresh_history,
@@ -370,6 +385,7 @@ def _build_live_monitor_state_from_asset_model_set(
                 "threshold": float(threshold if threshold is not None else 0.0),
                 "min_post_count": int(min_post_count if min_post_count is not None else 1),
                 "post_count": int(latest_prediction.get("post_count", 0) or 0),
+                "next_session_open_ts": latest_prediction.get("next_session_open_ts"),
             },
         )
         explanation_lookup[asset_symbol] = {
@@ -460,120 +476,13 @@ def _build_live_monitor_state_from_portfolio_run(
     config: LiveMonitorConfig,
     generated_at: pd.Timestamp | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, dict[str, Any]], list[str]]:
-    warnings: list[str] = []
-    explanation_lookup: dict[str, dict[str, Any]] = {}
-    snapshot_time = pd.Timestamp.utcnow().floor("s") if generated_at is None else pd.Timestamp(generated_at)
-    run_id = str(config.portfolio_run_id or "")
-    if not run_id:
-        return pd.DataFrame(columns=LIVE_ASSET_SNAPSHOT_COLUMNS), pd.DataFrame(columns=LIVE_DECISION_SNAPSHOT_COLUMNS), explanation_lookup, ["Select and save a joint portfolio run first."]
-
-    run_bundle = experiment_store.load_run(run_id)
-    if run_bundle is None:
-        return pd.DataFrame(columns=LIVE_ASSET_SNAPSHOT_COLUMNS), pd.DataFrame(columns=LIVE_DECISION_SNAPSHOT_COLUMNS), explanation_lookup, [f"Saved portfolio run `{run_id}` could not be loaded."]
-
-    portfolio_bundle = run_bundle.get("portfolio_model_bundle", {}) or {}
-    deployment_variant = str(config.deployment_variant or portfolio_bundle.get("deployment_variant") or "")
-    variant_payload = (portfolio_bundle.get("variants", {}) or {}).get(deployment_variant, {})
-    if not variant_payload:
-        return pd.DataFrame(columns=LIVE_ASSET_SNAPSHOT_COLUMNS), pd.DataFrame(columns=LIVE_DECISION_SNAPSHOT_COLUMNS), explanation_lookup, [f"Deployment variant `{deployment_variant}` is not available in the pinned portfolio run."]
-
-    selected_symbols = [str(symbol).upper() for symbol in (variant_payload.get("selected_symbols") or portfolio_bundle.get("selected_symbols") or [])]
-    asset_session_features = store.read_frame("asset_session_features")
-    asset_post_mappings = store.read_frame("asset_post_mappings")
-    if asset_session_features.empty:
-        return pd.DataFrame(columns=LIVE_ASSET_SNAPSHOT_COLUMNS), pd.DataFrame(columns=LIVE_DECISION_SNAPSHOT_COLUMNS), explanation_lookup, ["Refresh datasets first so `asset_session_features` is available."]
-    live_rows = asset_session_features.copy()
-    live_rows["asset_symbol"] = live_rows["asset_symbol"].astype(str).str.upper()
-    if selected_symbols:
-        live_rows = live_rows.loc[live_rows["asset_symbol"].isin(selected_symbols)].copy()
-    feature_version = str(variant_payload.get("feature_version") or portfolio_bundle.get("feature_version") or "")
-    if feature_version and "feature_version" in live_rows.columns:
-        matching = live_rows.loc[live_rows["feature_version"].astype(str) == feature_version].copy()
-        if not matching.empty:
-            live_rows = matching
-    llm_enabled = bool(variant_payload.get("llm_enabled", portfolio_bundle.get("llm_enabled", False)))
-    if "llm_enabled" in live_rows.columns:
-        matching = live_rows.loc[live_rows["llm_enabled"].fillna(False).astype(bool) == llm_enabled].copy()
-        if not matching.empty:
-            live_rows = matching
-    if live_rows.empty:
-        return pd.DataFrame(columns=LIVE_ASSET_SNAPSHOT_COLUMNS), pd.DataFrame(columns=LIVE_DECISION_SNAPSHOT_COLUMNS), explanation_lookup, ["No live asset-session rows matched the pinned portfolio run."]
-
-    latest_rows = (
-        live_rows.sort_values(["asset_symbol", "signal_session_date"])
-        .groupby("asset_symbol", as_index=False, sort=False)
-        .tail(1)
-        .reset_index(drop=True)
-    )
-    weighted_rows = _apply_live_account_weight(latest_rows, float(variant_payload.get("account_weight", 1.0) or 1.0))
-    scored_rows, explanation_models = _predict_portfolio_live_variant(
+    return build_live_portfolio_run_state(
+        store=store,
         model_service=model_service,
-        feature_rows=weighted_rows,
-        variant_payload=variant_payload,
-        selected_symbols=selected_symbols,
+        experiment_store=experiment_store,
+        config=config,
+        generated_at=generated_at,
     )
-    if scored_rows.empty:
-        return pd.DataFrame(columns=LIVE_ASSET_SNAPSHOT_COLUMNS), pd.DataFrame(columns=LIVE_DECISION_SNAPSHOT_COLUMNS), explanation_lookup, ["The pinned portfolio models could not score any live rows."]
-
-    threshold = float(variant_payload.get("threshold", 0.0) or 0.0)
-    min_post_count = int(variant_payload.get("min_post_count", 1) or 1)
-    run_name = str(config.portfolio_run_name or run_bundle.get("run", {}).get("run_name", run_id) or run_id)
-    snapshot_rows: list[dict[str, Any]] = []
-    for _, row in scored_rows.sort_values("signal_session_date").iterrows():
-        asset_symbol = str(row.get("asset_symbol", "") or "").upper()
-        snapshot_rows.append(
-            {
-                "generated_at": snapshot_time,
-                "variant_name": deployment_variant,
-                "signal_session_date": row.get("signal_session_date"),
-                "next_session_date": row.get("next_session_date"),
-                "asset_symbol": asset_symbol,
-                "run_id": run_id,
-                "run_name": run_name,
-                "feature_version": str(row.get("feature_version", feature_version) or feature_version),
-                "model_version": str(row.get("model_version", "") or ""),
-                "expected_return_score": float(row.get("expected_return_score", 0.0) or 0.0),
-                "confidence": float(row.get("prediction_confidence", 0.0) or 0.0),
-                "threshold": threshold,
-                "min_post_count": min_post_count,
-                "post_count": int(row.get("post_count", 0) or 0),
-                "target_available": bool(row.get("target_available", False)),
-                "tradeable": bool(row.get("tradeable", row.get("target_available", False))),
-                "next_session_open": row.get("next_session_open"),
-                "next_session_close": row.get("next_session_close"),
-            },
-        )
-        session_date = _normalize_session_date(row.get("signal_session_date"))
-        if asset_post_mappings.empty or session_date is None:
-            post_attribution = pd.DataFrame()
-        else:
-            post_rows = asset_post_mappings.copy()
-            post_rows["asset_symbol"] = post_rows["asset_symbol"].astype(str).str.upper()
-            session_mask = pd.to_datetime(post_rows["session_date"], errors="coerce").dt.normalize() == session_date
-            post_rows = post_rows.loc[(post_rows["asset_symbol"] == asset_symbol) & session_mask].copy()
-            post_attribution = build_post_attribution(post_rows)
-        account_attribution = build_account_attribution(post_attribution)
-        explanation_payload = explanation_models.get(asset_symbol, {})
-        explanation_lookup[asset_symbol] = {
-            "prediction_row": row,
-            "feature_contributions": explanation_payload.get("feature_contributions", pd.DataFrame()),
-            "post_attribution": post_attribution,
-            "account_attribution": account_attribution,
-            "variant_name": deployment_variant,
-        }
-
-    snapshots = pd.DataFrame(snapshot_rows)
-    if snapshots.empty:
-        return pd.DataFrame(columns=LIVE_ASSET_SNAPSHOT_COLUMNS), pd.DataFrame(columns=LIVE_DECISION_SNAPSHOT_COLUMNS), explanation_lookup, ["No live portfolio snapshots were produced."]
-
-    ranked_board, decision = rank_live_asset_snapshots(snapshots, config.fallback_mode)
-    decision["deployment_variant"] = deployment_variant
-    for asset_symbol, payload in explanation_lookup.items():
-        board_match = ranked_board.loc[ranked_board["asset_symbol"].astype(str) == asset_symbol]
-        if board_match.empty:
-            continue
-        payload["board_row"] = board_match.iloc[0]
-    return ranked_board, decision, explanation_lookup, warnings
 
 
 def _build_live_runner_up_frame(board: pd.DataFrame, decision_row: pd.Series) -> pd.DataFrame:
@@ -3197,6 +3106,21 @@ def render_live_monitor(
             st.error(message)
         return
 
+    paper_service = PaperTradingService(store)
+    active_run_rows = joint_portfolio_runs.loc[
+        joint_portfolio_runs["run_id"].astype(str) == str(active_config.portfolio_run_id)
+    ].copy()
+    active_run_row = active_run_rows.iloc[0] if not active_run_rows.empty else pd.Series(dtype=object)
+    active_run_name = str(
+        active_run_row.get("run_name", active_config.portfolio_run_name or active_config.portfolio_run_id)
+        or active_config.portfolio_run_name
+        or active_config.portfolio_run_id
+    )
+    active_run_params = active_run_row.get("selected_params_json", {}) or {}
+    active_transaction_cost_bps = float(active_run_params.get("transaction_cost_bps", 0.0) or 0.0)
+    current_paper_config = paper_service.load_current_config()
+    active_paper_config = current_paper_config if paper_config_matches_live(current_paper_config, active_config) else None
+
     posts = store.read_frame("normalized_posts")
     spy = store.read_frame("spy_daily")
     tracked_accounts = store.read_frame("tracked_accounts")
@@ -3231,13 +3155,17 @@ def render_live_monitor(
         experiment_store.save_live_decision_snapshots(decision_history_row)
         st.session_state["live_monitor_last_persisted_at"] = board_generated_at.isoformat()
 
+    paper_update = {"captured": 0, "settled": 0}
+    if active_paper_config is not None and active_paper_config.enabled:
+        paper_update = paper_service.process_live_history(active_paper_config, as_of=board_generated_at)
+
     decision_row = decision_history_row.iloc[0]
     winner_asset = str(decision_row.get("winning_asset", "") or "")
     winner_rows = board.loc[board["is_winner"]].copy()
     winner_row = winner_rows.iloc[0] if not winner_rows.empty else None
     winner_confidence = float(winner_row["confidence"]) if winner_row is not None else 0.0
     display_asset = winner_asset or "FLAT"
-    tabs = st.tabs(["Current Decision", "Why This Asset Won", "History"])
+    tabs = st.tabs(["Current Decision", "Why This Asset Won", "History", "Paper Portfolio"])
 
     with tabs[0]:
         metric_cols = st.columns(7)
@@ -3422,6 +3350,209 @@ def render_live_monitor(
                 use_container_width=True,
                 hide_index=True,
             )
+
+    with tabs[3]:
+        registry = paper_service.list_portfolios()
+        active_paper_config = paper_service.load_current_config()
+        active_matching_paper = active_paper_config if paper_config_matches_live(active_paper_config, active_config) else None
+        current_journal = ensure_paper_decision_journal_frame(store.read_frame("paper_decision_journal"))
+        current_trades = ensure_paper_trade_ledger_frame(store.read_frame("paper_trade_ledger"))
+        current_equity = ensure_paper_equity_curve_frame(store.read_frame("paper_equity_curve"))
+        current_benchmark = ensure_paper_benchmark_curve_frame(store.read_frame("paper_benchmark_curve"))
+
+        st.markdown("**Paper trading controls**")
+        if not can_write:
+            st.info("Public visitors can inspect the paper portfolio history, but enabling, resetting, and archiving paper trading requires admin access.")
+
+        if active_matching_paper is None:
+            st.info("Paper trading is not enabled for the currently pinned portfolio run.")
+            if can_write:
+                with st.form("paper-portfolio-enable-form"):
+                    starting_cash = st.number_input(
+                        "Starting cash",
+                        min_value=1000.0,
+                        value=100000.0,
+                        step=1000.0,
+                    )
+                    enable_paper = st.form_submit_button("Enable paper trading for pinned run")
+                if enable_paper:
+                    paper_service.upsert_current_for_live_config(
+                        live_config=active_config,
+                        portfolio_run_name=active_run_name,
+                        transaction_cost_bps=active_transaction_cost_bps,
+                        starting_cash=float(starting_cash),
+                        enabled=True,
+                        reset=False,
+                        now=board_generated_at,
+                    )
+                    st.rerun()
+        else:
+            control_cols = st.columns(3)
+            control_cols[0].metric("Paper portfolio", active_matching_paper.paper_portfolio_id)
+            control_cols[1].metric("Status", "Enabled" if active_matching_paper.enabled else "Disabled")
+            control_cols[2].metric("Starting cash", f"${active_matching_paper.starting_cash:,.0f}")
+            toggle_label = "Disable paper trading" if active_matching_paper.enabled else "Enable paper trading"
+            toggle_disabled = not can_write
+            if control_cols[0].button(toggle_label, use_container_width=True, disabled=toggle_disabled):
+                paper_service.upsert_current_for_live_config(
+                    live_config=active_config,
+                    portfolio_run_name=active_run_name,
+                    transaction_cost_bps=active_matching_paper.transaction_cost_bps,
+                    starting_cash=active_matching_paper.starting_cash,
+                    enabled=not active_matching_paper.enabled,
+                    reset=False,
+                    now=board_generated_at,
+                )
+                st.rerun()
+            if control_cols[1].button("Archive current portfolio", use_container_width=True, disabled=not can_write):
+                paper_service.archive_current_config(now=board_generated_at)
+                st.rerun()
+            with control_cols[2].form("paper-portfolio-reset-form"):
+                reset_cash = st.number_input(
+                    "Reset starting cash",
+                    min_value=1000.0,
+                    value=float(active_matching_paper.starting_cash),
+                    step=1000.0,
+                )
+                reset_paper = st.form_submit_button("Reset portfolio", disabled=not can_write)
+            if reset_paper:
+                paper_service.upsert_current_for_live_config(
+                    live_config=active_config,
+                    portfolio_run_name=active_run_name,
+                    transaction_cost_bps=active_transaction_cost_bps or active_matching_paper.transaction_cost_bps,
+                    starting_cash=float(reset_cash),
+                    enabled=True,
+                    reset=True,
+                    now=board_generated_at,
+                )
+                st.rerun()
+
+        if paper_update["captured"] or paper_update["settled"]:
+            st.caption(
+                f"Latest capture cycle: {paper_update['captured']} decision(s) captured, "
+                f"{paper_update['settled']} decision(s) settled."
+            )
+
+        registry = paper_service.list_portfolios()
+        current_journal = ensure_paper_decision_journal_frame(store.read_frame("paper_decision_journal"))
+        current_trades = ensure_paper_trade_ledger_frame(store.read_frame("paper_trade_ledger"))
+        current_equity = ensure_paper_equity_curve_frame(store.read_frame("paper_equity_curve"))
+        current_benchmark = ensure_paper_benchmark_curve_frame(store.read_frame("paper_benchmark_curve"))
+
+        if registry.empty:
+            st.info("No paper portfolios have been created yet.")
+        else:
+            registry_view = registry.copy()
+            registry_view["status"] = np.where(registry_view["archived_at"].notna(), "archived", np.where(registry_view["enabled"], "active", "disabled"))
+            option_ids = registry_view["paper_portfolio_id"].astype(str).tolist()
+            default_portfolio_id = (
+                active_matching_paper.paper_portfolio_id
+                if active_matching_paper is not None
+                else option_ids[0]
+            )
+            selected_paper_id = st.selectbox(
+                "View paper portfolio",
+                options=option_ids,
+                index=option_ids.index(default_portfolio_id) if default_portfolio_id in option_ids else 0,
+                format_func=lambda paper_id: (
+                    lambda row: f"{paper_id} | {row['status']} | {row['portfolio_run_name']} | {row['deployment_variant'] or 'n/a'}"
+                )(registry_view.loc[registry_view["paper_portfolio_id"].astype(str) == str(paper_id)].iloc[0]),
+                key="paper-portfolio-select",
+            )
+            selected_registry_row = registry_view.loc[
+                registry_view["paper_portfolio_id"].astype(str) == str(selected_paper_id)
+            ].iloc[0]
+            selected_journal = current_journal.loc[
+                current_journal["paper_portfolio_id"].astype(str) == str(selected_paper_id)
+            ].copy()
+            selected_trades = current_trades.loc[
+                current_trades["paper_portfolio_id"].astype(str) == str(selected_paper_id)
+            ].copy()
+            selected_equity = current_equity.loc[
+                current_equity["paper_portfolio_id"].astype(str) == str(selected_paper_id)
+            ].copy()
+            selected_benchmark = current_benchmark.loc[
+                current_benchmark["paper_portfolio_id"].astype(str) == str(selected_paper_id)
+            ].copy()
+
+            latest_equity = float(selected_equity["equity"].iloc[-1]) if not selected_equity.empty else float(selected_registry_row["starting_cash"])
+            cumulative_return = latest_equity / float(selected_registry_row["starting_cash"]) - 1.0 if float(selected_registry_row["starting_cash"]) else 0.0
+            unsettled_count = int((selected_journal["settlement_status"].astype(str) == "pending").sum()) if not selected_journal.empty else 0
+            settled_rows = selected_journal.loc[
+                selected_journal["settlement_status"].astype(str).isin(["settled", "flat"])
+            ].copy()
+            last_settled = settled_rows["next_session_date"].max() if not settled_rows.empty else pd.NaT
+            status_cols = st.columns(6)
+            status_cols[0].metric("Portfolio status", str(selected_registry_row["status"]).title())
+            status_cols[1].metric("Current equity", f"${latest_equity:,.2f}")
+            status_cols[2].metric("Cumulative return", f"{cumulative_return:+.2%}")
+            status_cols[3].metric("Realized trades", f"{len(selected_trades):,}")
+            status_cols[4].metric("Open or unsettled", f"{unsettled_count:,}")
+            status_cols[5].metric(
+                "Last settled session",
+                f"{pd.Timestamp(last_settled):%Y-%m-%d}" if pd.notna(last_settled) else "n/a",
+            )
+
+            capture_cols = st.columns(3)
+            last_captured = selected_journal["generated_at"].max() if not selected_journal.empty else pd.NaT
+            last_trade_settled = selected_trades["settled_at"].max() if not selected_trades.empty else pd.NaT
+            capture_cols[0].metric("Scheduler capture", "Enabled" if settings.scheduler_enabled else "Disabled")
+            capture_cols[1].metric(
+                "Last paper decision",
+                f"{pd.Timestamp(last_captured):%Y-%m-%d %H:%M UTC}" if pd.notna(last_captured) else "n/a",
+            )
+            capture_cols[2].metric(
+                "Last trade settled",
+                f"{pd.Timestamp(last_trade_settled):%Y-%m-%d %H:%M UTC}" if pd.notna(last_trade_settled) else "n/a",
+            )
+
+            if selected_equity.empty:
+                st.info("No settled paper portfolio history yet.")
+            else:
+                paper_fig = go.Figure()
+                paper_fig.add_trace(
+                    go.Scatter(
+                        x=selected_equity["next_session_date"],
+                        y=selected_equity["equity"],
+                        mode="lines+markers",
+                        name="Paper portfolio",
+                    ),
+                )
+                if not selected_benchmark.empty:
+                    paper_fig.add_trace(
+                        go.Scatter(
+                            x=selected_benchmark["next_session_date"],
+                            y=selected_benchmark["equity"],
+                            mode="lines+markers",
+                            name="SPY benchmark",
+                        ),
+                    )
+                paper_fig.update_layout(
+                    title="Paper portfolio equity vs SPY",
+                    xaxis_title="Next session date",
+                    yaxis_title="Equity",
+                )
+                st.plotly_chart(paper_fig, use_container_width=True)
+
+            st.markdown("**Recent decision journal**")
+            if selected_journal.empty:
+                st.info("No paper decisions have been recorded for this portfolio yet.")
+            else:
+                st.dataframe(
+                    selected_journal.tail(25),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            st.markdown("**Recent trade ledger**")
+            if selected_trades.empty:
+                st.info("No paper trades have settled for this portfolio yet.")
+            else:
+                st.dataframe(
+                    selected_trades.tail(25),
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
 
 def render_historical_replay_view(

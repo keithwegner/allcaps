@@ -10,10 +10,14 @@ import pandas as pd
 from .config import AppSettings
 from .discovery import DiscoveryService
 from .enrichment import LLMEnrichmentService
+from .experiments import ExperimentStore
 from .features import FeatureService
 from .health import DataHealthService, ensure_refresh_history_frame
 from .ingestion import IngestionService
+from .live_monitor import build_live_portfolio_run_state, validate_live_monitor_config
 from .market import MarketDataService
+from .modeling import ModelService
+from .paper_trading import PaperTradingService, paper_config_matches_live
 from .runtime import missing_core_datasets, refresh_datasets
 from .storage import DuckDBStore
 
@@ -106,6 +110,9 @@ def run_scheduler_once(settings: AppSettings) -> SchedulerDecision:
         health_service = DataHealthService()
         enrichment_service = LLMEnrichmentService(store)
         feature_service = FeatureService(enrichment_service)
+        experiment_store = ExperimentStore(store)
+        model_service = ModelService()
+        paper_service = PaperTradingService(store)
         refresh_datasets(
             settings=settings,
             store=store,
@@ -119,6 +126,25 @@ def run_scheduler_once(settings: AppSettings) -> SchedulerDecision:
             incremental=decision.incremental,
             refresh_mode=decision.refresh_mode,
         )
+        live_config = experiment_store.load_live_monitor_config()
+        if live_config is not None:
+            runs = experiment_store.list_runs()
+            live_errors = validate_live_monitor_config(live_config, runs)
+            if not live_errors and str(live_config.mode or "portfolio_run") == "portfolio_run":
+                generated_at = pd.Timestamp.utcnow().floor("s")
+                board, decision_row, _, _warnings = build_live_portfolio_run_state(
+                    store=store,
+                    model_service=model_service,
+                    experiment_store=experiment_store,
+                    config=live_config,
+                    generated_at=generated_at,
+                )
+                if not board.empty and not decision_row.empty:
+                    experiment_store.save_live_asset_snapshots(board)
+                    experiment_store.save_live_decision_snapshots(decision_row)
+                    paper_config = paper_service.load_current_config()
+                    if paper_config_matches_live(paper_config, live_config):
+                        paper_service.process_live_history(paper_config, as_of=generated_at)
         return decision
     finally:
         release_refresh_lock(settings, lock_fd)

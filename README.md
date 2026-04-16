@@ -13,8 +13,9 @@ In plain English, the app helps you:
 - collect Trump-related social data
 - decide which X accounts matter enough to track
 - turn that data into trading features
-- backtest a simple **long / flat SPY** strategy
-- compare saved runs and inspect why a run did or did not work
+- backtest **long / flat** strategies for `SPY` and tracked assets
+- compare saved runs, portfolio variants, and inspect why a run did or did not work
+- monitor live portfolio decisions and a paper-trading audit trail
 
 ## Table of Contents
 
@@ -202,7 +203,8 @@ If you are new to the app, follow this order:
 4. Open `Discovery` and review the tracked-account universe.
 5. Open `Research View` to inspect mapped posts and market context.
 6. Open `Models & Backtests` and run a baseline walk-forward backtest.
-7. Open `Live Monitor` only after you have at least one saved model run.
+7. Save a joint portfolio run in `Models & Backtests`.
+8. Open `Live Monitor` to pin that run, inspect the live board, and optionally enable paper trading.
 
 ## How To Work With Each Page
 
@@ -283,18 +285,20 @@ Inputs you can tune here include:
 
 ## `Live Monitor`
 
-This page gives you a lightweight, polling-style live view after you already have a saved model.
+This page gives you a live decision console after you already have a saved joint portfolio run.
 
 Use it to:
 
 - poll sources for new rows
-- see the latest signal session and expected next-session return
-- inspect the current suggested stance
-- review prediction snapshot history over time
+- pin a saved joint portfolio run for live monitoring
+- inspect the ranked live asset board and current suggested stance
+- review explanation details for the winner and runner-up
+- review persisted live board and decision history over time
+- enable paper trading, inspect the paper decision journal, and track realized equity vs `SPY`
 
 Important note:
 
-- This page will not do much until you have already created at least one saved run in `Models & Backtests`
+- This page will not do much until you have already created at least one saved joint portfolio run in `Models & Backtests`
 
 ## Data Inputs
 
@@ -362,7 +366,8 @@ Here is the most common way to use the app from start to finish:
 4. Explore `Research View` to sanity-check whether the mapped posts look reasonable.
 5. Run a default experiment in `Models & Backtests`.
 6. Compare the strategy against the built-in baselines.
-7. If one run looks promising, use `Live Monitor` to watch the latest score from the most recent saved model.
+7. Save a joint portfolio run if you want live portfolio monitoring.
+8. Use `Live Monitor` to watch the latest board, pin a deployment run, and optionally track paper PnL.
 
 ## Troubleshooting
 
@@ -381,7 +386,13 @@ If `Models & Backtests` says there is no data:
 
 If `Live Monitor` says there is no saved model:
 
-- create and save a run in `Models & Backtests` first
+- create and save a joint portfolio run in `Models & Backtests` first
+
+If `Live Monitor` shows no paper portfolio history:
+
+- save and pin a joint portfolio run first
+- enable paper trading from the `Paper Portfolio` tab
+- use polling or let the scheduler persist live decisions before the next session opens
 
 If the intraday drill-down fails:
 
@@ -389,11 +400,12 @@ If the intraday drill-down fails:
 
 ## Current Limits
 
-- `SPY` is the only traded instrument in v1
-- the strategy is `long / flat` only in v1
+- the strategy is `long / flat` only
+- the portfolio allocator holds at most one asset per session
+- paper trading is simulated only; there is no broker integration or order routing
 - semantic enrichment is optional and heuristic-backed by default
-- the app is single-user and local-first
-- the current research layer is exploratory, not production trading infrastructure
+- hosted mode is still single-instance and admin-gated rather than full multi-user auth
+- the research and live layers are decision-support tools, not production trading infrastructure
 
 ## Architecture
 
