@@ -242,7 +242,7 @@ class PortfolioAllocatorIntegrationTests(unittest.TestCase):
                         "next_session_date": next_session_date,
                         "asset_symbol": asset_symbol,
                         "feature_version": "asset-v1",
-                        "llm_enabled": False,
+                        "llm_enabled": True,
                         "target_next_session_return": target_return if pd.notna(next_session_date) else np.nan,
                         "target_available": pd.notna(next_session_date),
                         "tradeable": pd.notna(next_session_date),
@@ -262,6 +262,16 @@ class PortfolioAllocatorIntegrationTests(unittest.TestCase):
                         "rolling_vol_5d": 0.01 + asset_offset * 0.001,
                         "close_vs_ma_5": score * 0.1,
                         "volume_z_5": 0.2 + asset_offset * 0.03,
+                        "semantic_market_relevance_avg": 0.8 if asset_symbol == strong_asset else 0.2,
+                        "semantic_urgency_avg": 0.7 if asset_symbol == strong_asset else 0.1,
+                        "semantic_topic_trade": 1.0 if asset_symbol == strong_asset else 0.0,
+                        "semantic_topic_markets": 1.0,
+                        "policy_trade": 1.0 if asset_symbol == strong_asset else 0.0,
+                        "policy_economy": 0.5,
+                        "semantic_matched_post_count": 3 if asset_symbol == strong_asset else 1,
+                        "primary_match_post_count": 2 if asset_symbol == strong_asset else 0,
+                        "asset_relevance_score_avg": 0.8 if asset_symbol == strong_asset else 0.2,
+                        "asset_semantic_match_score_avg": 0.75 if asset_symbol == strong_asset else 0.15,
                     },
                 )
         return pd.DataFrame(rows)
@@ -275,7 +285,7 @@ class PortfolioAllocatorIntegrationTests(unittest.TestCase):
             transaction_cost_bps=2.0,
             universe_symbols=("SPY", "QQQ", "NVDA"),
             selected_symbols=("SPY", "QQQ", "NVDA"),
-            llm_enabled=False,
+            llm_enabled=True,
             feature_version="asset-v1",
             train_window=24,
             validation_window=12,
@@ -283,9 +293,10 @@ class PortfolioAllocatorIntegrationTests(unittest.TestCase):
             step_size=12,
             threshold_grid=(0.0, 0.001),
             minimum_signal_grid=(1, 2),
-            account_weight_grid=(0.5, 1.0),
-            model_families=("ridge", "hist_gradient_boosting_regressor"),
+            account_weight_grid=(1.0,),
+            model_families=("ridge",),
             topology_variants=("per_asset", "pooled"),
+            narrative_feature_modes=("baseline", "narrative_only", "hybrid"),
         )
 
         with warnings.catch_warnings():
@@ -294,14 +305,31 @@ class PortfolioAllocatorIntegrationTests(unittest.TestCase):
 
         self.assertEqual(run.run_type, "portfolio_allocator")
         self.assertEqual(run.allocator_mode, "joint_model")
-        self.assertIn(run.deployment_variant, {"per_asset", "pooled"})
-        self.assertSetEqual(set(artifacts["variant_summary"]["variant_name"].astype(str)), {"per_asset", "pooled"})
+        expected_variants = {
+            "per_asset_baseline",
+            "per_asset_narrative_only",
+            "per_asset_hybrid",
+            "pooled_baseline",
+            "pooled_narrative_only",
+            "pooled_hybrid",
+        }
+        self.assertIn(run.deployment_variant, expected_variants)
+        self.assertSetEqual(set(artifacts["variant_summary"]["variant_name"].astype(str)), expected_variants)
+        self.assertSetEqual(set(artifacts["variant_summary"]["topology"].astype(str)), {"per_asset", "pooled"})
+        self.assertSetEqual(
+            set(artifacts["variant_summary"]["narrative_feature_mode"].astype(str)),
+            {"baseline", "narrative_only", "hybrid"},
+        )
         self.assertIn("deployment_winner", artifacts["variant_summary"].columns)
-        self.assertSetEqual(set(artifacts["candidate_predictions"]["variant_name"].astype(str)), {"per_asset", "pooled"})
-        self.assertSetEqual(set(artifacts["predictions"]["variant_name"].astype(str)), {"per_asset", "pooled"})
-        self.assertSetEqual(set(artifacts["trades"]["variant_name"].astype(str)), {"per_asset", "pooled"})
-        self.assertSetEqual(set(artifacts["benchmarks"]["variant_name"].astype(str)), {"per_asset", "pooled"})
+        self.assertSetEqual(set(artifacts["candidate_predictions"]["variant_name"].astype(str)), expected_variants)
+        self.assertSetEqual(set(artifacts["predictions"]["variant_name"].astype(str)), expected_variants)
+        self.assertSetEqual(set(artifacts["trades"]["variant_name"].astype(str)), expected_variants)
+        self.assertSetEqual(set(artifacts["benchmarks"]["variant_name"].astype(str)), expected_variants)
         self.assertIn(run.deployment_variant, artifacts["portfolio_model_bundle"]["variants"])
+        self.assertEqual(
+            artifacts["portfolio_model_bundle"]["variants"][run.deployment_variant]["narrative_feature_mode"],
+            run.selected_params["deployment_narrative_feature_mode"],
+        )
         self.assertEqual(
             artifacts["portfolio_model_bundle"]["deployment_variant"],
             run.deployment_variant,

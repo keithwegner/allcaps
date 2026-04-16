@@ -11,9 +11,11 @@ import pandas as pd
 
 from .contracts import BacktestRun, ModelRunConfig, PortfolioRunConfig
 from .modeling import (
+    NARRATIVE_FEATURE_MODES,
     SUPPORTED_PORTFOLIO_MODEL_FAMILIES,
     ModelService,
     add_asset_indicator_columns,
+    normalize_narrative_feature_mode,
 )
 from .portfolio import build_portfolio_decision_history
 
@@ -476,6 +478,40 @@ def _flatten_metric_payload(prefix: str, metrics: dict[str, float]) -> dict[str,
     }
 
 
+def _resolve_narrative_feature_modes(run_config: PortfolioRunConfig) -> tuple[str, ...]:
+    requested = tuple(
+        normalize_narrative_feature_mode(value)
+        for value in (run_config.narrative_feature_modes or ())
+    )
+    if not requested:
+        requested = ("hybrid",) if run_config.llm_enabled else ("baseline",)
+    if not run_config.llm_enabled:
+        requested = tuple(value for value in requested if value == "baseline") or ("baseline",)
+    deduped: list[str] = []
+    for mode in requested:
+        if mode not in NARRATIVE_FEATURE_MODES or mode in deduped:
+            continue
+        deduped.append(mode)
+    return tuple(deduped or ("baseline",))
+
+
+def _joint_variant_name(topology: str, narrative_feature_mode: str) -> str:
+    return f"{topology}_{narrative_feature_mode}"
+
+
+def _is_skippable_joint_variant_error(exc: RuntimeError) -> bool:
+    message = str(exc)
+    return any(
+        fragment in message
+        for fragment in [
+            "No numeric feature columns",
+            "No trainable rows",
+            "No trainable asset rows",
+            "could not train any candidate models",
+        ]
+    )
+
+
 def build_joint_portfolio_leakage_audit(
     feature_rows: pd.DataFrame,
     candidate_predictions: pd.DataFrame,
@@ -871,6 +907,7 @@ class BacktestService:
         selected_symbols = tuple(window_plan["selected_symbols"])
         topology_variants = tuple(run_config.topology_variants or ("per_asset", "pooled"))
         model_families = tuple(run_config.model_families or SUPPORTED_PORTFOLIO_MODEL_FAMILIES)
+        narrative_feature_modes = _resolve_narrative_feature_modes(run_config)
 
         all_variant_predictions: list[pd.DataFrame] = []
         all_variant_decisions: list[pd.DataFrame] = []
@@ -885,27 +922,36 @@ class BacktestService:
         variant_test_metrics: dict[str, dict[str, float]] = {}
         variant_validation_metrics: dict[str, dict[str, float]] = {}
 
-        for variant_name in topology_variants:
-            variant_result = self._train_joint_variant(
-                run_config=run_config,
-                feature_rows=usable,
-                variant_name=variant_name,
-                model_families=model_families,
-                selected_symbols=selected_symbols,
-                windows=window_plan["windows"],
-            )
-            variant_bundles[variant_name] = variant_result["portfolio_model_bundle"]
-            variant_validation_metrics[variant_name] = variant_result["validation_metrics"]
-            variant_test_metrics[variant_name] = variant_result["test_metrics"]
-            all_variant_predictions.append(variant_result["candidate_predictions"])
-            all_variant_decisions.append(variant_result["decision_history"])
-            all_variant_trades.append(variant_result["trades"])
-            all_variant_benchmarks.append(variant_result["benchmarks"])
-            all_variant_curves.append(variant_result["benchmark_curves"])
-            all_variant_diagnostics.append(variant_result["diagnostics"])
-            all_variant_importance.append(variant_result["importance"])
-            all_window_rows.append(variant_result["window_summary"])
-            variant_summary_rows.append(variant_result["variant_summary"])
+        for topology in topology_variants:
+            for narrative_feature_mode in narrative_feature_modes:
+                variant_name = _joint_variant_name(str(topology), narrative_feature_mode)
+                try:
+                    variant_result = self._train_joint_variant(
+                        run_config=run_config,
+                        feature_rows=usable,
+                        variant_name=variant_name,
+                        topology=str(topology),
+                        narrative_feature_mode=narrative_feature_mode,
+                        model_families=model_families,
+                        selected_symbols=selected_symbols,
+                        windows=window_plan["windows"],
+                    )
+                except RuntimeError as exc:
+                    if not _is_skippable_joint_variant_error(exc):
+                        raise
+                    continue
+                variant_bundles[variant_name] = variant_result["portfolio_model_bundle"]
+                variant_validation_metrics[variant_name] = variant_result["validation_metrics"]
+                variant_test_metrics[variant_name] = variant_result["test_metrics"]
+                all_variant_predictions.append(variant_result["candidate_predictions"])
+                all_variant_decisions.append(variant_result["decision_history"])
+                all_variant_trades.append(variant_result["trades"])
+                all_variant_benchmarks.append(variant_result["benchmarks"])
+                all_variant_curves.append(variant_result["benchmark_curves"])
+                all_variant_diagnostics.append(variant_result["diagnostics"])
+                all_variant_importance.append(variant_result["importance"])
+                all_window_rows.append(variant_result["window_summary"])
+                variant_summary_rows.append(variant_result["variant_summary"])
 
         variant_summary = pd.DataFrame(variant_summary_rows).reset_index(drop=True)
         if variant_summary.empty:
@@ -939,6 +985,7 @@ class BacktestService:
         run_config_payload["selected_symbols"] = list(selected_symbols)
         run_config_payload["topology_variants"] = list(topology_variants)
         run_config_payload["model_families"] = list(model_families)
+        run_config_payload["narrative_feature_modes"] = list(narrative_feature_modes)
         run_config_payload["deployment_variant"] = deployment_variant
 
         chosen_summary = variant_summary.loc[variant_summary["variant_name"].astype(str) == deployment_variant].iloc[0]
@@ -966,6 +1013,8 @@ class BacktestService:
                 "transaction_cost_bps": float(run_config.transaction_cost_bps),
                 "selected_symbols": list(selected_symbols),
                 "deployment_variant": deployment_variant,
+                "deployment_topology": str(chosen_summary.get("topology", "")),
+                "deployment_narrative_feature_mode": str(chosen_summary.get("narrative_feature_mode", "")),
                 "deployment_model_family": str(chosen_summary.get("model_family", "")),
                 "deployment_threshold": float(chosen_summary.get("threshold", 0.0) or 0.0),
                 "deployment_min_post_count": int(chosen_summary.get("min_post_count", 1) or 1),
@@ -980,6 +1029,7 @@ class BacktestService:
             topology_variants=list(topology_variants),
             model_families=list(model_families),
             selected_symbols=list(selected_symbols),
+            narrative_feature_modes=list(narrative_feature_modes),
         )
 
         portfolio_model_bundle = {
@@ -988,6 +1038,7 @@ class BacktestService:
             "fallback_mode": run_config.fallback_mode,
             "feature_version": run_config.feature_version,
             "llm_enabled": bool(run_config.llm_enabled),
+            "narrative_feature_modes": list(narrative_feature_modes),
             "variants": variant_bundles,
         }
         placeholder_model_artifact = {
@@ -1004,6 +1055,8 @@ class BacktestService:
                 "allocator_mode": run.allocator_mode,
                 "target_asset": run.target_asset,
                 "deployment_variant": deployment_variant,
+                "deployment_topology": str(chosen_summary.get("topology", "")),
+                "deployment_narrative_feature_mode": str(chosen_summary.get("narrative_feature_mode", "")),
             },
         }
         artifacts = {
@@ -1189,6 +1242,8 @@ class BacktestService:
         run_config: PortfolioRunConfig,
         feature_rows: pd.DataFrame,
         variant_name: str,
+        topology: str,
+        narrative_feature_mode: str,
         model_families: tuple[str, ...],
         selected_symbols: tuple[str, ...],
         windows: list[dict[str, Any]],
@@ -1214,25 +1269,34 @@ class BacktestService:
                     weighted_validation = self._apply_account_weight(validation_rows, float(account_weight))
                     weighted_test = self._apply_account_weight(test_rows, float(account_weight))
 
-                    trained = self._fit_joint_variant_models(
-                        variant_name=variant_name,
-                        train_rows=weighted_train,
-                        model_family=model_family,
-                        llm_enabled=bool(run_config.llm_enabled),
-                        run_name=run_config.run_name,
-                        window_suffix=f"window-{window['window_id']}",
-                        selected_symbols=selected_symbols,
-                    )
+                    try:
+                        trained = self._fit_joint_variant_models(
+                            variant_name=variant_name,
+                            topology=topology,
+                            narrative_feature_mode=narrative_feature_mode,
+                            train_rows=weighted_train,
+                            model_family=model_family,
+                            llm_enabled=bool(run_config.llm_enabled),
+                            run_name=run_config.run_name,
+                            window_suffix=f"window-{window['window_id']}",
+                            selected_symbols=selected_symbols,
+                        )
+                    except RuntimeError as exc:
+                        if not _is_skippable_joint_variant_error(exc):
+                            raise
+                        continue
                     validation_prediction = self._predict_joint_variant_models(
                         trained_models=trained,
                         prediction_rows=weighted_validation,
                         variant_name=variant_name,
+                        topology=topology,
                         selected_symbols=selected_symbols,
                     )
                     test_prediction = self._predict_joint_variant_models(
                         trained_models=trained,
                         prediction_rows=weighted_test,
                         variant_name=variant_name,
+                        topology=topology,
                         selected_symbols=selected_symbols,
                     )
                     if validation_prediction.empty or test_prediction.empty:
@@ -1249,6 +1313,8 @@ class BacktestService:
                     window_rows.append(
                         {
                             "variant_name": variant_name,
+                            "topology": topology,
+                            "narrative_feature_mode": narrative_feature_mode,
                             "window_id": int(window["window_id"]),
                             "model_family": model_family,
                             "account_weight": float(account_weight),
@@ -1301,6 +1367,8 @@ class BacktestService:
                 candidate_rows.append(
                     {
                         "variant_name": variant_name,
+                        "topology": topology,
+                        "narrative_feature_mode": narrative_feature_mode,
                         "model_family": model_family,
                         "account_weight": float(account_weight),
                         "threshold": float(best_params["threshold"]),
@@ -1327,6 +1395,8 @@ class BacktestService:
         final_target_rows = final_rows.loc[final_rows["target_available"]].copy()
         final_models = self._fit_joint_variant_models(
             variant_name=variant_name,
+            topology=topology,
+            narrative_feature_mode=narrative_feature_mode,
             train_rows=final_target_rows,
             model_family=str(best_candidate["model_family"]),
             llm_enabled=bool(run_config.llm_enabled),
@@ -1338,6 +1408,7 @@ class BacktestService:
             trained_models=final_models,
             prediction_rows=final_rows,
             variant_name=variant_name,
+            topology=topology,
             selected_symbols=selected_symbols,
         )
         final_board = self._prepare_portfolio_prediction_board(
@@ -1360,6 +1431,8 @@ class BacktestService:
             transaction_cost_bps=float(run_config.transaction_cost_bps),
         )
         final_trades["variant_name"] = variant_name
+        final_trades["topology"] = topology
+        final_trades["narrative_feature_mode"] = narrative_feature_mode
         final_benchmarks, final_curves = build_portfolio_benchmark_suite(
             decision_history=final_decisions,
             candidate_predictions=final_board,
@@ -1368,22 +1441,36 @@ class BacktestService:
             transaction_cost_bps=float(run_config.transaction_cost_bps),
         )
         final_benchmarks["variant_name"] = variant_name
+        final_benchmarks["topology"] = topology
+        final_benchmarks["narrative_feature_mode"] = narrative_feature_mode
         final_diagnostics = build_portfolio_decision_diagnostics(final_decisions, final_board)
         final_diagnostics["variant_name"] = variant_name
+        final_diagnostics["topology"] = topology
+        final_diagnostics["narrative_feature_mode"] = narrative_feature_mode
         final_decisions["variant_name"] = variant_name
+        final_decisions["topology"] = topology
+        final_decisions["narrative_feature_mode"] = narrative_feature_mode
         final_board["variant_name"] = variant_name
+        final_board["topology"] = topology
+        final_board["narrative_feature_mode"] = narrative_feature_mode
         final_curves = final_curves.copy()
         if not final_curves.empty:
             final_curves["variant_name"] = variant_name
+            final_curves["topology"] = topology
+            final_curves["narrative_feature_mode"] = narrative_feature_mode
 
         final_importance = final_models.get("importance", pd.DataFrame()).copy()
         if not final_importance.empty:
             final_importance["variant_name"] = variant_name
+            final_importance["topology"] = topology
+            final_importance["narrative_feature_mode"] = narrative_feature_mode
         if importance_rows:
             final_importance = pd.concat([*importance_rows, final_importance], ignore_index=True)
 
         variant_summary = {
             "variant_name": variant_name,
+            "topology": topology,
+            "narrative_feature_mode": narrative_feature_mode,
             "model_family": str(best_candidate["model_family"]),
             "threshold": float(best_candidate["threshold"]),
             "min_post_count": int(best_candidate["min_post_count"]),
@@ -1394,7 +1481,8 @@ class BacktestService:
         }
         portfolio_model_bundle = {
             "variant_name": variant_name,
-            "topology": variant_name,
+            "topology": topology,
+            "narrative_feature_mode": narrative_feature_mode,
             "model_family": str(best_candidate["model_family"]),
             "threshold": float(best_candidate["threshold"]),
             "min_post_count": int(best_candidate["min_post_count"]),
@@ -1437,6 +1525,8 @@ class BacktestService:
         self,
         *,
         variant_name: str,
+        topology: str,
+        narrative_feature_mode: str,
         train_rows: pd.DataFrame,
         model_family: str,
         llm_enabled: bool,
@@ -1444,17 +1534,25 @@ class BacktestService:
         window_suffix: str,
         selected_symbols: tuple[str, ...],
     ) -> dict[str, Any]:
-        if variant_name == "pooled":
+        if topology == "pooled":
             pooled_train = add_asset_indicator_columns(train_rows, selected_symbols)
             artifact, importance = self.model_service.train_with_family(
                 pooled_train,
                 llm_enabled=llm_enabled,
                 model_family=model_family,
                 model_version=f"{run_name}-{variant_name}-{model_family}-{window_suffix}",
-                metadata={"variant_name": variant_name, "selected_symbols": list(selected_symbols)},
+                metadata={
+                    "variant_name": variant_name,
+                    "topology": topology,
+                    "narrative_feature_mode": narrative_feature_mode,
+                    "selected_symbols": list(selected_symbols),
+                },
+                feature_mode=narrative_feature_mode,
             )
             return {
                 "variant_name": variant_name,
+                "topology": topology,
+                "narrative_feature_mode": narrative_feature_mode,
                 "model_family": model_family,
                 "models": {
                     "pooled": artifact.to_dict(),
@@ -1473,7 +1571,13 @@ class BacktestService:
                 llm_enabled=llm_enabled,
                 model_family=model_family,
                 model_version=f"{run_name}-{variant_name}-{asset_symbol.lower()}-{model_family}-{window_suffix}",
-                metadata={"variant_name": variant_name, "asset_symbol": asset_symbol},
+                metadata={
+                    "variant_name": variant_name,
+                    "topology": topology,
+                    "narrative_feature_mode": narrative_feature_mode,
+                    "asset_symbol": asset_symbol,
+                },
+                feature_mode=narrative_feature_mode,
             )
             models[asset_symbol] = artifact.to_dict()
             if not importance.empty:
@@ -1484,6 +1588,8 @@ class BacktestService:
             raise RuntimeError(f"No trainable asset rows were available for `{variant_name}`.")
         return {
             "variant_name": variant_name,
+            "topology": topology,
+            "narrative_feature_mode": narrative_feature_mode,
             "model_family": model_family,
             "models": models,
             "importance": pd.concat(importance_frames, ignore_index=True) if importance_frames else pd.DataFrame(),
@@ -1495,13 +1601,14 @@ class BacktestService:
         trained_models: dict[str, Any],
         prediction_rows: pd.DataFrame,
         variant_name: str,
+        topology: str,
         selected_symbols: tuple[str, ...],
     ) -> pd.DataFrame:
         if prediction_rows.empty:
             return pd.DataFrame()
 
         rows: list[pd.DataFrame] = []
-        if variant_name == "pooled":
+        if topology == "pooled":
             artifact_payload = (trained_models.get("models", {}) or {}).get("pooled")
             if not artifact_payload:
                 return pd.DataFrame()

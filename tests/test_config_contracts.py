@@ -139,6 +139,7 @@ class ConfigAndContractsTests(unittest.TestCase):
             selected_symbols=("SPY", "QQQ"),
             model_families=("ridge", "hist_gradient_boosting_regressor"),
             topology_variants=("per_asset", "pooled"),
+            narrative_feature_modes=("baseline", "hybrid"),
             deployment_variant="pooled",
         )
         snapshot = PredictionSnapshot(
@@ -198,6 +199,7 @@ class ConfigAndContractsTests(unittest.TestCase):
         self.assertEqual(config.to_dict()["threshold_grid"], list(config.threshold_grid))
         self.assertEqual(portfolio_config.to_dict()["component_run_ids"], ["spy-run", "qqq-run"])
         self.assertEqual(portfolio_config.to_dict()["selected_symbols"], ["SPY", "QQQ"])
+        self.assertEqual(portfolio_config.to_dict()["narrative_feature_modes"], ["baseline", "hybrid"])
         self.assertEqual(snapshot.to_dict()["target_asset"], "SPY")
         self.assertEqual(snapshot.to_dict()["stance"], "long")
         self.assertEqual(backtest_run.to_dict()["run_id"], "run-1")

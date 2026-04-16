@@ -115,6 +115,7 @@ class ExperimentStore:
         leakage_audit: dict[str, Any],
         variant_summary: pd.DataFrame | None = None,
         portfolio_model_bundle: dict[str, Any] | None = None,
+        importance: pd.DataFrame | None = None,
     ) -> SavedRunArtifacts:
         run_dir = self.store.artifact_path("runs", run.run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -144,7 +145,7 @@ class ExperimentStore:
         trades.to_parquet(trades_path, index=False)
         decision_history.to_parquet(predictions_path, index=False)
         component_summary.to_parquet(windows_path, index=False)
-        pd.DataFrame().to_parquet(importance_path, index=False)
+        (importance if importance is not None else pd.DataFrame()).to_parquet(importance_path, index=False)
         candidate_predictions.to_parquet(candidate_predictions_path, index=False)
         benchmarks.to_parquet(benchmarks_path, index=False)
         diagnostics.to_parquet(diagnostics_path, index=False)

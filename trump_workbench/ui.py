@@ -41,6 +41,7 @@ from .ingestion import IngestionService, TruthSocialArchiveAdapter, XCsvAdapter
 from .market import MarketDataService, build_asset_universe, build_watchlist_frame, normalize_symbols
 from .modeling import (
     ASSET_INDICATOR_PREFIX,
+    NARRATIVE_FEATURE_MODES,
     ModelService,
     SUPPORTED_PORTFOLIO_MODEL_FAMILIES,
     add_asset_indicator_columns,
@@ -2020,6 +2021,15 @@ def _comparison_settings(run_bundle: dict[str, Any]) -> dict[str, Any]:
     selected = run_bundle.get("selected_params", {}) or {}
     artifact = run_bundle.get("model_artifact")
     run_meta = run_bundle.get("run", {}) or {}
+    portfolio_bundle = run_bundle.get("portfolio_model_bundle", {}) or {}
+    deployment_variant = str(
+        selected.get("deployment_variant")
+        or config.get("deployment_variant")
+        or run_meta.get("deployment_variant")
+        or portfolio_bundle.get("deployment_variant")
+        or "",
+    )
+    variant_payload = (portfolio_bundle.get("variants", {}) or {}).get(deployment_variant, {})
     return {
         "run_type": str(run_meta.get("run_type") or getattr(artifact, "metadata", {}).get("run_type", "asset_model")),
         "allocator_mode": str(
@@ -2053,13 +2063,25 @@ def _comparison_settings(run_bundle: dict[str, Any]) -> dict[str, Any]:
                 config.get("selected_symbols", run_meta.get("selected_symbols", [])),
             ),
         ),
-        "deployment_variant": str(
-            selected.get("deployment_variant")
-            or config.get("deployment_variant")
-            or run_meta.get("deployment_variant")
+        "deployment_variant": deployment_variant,
+        "deployment_topology": str(
+            selected.get("deployment_topology")
+            or variant_payload.get("topology")
+            or deployment_variant
             or "",
         ),
+        "deployment_narrative_feature_mode": str(
+            selected.get("deployment_narrative_feature_mode")
+            or variant_payload.get("narrative_feature_mode")
+            or "unspecified",
+        ),
         "topology_variants": tuple(config.get("topology_variants", run_meta.get("topology_variants", []))),
+        "narrative_feature_modes": tuple(
+            config.get(
+                "narrative_feature_modes",
+                run_meta.get("narrative_feature_modes", portfolio_bundle.get("narrative_feature_modes", [])),
+            ),
+        ),
         "model_families": tuple(config.get("model_families", run_meta.get("model_families", []))),
         "deploy_threshold": selected.get("threshold"),
         "deploy_min_post_count": selected.get("min_post_count"),
@@ -2105,6 +2127,7 @@ def _build_metric_comparison_table(base_run_id: str, run_bundles: dict[str, dict
                 "allocator_mode": _comparison_settings(bundle).get("allocator_mode", ""),
                 "target_asset": _comparison_settings(bundle).get("target_asset", "SPY"),
                 "deployment_variant": _comparison_settings(bundle).get("deployment_variant", ""),
+                "deployment_narrative_feature_mode": _comparison_settings(bundle).get("deployment_narrative_feature_mode", ""),
                 "total_return": metrics.get("total_return", 0.0),
                 "sharpe": metrics.get("sharpe", 0.0),
                 "sortino": metrics.get("sortino", 0.0),
@@ -2157,6 +2180,7 @@ def _build_feature_diff_table(base_run_id: str, run_bundles: dict[str, dict[str,
                 "run_name": bundle.get("run", {}).get("run_name", run_id),
                 "target_asset": _comparison_settings(bundle).get("target_asset", "SPY"),
                 "deployment_variant": _comparison_settings(bundle).get("deployment_variant", ""),
+                "deployment_narrative_feature_mode": _comparison_settings(bundle).get("deployment_narrative_feature_mode", ""),
                 "feature_count": len(feature_names),
                 "semantic_features": families.get("semantic", 0),
                 "policy_features": families.get("policy", 0),
@@ -2171,6 +2195,108 @@ def _build_feature_diff_table(base_run_id: str, run_bundles: dict[str, dict[str,
             },
         )
     return pd.DataFrame(rows).sort_values(["unique_vs_base_count", "feature_count"], ascending=[False, False]).reset_index(drop=True)
+
+
+def _variant_summary_with_narrative_defaults(variant_summary: pd.DataFrame) -> pd.DataFrame:
+    normalized = variant_summary.copy()
+    if normalized.empty:
+        return normalized
+    if "variant_name" not in normalized.columns:
+        normalized["variant_name"] = ""
+    if "topology" not in normalized.columns:
+        normalized["topology"] = normalized["variant_name"].astype(str)
+    if "narrative_feature_mode" not in normalized.columns:
+        normalized["narrative_feature_mode"] = "unspecified"
+    normalized["topology"] = normalized["topology"].replace("", pd.NA).fillna(normalized["variant_name"].astype(str))
+    normalized["narrative_feature_mode"] = normalized["narrative_feature_mode"].replace("", "unspecified").fillna("unspecified")
+    return normalized
+
+
+def _build_narrative_lift_table(variant_summary: pd.DataFrame) -> pd.DataFrame:
+    summary = _variant_summary_with_narrative_defaults(variant_summary)
+    if summary.empty or "baseline" not in set(summary["narrative_feature_mode"].astype(str)):
+        return pd.DataFrame()
+    rows: list[dict[str, Any]] = []
+    metric_pairs = [
+        ("validation_robust_score", "validation_robust_lift"),
+        ("validation_total_return", "validation_return_lift"),
+        ("test_robust_score", "test_robust_lift"),
+        ("test_total_return", "test_return_lift"),
+    ]
+    baseline_rows = summary.loc[summary["narrative_feature_mode"].astype(str) == "baseline"].copy()
+    for _, row in summary.iterrows():
+        mode = str(row.get("narrative_feature_mode", "unspecified") or "unspecified")
+        if mode in {"baseline", "unspecified"}:
+            continue
+        topology = str(row.get("topology", "") or "")
+        baseline = baseline_rows.loc[baseline_rows["topology"].astype(str) == topology]
+        if baseline.empty:
+            continue
+        baseline_row = baseline.iloc[0]
+        lift_row = {
+            "variant_name": row.get("variant_name", ""),
+            "topology": topology,
+            "narrative_feature_mode": mode,
+            "baseline_variant": baseline_row.get("variant_name", ""),
+        }
+        for metric_column, output_column in metric_pairs:
+            current_value = pd.to_numeric(pd.Series([row.get(metric_column)]), errors="coerce").iloc[0]
+            baseline_value = pd.to_numeric(pd.Series([baseline_row.get(metric_column)]), errors="coerce").iloc[0]
+            lift_row[output_column] = (
+                float(current_value - baseline_value)
+                if pd.notna(current_value) and pd.notna(baseline_value)
+                else np.nan
+            )
+        rows.append(lift_row)
+    return pd.DataFrame(rows).sort_values("validation_robust_lift", ascending=False).reset_index(drop=True) if rows else pd.DataFrame()
+
+
+def _build_feature_family_summary(
+    run_bundle: dict[str, Any],
+    variant_name: str | None = None,
+    importance: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    importance_frame = pd.DataFrame() if importance is None else importance.copy()
+    if not importance_frame.empty and "feature_name" in importance_frame.columns:
+        if variant_name and "variant_name" in importance_frame.columns:
+            filtered = importance_frame.loc[importance_frame["variant_name"].astype(str) == variant_name].copy()
+            if not filtered.empty:
+                importance_frame = filtered
+        feature_names = importance_frame["feature_name"].dropna().astype(str).tolist()
+        importance_frame["feature_family"] = importance_frame["feature_name"].astype(str).map(classify_feature_family)
+        value_column = "importance" if "importance" in importance_frame.columns else "abs_coefficient"
+        if value_column not in importance_frame.columns:
+            value_column = None
+        rows: list[dict[str, Any]] = []
+        for family, family_rows in importance_frame.groupby("feature_family", sort=True):
+            top_features = family_rows.copy()
+            if value_column is not None:
+                top_features[value_column] = pd.to_numeric(top_features[value_column], errors="coerce").fillna(0.0)
+                top_features = top_features.sort_values(value_column, ascending=False)
+            rows.append(
+                {
+                    "feature_family": family,
+                    "feature_count": int(family_rows["feature_name"].nunique()),
+                    "total_importance": float(pd.to_numeric(family_rows[value_column], errors="coerce").fillna(0.0).sum()) if value_column else np.nan,
+                    "top_features": ", ".join(top_features["feature_name"].dropna().astype(str).head(5).tolist()),
+                },
+            )
+        return pd.DataFrame(rows).sort_values(["total_importance", "feature_count"], ascending=[False, False]).reset_index(drop=True)
+
+    feature_names = _bundle_feature_names(run_bundle, variant_name=variant_name)
+    families = Counter(classify_feature_family(feature_name) for feature_name in feature_names)
+    rows = [
+        {
+            "feature_family": family,
+            "feature_count": int(count),
+            "total_importance": np.nan,
+            "top_features": ", ".join(
+                feature_name for feature_name in feature_names if classify_feature_family(feature_name) == family
+            ),
+        }
+        for family, count in families.items()
+    ]
+    return pd.DataFrame(rows).sort_values("feature_count", ascending=False).reset_index(drop=True) if rows else pd.DataFrame()
 
 
 def _build_benchmark_delta_table(base_run_id: str, run_bundles: dict[str, dict[str, Any]]) -> pd.DataFrame:
@@ -2243,6 +2369,12 @@ def _summarize_run_changes(base_run_id: str, run_bundles: dict[str, dict[str, An
             parts.append(f"account weight {base_settings.get('deploy_account_weight')} -> {settings.get('deploy_account_weight')}")
         if settings.get("deployment_variant") != base_settings.get("deployment_variant"):
             parts.append(f"deployment variant {base_settings.get('deployment_variant') or 'n/a'} -> {settings.get('deployment_variant') or 'n/a'}")
+        if settings.get("deployment_narrative_feature_mode") != base_settings.get("deployment_narrative_feature_mode"):
+            parts.append(
+                "narrative mode "
+                f"{base_settings.get('deployment_narrative_feature_mode') or 'n/a'} -> "
+                f"{settings.get('deployment_narrative_feature_mode') or 'n/a'}",
+            )
         unique_vs_base = sorted(features - base_features)
         omitted_vs_base = sorted(base_features - features)
         if unique_vs_base:
@@ -2575,6 +2707,21 @@ def render_models_view(
             feature_versions = sorted(asset_session_features.get("feature_version", pd.Series(["asset-v1"])).dropna().astype(str).unique().tolist()) or ["asset-v1"]
             joint_feature_version = st.selectbox("Feature version", options=feature_versions, index=0)
             joint_llm_enabled = st.checkbox("Use semantic enrichment rows", value="llm" in joint_feature_version.lower())
+            narrative_mode_labels = {
+                "baseline": "Baseline",
+                "narrative_only": "Narrative only",
+                "hybrid": "Hybrid",
+            }
+            default_narrative_modes = list(NARRATIVE_FEATURE_MODES) if joint_llm_enabled else ["baseline"]
+            joint_narrative_feature_modes = st.multiselect(
+                "Narrative feature modes",
+                options=list(NARRATIVE_FEATURE_MODES),
+                default=default_narrative_modes,
+                format_func=lambda mode: narrative_mode_labels.get(str(mode), str(mode)),
+                disabled=not joint_llm_enabled,
+            )
+            if not joint_llm_enabled:
+                joint_narrative_feature_modes = ["baseline"]
             window_cols = st.columns(4)
             joint_train_window = int(window_cols[0].number_input("Train window", min_value=20, max_value=252, value=90, step=5))
             joint_validation_window = int(window_cols[1].number_input("Validation window", min_value=10, max_value=126, value=30, step=5))
@@ -2608,6 +2755,9 @@ def render_models_view(
                 if not model_families:
                     st.error("Select at least one model family.")
                     return
+                if not joint_narrative_feature_modes:
+                    st.error("Select at least one narrative feature mode.")
+                    return
                 try:
                     portfolio_config = PortfolioRunConfig(
                         run_name=joint_run_name,
@@ -2627,6 +2777,7 @@ def render_models_view(
                         account_weight_grid=tuple(float(value) for value in _parse_grid(joint_account_weight_grid, float)),
                         model_families=tuple(str(value) for value in model_families),
                         topology_variants=tuple(str(value) for value in topology_variants),
+                        narrative_feature_modes=tuple(str(value) for value in joint_narrative_feature_modes),
                     )
                 except ValueError as exc:
                     st.error(f"Invalid grid input: {exc}")
@@ -2651,6 +2802,7 @@ def render_models_view(
                             leakage_audit=portfolio_artifacts["leakage_audit"],
                             variant_summary=portfolio_artifacts["variant_summary"],
                             portfolio_model_bundle=portfolio_artifacts["portfolio_model_bundle"],
+                            importance=portfolio_artifacts["importance"],
                         )
                     except RuntimeError as exc:
                         st.error(str(exc))
@@ -2823,7 +2975,7 @@ def render_models_view(
 
     if selected_run_type == "portfolio_allocator":
         selected_variant = str(selected_settings.get("deployment_variant", "") or "")
-        variant_summary = loaded.get("variant_summary", pd.DataFrame()).copy()
+        variant_summary = _variant_summary_with_narrative_defaults(loaded.get("variant_summary", pd.DataFrame()).copy())
         if not variant_summary.empty:
             st.markdown("**Variant comparison**")
             st.dataframe(variant_summary, use_container_width=True, hide_index=True)
@@ -2835,6 +2987,18 @@ def render_models_view(
                     index=variant_options.index(selected_variant) if selected_variant in variant_options else 0,
                     key=f"portfolio-variant-{selected_run_id}",
                 )
+            narrative_lift = _build_narrative_lift_table(variant_summary)
+            if not narrative_lift.empty:
+                st.markdown("**Narrative lift vs. matching baseline**")
+                st.dataframe(narrative_lift, use_container_width=True, hide_index=True)
+        family_summary = _build_feature_family_summary(
+            loaded,
+            variant_name=selected_variant,
+            importance=loaded.get("importance", pd.DataFrame()),
+        )
+        if not family_summary.empty:
+            st.markdown("**Feature-family impact for selected variant**")
+            st.dataframe(family_summary, use_container_width=True, hide_index=True)
         if not loaded["windows"].empty:
             allocator_windows = loaded["windows"].copy()
             if "variant_name" in allocator_windows.columns and selected_variant:
@@ -3073,8 +3237,10 @@ def render_live_monitor(
         selected_params = selected_row.get("selected_params_json", {}) or {}
         selected_symbols = selected_params.get("selected_symbols", [])
         deployment_variant = str(selected_params.get("deployment_variant", "") or "")
+        deployment_narrative_mode = str(selected_params.get("deployment_narrative_feature_mode", "") or "")
         st.caption(
             f"Deployment variant: `{deployment_variant or 'n/a'}` | "
+            f"narrative mode: `{deployment_narrative_mode or 'n/a'}` | "
             f"selected symbols: `{', '.join(selected_symbols) if selected_symbols else 'n/a'}`",
         )
         save_config = st.form_submit_button("Save pinned portfolio run", disabled=not can_write)
@@ -3168,7 +3334,7 @@ def render_live_monitor(
     tabs = st.tabs(["Current Decision", "Why This Asset Won", "History", "Paper Portfolio"])
 
     with tabs[0]:
-        metric_cols = st.columns(7)
+        metric_cols = st.columns(8)
         metric_cols[0].metric("Winning asset", display_asset)
         metric_cols[1].metric(
             "Signal session",
@@ -3179,6 +3345,7 @@ def render_live_monitor(
         metric_cols[4].metric("Winner score", f"{float(decision_row['winner_score']):+.3%}")
         metric_cols[5].metric("Winner confidence", f"{winner_confidence:.2f}")
         metric_cols[6].metric("Deployment variant", str(decision_row.get("deployment_variant", active_config.deployment_variant) or "n/a"))
+        metric_cols[7].metric("Narrative mode", str(decision_row.get("narrative_feature_mode", "") or "n/a"))
 
         st.json(
             {
@@ -3191,6 +3358,8 @@ def render_live_monitor(
         board_view = board.rename(
             columns={
                 "variant_name": "Variant",
+                "topology": "Topology",
+                "narrative_feature_mode": "Narrative mode",
                 "asset_symbol": "Asset",
                 "run_name": "Run",
                 "expected_return_score": "Score",
@@ -3210,6 +3379,8 @@ def render_live_monitor(
             board_view[
                 [
                     "Variant",
+                    "Topology",
+                    "Narrative mode",
                     "Asset",
                     "Run",
                     "Score",

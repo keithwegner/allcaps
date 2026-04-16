@@ -15,7 +15,9 @@ from trump_workbench.ui import (
     _build_replay_comparison_frame,
     _bundle_feature_names,
     _build_feature_diff_table,
+    _build_feature_family_summary,
     _build_metric_comparison_table,
+    _build_narrative_lift_table,
     _build_setting_diff_table,
     _bundle_to_run_config,
     _eligible_replay_sessions,
@@ -23,6 +25,7 @@ from trump_workbench.ui import (
     _replay_option_label,
     _save_watchlist,
     _summarize_run_changes,
+    _variant_summary_with_narrative_defaults,
     _watchlist_symbols,
     _watchlist_text_value,
 )
@@ -272,6 +275,67 @@ class UiHelperTests(unittest.TestCase):
             _bundle_feature_names(bundle),
             ["asset_indicator__spy", "post_count", "sentiment_avg"],
         )
+
+    def test_narrative_variant_helpers_build_lift_and_family_summary(self) -> None:
+        variant_summary = pd.DataFrame(
+            {
+                "variant_name": ["per_asset_baseline", "per_asset_hybrid", "pooled_baseline"],
+                "topology": ["per_asset", "per_asset", "pooled"],
+                "narrative_feature_mode": ["baseline", "hybrid", "baseline"],
+                "validation_robust_score": [1.0, 1.25, 0.9],
+                "validation_total_return": [0.08, 0.1, 0.07],
+                "test_robust_score": [0.8, 0.95, 0.7],
+                "test_total_return": [0.06, 0.09, 0.05],
+            },
+        )
+        lift = _build_narrative_lift_table(variant_summary)
+
+        self.assertEqual(lift.iloc[0]["variant_name"], "per_asset_hybrid")
+        self.assertAlmostEqual(float(lift.iloc[0]["validation_robust_lift"]), 0.25)
+        self.assertAlmostEqual(float(lift.iloc[0]["test_return_lift"]), 0.03)
+
+        legacy_summary = _variant_summary_with_narrative_defaults(pd.DataFrame({"variant_name": ["per_asset"]}))
+        self.assertEqual(legacy_summary.iloc[0]["narrative_feature_mode"], "unspecified")
+
+        bundle = {
+            "run": {
+                "run_id": "portfolio-run",
+                "run_name": "portfolio-run",
+                "run_type": "portfolio_allocator",
+                "allocator_mode": "joint_model",
+                "target_asset": "PORTFOLIO",
+            },
+            "config": {},
+            "selected_params": {"deployment_variant": "per_asset_hybrid"},
+            "model_artifact": LinearModelArtifact(model_version="portfolio-placeholder", feature_names=[]),
+            "portfolio_model_bundle": {
+                "deployment_variant": "per_asset_hybrid",
+                "variants": {
+                    "per_asset_hybrid": {
+                        "models": {
+                            "SPY": {
+                                "feature_names": [
+                                    "post_count",
+                                    "sentiment_avg",
+                                    "semantic_market_relevance_avg",
+                                    "policy_trade",
+                                ],
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        importance = pd.DataFrame(
+            {
+                "variant_name": ["per_asset_hybrid", "per_asset_hybrid", "per_asset_hybrid"],
+                "feature_name": ["semantic_market_relevance_avg", "policy_trade", "post_count"],
+                "abs_coefficient": [0.5, 0.2, 0.1],
+            },
+        )
+        family_summary = _build_feature_family_summary(bundle, variant_name="per_asset_hybrid", importance=importance)
+        self.assertEqual(family_summary.iloc[0]["feature_family"], "semantic")
+        self.assertIn("policy", family_summary["feature_family"].tolist())
 
     def test_replay_helpers_build_session_list_config_and_summary(self) -> None:
         feature_rows = pd.DataFrame(

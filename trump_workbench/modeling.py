@@ -17,6 +17,15 @@ SUPPORTED_PORTFOLIO_MODEL_FAMILIES = (
     "random_forest_regressor",
     "hist_gradient_boosting_regressor",
 )
+NARRATIVE_FEATURE_MODES = ("baseline", "narrative_only", "hybrid")
+NARRATIVE_FEATURE_NAMES = {
+    "semantic_matched_post_count",
+    "primary_match_post_count",
+    "asset_relevance_score_avg",
+    "asset_semantic_match_score_avg",
+    "semantic_market_relevance_avg",
+    "semantic_urgency_avg",
+}
 LINEAR_MODEL_FAMILIES = {"custom_linear", "ridge", "lasso", "elastic_net"}
 ASSET_INDICATOR_PREFIX = "asset_indicator__"
 
@@ -73,12 +82,12 @@ def _import_sklearn() -> dict[str, Any]:
 
 
 def classify_feature_family(feature_name: str) -> str:
+    if is_narrative_feature(feature_name):
+        if feature_name.startswith("policy_"):
+            return "policy"
+        return "semantic"
     if feature_name.startswith(ASSET_INDICATOR_PREFIX):
         return "asset_identity"
-    if feature_name.startswith("semantic_"):
-        return "semantic"
-    if feature_name.startswith("policy_"):
-        return "policy"
     if feature_name.startswith("prev_") or feature_name in {"session_return", "rolling_vol_5d", "close_vs_ma_5", "volume_z_5"}:
         return "market_context"
     if "sentiment" in feature_name:
@@ -90,6 +99,16 @@ def classify_feature_family(feature_name: str) -> str:
     if "post" in feature_name or "mention" in feature_name:
         return "activity"
     return "other"
+
+
+def normalize_narrative_feature_mode(feature_mode: str | None) -> str:
+    normalized = str(feature_mode or "hybrid").strip().lower().replace("-", "_")
+    return normalized if normalized in NARRATIVE_FEATURE_MODES else "hybrid"
+
+
+def is_narrative_feature(feature_name: str) -> bool:
+    name = str(feature_name)
+    return name.startswith("semantic_") or name.startswith("policy_") or name in NARRATIVE_FEATURE_NAMES
 
 
 def _feature_stats(X: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
@@ -197,17 +216,24 @@ class ModelService:
         df: pd.DataFrame,
         llm_enabled: bool,
         extra_feature_columns: list[str] | None = None,
+        feature_mode: str | None = "hybrid",
     ) -> list[str]:
         numeric_columns = [
             column
             for column in df.columns
             if column not in META_COLUMNS and pd.api.types.is_numeric_dtype(df[column])
         ]
-        if not llm_enabled:
+        mode = normalize_narrative_feature_mode(feature_mode)
+        narrative_columns = {column for column in numeric_columns if is_narrative_feature(column)}
+        if mode == "baseline":
+            numeric_columns = [column for column in numeric_columns if column not in narrative_columns]
+        elif mode == "narrative_only":
+            numeric_columns = [column for column in numeric_columns if column in narrative_columns]
+        elif not llm_enabled:
             numeric_columns = [
                 column
                 for column in numeric_columns
-                if not column.startswith("semantic_") and not column.startswith("policy_")
+                if column not in narrative_columns
             ]
         if extra_feature_columns:
             for column in extra_feature_columns:
@@ -250,13 +276,18 @@ class ModelService:
         model_version: str,
         metadata: dict[str, Any],
         feature_columns: list[str] | None = None,
+        feature_mode: str | None = "hybrid",
         regularization: float = 1.0,
         compute_importance: bool = True,
     ) -> tuple[LinearModelArtifact, pd.DataFrame]:
         train_df = feature_rows.dropna(subset=["target_next_session_return"]).copy()
         if train_df.empty:
             raise RuntimeError("No trainable rows were available for the model.")
-        selected_columns = feature_columns or self.select_feature_columns(train_df, llm_enabled=llm_enabled)
+        selected_columns = feature_columns or self.select_feature_columns(
+            train_df,
+            llm_enabled=llm_enabled,
+            feature_mode=feature_mode,
+        )
         if not selected_columns:
             raise RuntimeError("No numeric feature columns were available for the model.")
 
