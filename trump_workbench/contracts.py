@@ -223,6 +223,7 @@ class BacktestRun:
     topology_variants: list[str] = field(default_factory=list)
     model_families: list[str] = field(default_factory=list)
     selected_symbols: list[str] = field(default_factory=list)
+    narrative_feature_modes: list[str] = field(default_factory=list)
     artifact_paths: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -287,6 +288,7 @@ class PortfolioRunConfig:
     account_weight_grid: tuple[float, ...] = (0.5, 1.0, 1.5)
     model_families: tuple[str, ...] = ()
     topology_variants: tuple[str, ...] = ()
+    narrative_feature_modes: tuple[str, ...] = ()
     deployment_variant: str = ""
     notes: str = ""
 
@@ -300,6 +302,7 @@ class PortfolioRunConfig:
         payload["account_weight_grid"] = list(self.account_weight_grid)
         payload["model_families"] = list(self.model_families)
         payload["topology_variants"] = list(self.topology_variants)
+        payload["narrative_feature_modes"] = list(self.narrative_feature_modes)
         return payload
 
 

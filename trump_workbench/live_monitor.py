@@ -13,11 +13,15 @@ LIVE_MONITOR_CONFIG_PATH = "live_monitor/config.json"
 LIVE_ASSET_SNAPSHOT_COLUMNS = [
     "generated_at",
     "variant_name",
+    "topology",
+    "narrative_feature_mode",
     *PORTFOLIO_CANDIDATE_COLUMNS,
 ]
 LIVE_DECISION_SNAPSHOT_COLUMNS = [
     "generated_at",
     "deployment_variant",
+    "topology",
+    "narrative_feature_mode",
     *PORTFOLIO_DECISION_COLUMNS,
 ]
 
@@ -255,6 +259,8 @@ def build_live_portfolio_run_state(
     if not variant_payload:
         return pd.DataFrame(columns=LIVE_ASSET_SNAPSHOT_COLUMNS), pd.DataFrame(columns=LIVE_DECISION_SNAPSHOT_COLUMNS), explanation_lookup, [f"Deployment variant `{deployment_variant}` is not available in the pinned portfolio run."]
 
+    topology = str(variant_payload.get("topology", "") or deployment_variant or "")
+    narrative_feature_mode = str(variant_payload.get("narrative_feature_mode", "") or "unspecified")
     selected_symbols = [str(symbol).upper() for symbol in (variant_payload.get("selected_symbols") or portfolio_bundle.get("selected_symbols") or [])]
     asset_session_features = store.read_frame("asset_session_features")
     asset_post_mappings = store.read_frame("asset_post_mappings")
@@ -303,6 +309,8 @@ def build_live_portfolio_run_state(
             {
                 "generated_at": snapshot_time,
                 "variant_name": deployment_variant,
+                "topology": topology,
+                "narrative_feature_mode": narrative_feature_mode,
                 "signal_session_date": row.get("signal_session_date"),
                 "next_session_date": row.get("next_session_date"),
                 "asset_symbol": asset_symbol,
@@ -339,6 +347,8 @@ def build_live_portfolio_run_state(
             "post_attribution": post_attribution,
             "account_attribution": account_attribution,
             "variant_name": deployment_variant,
+            "topology": topology,
+            "narrative_feature_mode": narrative_feature_mode,
         }
 
     snapshots = pd.DataFrame(snapshot_rows)
@@ -347,6 +357,8 @@ def build_live_portfolio_run_state(
 
     ranked_board, decision = rank_live_asset_snapshots(snapshots, config.fallback_mode)
     decision["deployment_variant"] = deployment_variant
+    decision["topology"] = topology
+    decision["narrative_feature_mode"] = narrative_feature_mode
     decision["portfolio_run_id"] = run_id
     decision["portfolio_run_name"] = run_name
     for asset_symbol, payload in explanation_lookup.items():

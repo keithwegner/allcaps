@@ -599,6 +599,7 @@ class LiveMonitorStateIntegrationTests(unittest.TestCase):
             selected_params={
                 "fallback_mode": "SPY",
                 "deployment_variant": "per_asset",
+                "deployment_narrative_feature_mode": "baseline",
                 "selected_symbols": ["SPY", "QQQ"],
             },
             run_type="portfolio_allocator",
@@ -642,6 +643,7 @@ class LiveMonitorStateIntegrationTests(unittest.TestCase):
                     "per_asset": {
                         "variant_name": "per_asset",
                         "topology": "per_asset",
+                        "narrative_feature_mode": "baseline",
                         "model_family": "ridge",
                         "threshold": 0.0,
                         "min_post_count": 1,
@@ -698,6 +700,8 @@ class LiveMonitorStateIntegrationTests(unittest.TestCase):
         self.assertFalse(warnings)
         self.assertEqual(decision.iloc[0]["winning_asset"], "QQQ")
         self.assertEqual(decision.iloc[0]["deployment_variant"], "per_asset")
+        self.assertEqual(decision.iloc[0]["narrative_feature_mode"], "baseline")
+        self.assertEqual(board["narrative_feature_mode"].dropna().astype(str).unique().tolist(), ["baseline"])
         self.assertSetEqual(set(board["asset_symbol"].astype(str)), {"SPY", "QQQ"})
         self.assertIn("QQQ", explanation_lookup)
         self.assertFalse(explanation_lookup["QQQ"]["feature_contributions"].empty)
