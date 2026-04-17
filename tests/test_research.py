@@ -171,6 +171,7 @@ class ResearchTests(unittest.TestCase):
                 platforms=["X"],
                 keyword="Trump",
                 tracked_only=True,
+                trump_authored_only=False,
             ).empty,
         )
 
@@ -182,10 +183,78 @@ class ResearchTests(unittest.TestCase):
             platforms=["X"],
             keyword="tariff",
             tracked_only=True,
+            trump_authored_only=False,
         )
 
         self.assertEqual(len(filtered), 1)
         self.assertEqual(filtered.iloc[0]["author_handle"], "macroalpha")
+
+        trump_only = filter_posts(
+            self.posts,
+            pd.Timestamp("2025-02-03"),
+            pd.Timestamp("2025-02-04"),
+            include_reshares=True,
+            platforms=["Truth Social", "X"],
+            keyword="",
+            tracked_only=False,
+            trump_authored_only=True,
+        )
+
+        self.assertEqual(trump_only["author_handle"].tolist(), ["realDonaldTrump"])
+        self.assertTrue(trump_only["author_is_trump"].astype(bool).all())
+
+    def test_trump_authored_filter_composes_with_other_filters(self) -> None:
+        x_only = filter_posts(
+            self.posts,
+            pd.Timestamp("2025-02-03"),
+            pd.Timestamp("2025-02-04"),
+            include_reshares=True,
+            platforms=["X"],
+            keyword="",
+            tracked_only=False,
+            trump_authored_only=True,
+        )
+        self.assertTrue(x_only.empty)
+
+        tracked_and_trump_only = filter_posts(
+            self.posts,
+            pd.Timestamp("2025-02-03"),
+            pd.Timestamp("2025-02-04"),
+            include_reshares=True,
+            platforms=["Truth Social", "X"],
+            keyword="",
+            tracked_only=True,
+            trump_authored_only=True,
+        )
+        self.assertEqual(tracked_and_trump_only["author_handle"].tolist(), ["realDonaldTrump"])
+
+        keyword_and_trump_only = filter_posts(
+            self.posts,
+            pd.Timestamp("2025-02-03"),
+            pd.Timestamp("2025-02-04"),
+            include_reshares=True,
+            platforms=["Truth Social", "X"],
+            keyword="growth",
+            tracked_only=False,
+            trump_authored_only=True,
+        )
+        self.assertEqual(keyword_and_trump_only["author_handle"].tolist(), ["realDonaldTrump"])
+
+    def test_trump_authored_filter_handles_missing_author_flag(self) -> None:
+        posts_without_author_flag = self.posts.drop(columns=["author_is_trump"])
+
+        filtered = filter_posts(
+            posts_without_author_flag,
+            pd.Timestamp("2025-02-03"),
+            pd.Timestamp("2025-02-04"),
+            include_reshares=True,
+            platforms=["Truth Social", "X"],
+            keyword="",
+            tracked_only=False,
+            trump_authored_only=True,
+        )
+
+        self.assertTrue(filtered.empty)
 
     def test_research_aggregation_tables_and_charts(self) -> None:
         summary = _format_post_summary(self.posts.iloc[0])

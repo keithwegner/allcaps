@@ -32,6 +32,7 @@ def filter_posts(
     platforms: list[str],
     keyword: str,
     tracked_only: bool,
+    trump_authored_only: bool = False,
 ) -> pd.DataFrame:
     if posts.empty:
         return posts.copy()
@@ -50,6 +51,13 @@ def filter_posts(
             else pd.Series(False, index=filtered.index)
         )
         filtered = filtered.loc[filtered["author_is_trump"] | tracked_mask].copy()
+    if trump_authored_only:
+        trump_mask = (
+            filtered["author_is_trump"]
+            if "author_is_trump" in filtered.columns
+            else pd.Series(False, index=filtered.index)
+        )
+        filtered = filtered.loc[trump_mask.astype(bool)].copy()
     keyword = keyword.strip()
     if keyword:
         filtered = filtered.loc[
