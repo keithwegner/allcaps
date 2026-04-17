@@ -171,6 +171,7 @@ class ResearchTests(unittest.TestCase):
                 platforms=["X"],
                 keyword="Trump",
                 tracked_only=True,
+                trump_authored_only=False,
             ).empty,
         )
 
@@ -182,10 +183,25 @@ class ResearchTests(unittest.TestCase):
             platforms=["X"],
             keyword="tariff",
             tracked_only=True,
+            trump_authored_only=False,
         )
 
         self.assertEqual(len(filtered), 1)
         self.assertEqual(filtered.iloc[0]["author_handle"], "macroalpha")
+
+        trump_only = filter_posts(
+            self.posts,
+            pd.Timestamp("2025-02-03"),
+            pd.Timestamp("2025-02-04"),
+            include_reshares=True,
+            platforms=["Truth Social", "X"],
+            keyword="",
+            tracked_only=False,
+            trump_authored_only=True,
+        )
+
+        self.assertEqual(trump_only["author_handle"].tolist(), ["realDonaldTrump"])
+        self.assertTrue(trump_only["author_is_trump"].astype(bool).all())
 
     def test_research_aggregation_tables_and_charts(self) -> None:
         summary = _format_post_summary(self.posts.iloc[0])

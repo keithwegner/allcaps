@@ -1197,7 +1197,7 @@ def render_research_view(
         return
 
     today_et = pd.Timestamp.now(tz=settings.timezone).normalize().tz_localize(None)
-    controls = st.columns(5)
+    controls = st.columns(6)
     date_range = controls[0].date_input(
         "Date range",
         value=(settings.term_start.date(), today_et.date()),
@@ -1211,7 +1211,13 @@ def render_research_view(
     )
     include_reshares = controls[2].checkbox("Include reshares", value=False)
     tracked_only = controls[3].checkbox("Tracked accounts only", value=False)
-    scale_markers = controls[4].checkbox("Scale markers", value=True)
+    trump_authored_only = controls[4].checkbox(
+        "Trump-authored only",
+        value=False,
+        help="Restrict research inputs to posts where the normalized author is Donald Trump's account.",
+        key="research_trump_authored_only",
+    )
+    scale_markers = controls[5].checkbox("Scale markers", value=True)
     keyword = st.text_input("Keyword filter", value="")
 
     if isinstance(date_range, tuple) and len(date_range) == 2:
@@ -1230,6 +1236,7 @@ def render_research_view(
         platforms=selected_platforms,
         keyword=keyword,
         tracked_only=tracked_only,
+        trump_authored_only=trump_authored_only,
     )
     mapped = feature_service.prepare_session_posts(
         posts=filtered_posts,

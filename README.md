@@ -249,6 +249,7 @@ This is the descriptive analysis page.
 Use it to:
 
 - filter by date range, platform, keyword, and reshare behavior
+- restrict the view to posts authored by Donald Trump's account
 - see S&P 500 price history with post-session markers
 - inspect sentiment candlesticks built from mapped post sessions
 - review session-level and post-level tables
@@ -258,6 +259,7 @@ Important note:
 
 - The research page is for exploration, not proof of causality
 - Intraday drill-down depends on Alpha Vantage data and is optional
+- For a Truth Social-only review, set `Platforms` to `Truth Social` and enable `Trump-authored only`
 
 ## `Models & Backtests`
 
