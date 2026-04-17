@@ -27,6 +27,7 @@ In plain English, the app helps you:
 - [Hosting On Render](#hosting-on-render)
 - [Hosted Environment Variables](#hosted-environment-variables)
 - [Recommended First Run](#recommended-first-run)
+- [Trump Truth Social-Only Workflow](#trump-truth-social-only-workflow)
 - [How To Work With Each Page](#how-to-work-with-each-page)
   - [`Datasets`](#datasets)
 - [`Discovery`](#discovery)
@@ -200,11 +201,24 @@ If you are new to the app, follow this order:
 1. Open `Datasets`.
 2. Click `Refresh full datasets`.
 3. If you have X data, upload CSVs or point the app at a remote CSV URL.
-4. Open `Discovery` and review the tracked-account universe.
+4. Open `Discovery` and review the tracked-account universe if you loaded X/mention data.
 5. Open `Research View` to inspect mapped posts and market context.
 6. Open `Models & Backtests` and run a baseline walk-forward backtest.
 7. Save a joint portfolio run in `Models & Backtests`.
 8. Open `Live Monitor` to pin that run, inspect the live board, and optionally enable paper trading.
+
+## Trump Truth Social-Only Workflow
+
+Use this workflow when you want to review sentiment based only on Donald Trump's Truth Social posts.
+
+1. Open `Datasets`.
+2. Click `Refresh full datasets` or `Bootstrap datasets`.
+3. Open `Research View`.
+4. Confirm `Platforms` is set to `Truth Social`.
+5. Confirm `Trump-authored only` is enabled.
+6. Ignore `Discovery` unless you also want to load X/mention CSVs and rank non-Trump X accounts.
+
+When the stored dataset contains only Truth Social rows, the app auto-detects that mode and seeds the Research View controls to the Truth-only scope.
 
 ## How To Work With Each Page
 

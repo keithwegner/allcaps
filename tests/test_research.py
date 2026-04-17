@@ -271,6 +271,12 @@ class ResearchTests(unittest.TestCase):
         chart = build_combined_chart(events, scale_markers=True)
         self.assertGreaterEqual(len(chart.data), 2)
         self.assertEqual(chart.layout.title.text, "Research View: social activity vs. market baseline")
+        hover_templates = "\n".join(str(trace.hovertemplate or "") for trace in chart.data)
+        self.assertNotIn("%{text}", hover_templates)
+        self.assertNotIn("Sample posts", hover_templates)
+        self.assertNotIn("First post", hover_templates)
+        self.assertNotIn("Last post", hover_templates)
+        self.assertIn("7-session activity", hover_templates)
 
         session_table = make_session_table(events)
         self.assertIn("sp500_close", session_table.columns)

@@ -1,6 +1,4 @@
 from __future__ import annotations
-
-import html
 from typing import Any
 
 import numpy as np
@@ -662,17 +660,15 @@ def build_combined_chart(events: pd.DataFrame, scale_markers: bool) -> go.Figure
             else activity_events["has_posts"].astype(int).astype(float)
         )
         activity_events["activity_signal"] = raw_activity.rolling(7, min_periods=1).mean()
-        activity_events["hover_text"] = activity_events.apply(
-            lambda row: (
-                f"<b>{pd.Timestamp(row['trade_date']):%Y-%m-%d}</b><br>"
-                f"Posts mapped to session: {int(row['post_count'])}<br>"
-                f"Truth Social: {int(row['truth_posts'])} | X: {int(row['x_posts'])}<br>"
-                f"Tracked accounts: {int(row.get('tracked_account_posts', 0))}<br>"
-                f"Avg sentiment: {fmt_score(row.get('sentiment_avg', np.nan))}<br>"
-                f"Smoothed activity: {float(row['activity_signal']):.1f}<br>"
-                f"Sample posts: {html.escape(str(row.get('sample_posts', '')))}"
-            ),
-            axis=1,
+        activity_customdata = np.stack(
+            [
+                activity_events["post_count"].astype(float).to_numpy(),
+                activity_events["truth_posts"].astype(float).to_numpy(),
+                activity_events["x_posts"].astype(float).to_numpy(),
+                activity_events.get("tracked_account_posts", pd.Series(0, index=activity_events.index)).astype(float).to_numpy(),
+                activity_events["sentiment_avg"].astype(float).to_numpy(),
+            ],
+            axis=-1,
         )
         fig.add_trace(
             go.Scatter(
@@ -683,8 +679,15 @@ def build_combined_chart(events: pd.DataFrame, scale_markers: bool) -> go.Figure
                 line={"color": "rgba(59, 130, 246, 0.8)", "width": 1.4},
                 fill="tozeroy",
                 fillcolor="rgba(37, 99, 235, 0.14)",
-                text=activity_events["hover_text"],
-                hovertemplate="%{text}<extra></extra>",
+                customdata=activity_customdata,
+                hovertemplate=(
+                    "<b>%{x|%Y-%m-%d}</b><br>"
+                    "Posts: %{customdata[0]:.0f}<br>"
+                    "Truth: %{customdata[1]:.0f} | X: %{customdata[2]:.0f}<br>"
+                    "Tracked: %{customdata[3]:.0f}<br>"
+                    "Avg sentiment: %{customdata[4]:+.3f}<br>"
+                    "7-session activity: %{y:.1f}<extra></extra>"
+                ),
             ),
             row=1,
             col=1,
@@ -698,19 +701,15 @@ def build_combined_chart(events: pd.DataFrame, scale_markers: bool) -> go.Figure
             "#86efac",
             "#fda4af",
         )
-        sentiment_events["hover_text"] = sentiment_events.apply(
-            lambda row: (
-                f"<b>{pd.Timestamp(row['trade_date']):%Y-%m-%d}</b><br>"
-                f"Posts mapped: {int(row['post_count'])}<br>"
-                f"Open: {fmt_score(row['sentiment_open'])}<br>"
-                f"High: {fmt_score(row['sentiment_high'])}<br>"
-                f"Low: {fmt_score(row['sentiment_low'])}<br>"
-                f"Close: {fmt_score(row['sentiment_close'])}<br>"
-                f"Average: {fmt_score(row['sentiment_avg'])}<br>"
-                f"First post: {html.escape(str(row.get('first_post_summary', '')))}<br>"
-                f"Last post: {html.escape(str(row.get('last_post_summary', '')))}"
-            ),
-            axis=1,
+        sentiment_customdata = np.stack(
+            [
+                sentiment_events["post_count"].astype(float).to_numpy(),
+                sentiment_events["sentiment_open"].astype(float).to_numpy(),
+                sentiment_events["sentiment_high"].astype(float).to_numpy(),
+                sentiment_events["sentiment_low"].astype(float).to_numpy(),
+                sentiment_events["sentiment_close"].astype(float).to_numpy(),
+            ],
+            axis=-1,
         )
         fig.add_trace(
             go.Scatter(
@@ -733,8 +732,7 @@ def build_combined_chart(events: pd.DataFrame, scale_markers: bool) -> go.Figure
                 line={"color": "rgba(148, 163, 184, 0.2)", "width": 1},
                 fill="tonexty",
                 fillcolor="rgba(148, 163, 184, 0.18)",
-                text=sentiment_events["hover_text"],
-                hovertemplate="%{text}<extra></extra>",
+                hoverinfo="skip",
             ),
             row=2,
             col=1,
@@ -751,8 +749,16 @@ def build_combined_chart(events: pd.DataFrame, scale_markers: bool) -> go.Figure
                     "color": sentiment_events["marker_color"],
                     "line": {"color": "rgba(15, 23, 42, 0.8)", "width": 0.6},
                 },
-                text=sentiment_events["hover_text"],
-                hovertemplate="%{text}<extra></extra>",
+                customdata=sentiment_customdata,
+                hovertemplate=(
+                    "<b>%{x|%Y-%m-%d}</b><br>"
+                    "Posts: %{customdata[0]:.0f}<br>"
+                    "Open: %{customdata[1]:+.3f}<br>"
+                    "High: %{customdata[2]:+.3f}<br>"
+                    "Low: %{customdata[3]:+.3f}<br>"
+                    "Close: %{customdata[4]:+.3f}<br>"
+                    "Average: %{y:+.3f}<extra></extra>"
+                ),
             ),
             row=2,
             col=1,
