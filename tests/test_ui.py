@@ -30,6 +30,7 @@ from trump_workbench.ui import (
     _watchlist_symbols,
     _watchlist_text_value,
     render_models_view,
+    render_research_view,
 )
 
 
@@ -359,6 +360,13 @@ class UiHelperTests(unittest.TestCase):
 
         for widget_key in required_keys:
             self.assertIn(widget_key, source)
+
+    def test_research_view_exposes_trump_authored_filter(self) -> None:
+        source = inspect.getsource(render_research_view)
+
+        self.assertIn("Trump-authored only", source)
+        self.assertIn("research_trump_authored_only", source)
+        self.assertIn("trump_authored_only=trump_authored_only", source)
 
     def test_replay_helpers_build_session_list_config_and_summary(self) -> None:
         feature_rows = pd.DataFrame(
