@@ -25,10 +25,14 @@ from trump_workbench.ui import (
     _latest_ranking_snapshot,
     _replay_option_label,
     _save_watchlist,
+    _source_mode,
+    _source_mode_label,
     _summarize_run_changes,
     _variant_summary_with_narrative_defaults,
     _watchlist_symbols,
     _watchlist_text_value,
+    render_datasets_view,
+    render_discovery_view,
     render_models_view,
     render_research_view,
 )
@@ -176,6 +180,27 @@ class UiHelperTests(unittest.TestCase):
         self.assertEqual(len(snapshot), 2)
         self.assertEqual(snapshot.iloc[0]["author_account_id"], "acct-a")
         self.assertEqual(snapshot.iloc[0]["discovery_score"], 11.0)
+
+    def test_source_mode_detects_empty_truth_only_and_mixed_sources(self) -> None:
+        empty_mode = _source_mode(pd.DataFrame())
+        self.assertEqual(empty_mode["mode"], "unknown")
+        self.assertEqual(_source_mode_label(empty_mode), "No source data")
+
+        truth_only = _source_mode(pd.DataFrame({"source_platform": ["Truth Social", "Truth Social"]}))
+        self.assertEqual(truth_only["mode"], "truth_only")
+        self.assertTrue(truth_only["has_truth_posts"])
+        self.assertFalse(truth_only["has_x_posts"])
+        self.assertEqual(truth_only["truth_post_count"], 2)
+        self.assertEqual(truth_only["x_post_count"], 0)
+        self.assertEqual(_source_mode_label(truth_only), "Truth Social-only")
+
+        mixed = _source_mode(pd.DataFrame({"source_platform": ["Truth Social", "X", "X"]}))
+        self.assertEqual(mixed["mode"], "truth_plus_x")
+        self.assertTrue(mixed["has_truth_posts"])
+        self.assertTrue(mixed["has_x_posts"])
+        self.assertEqual(mixed["truth_post_count"], 1)
+        self.assertEqual(mixed["x_post_count"], 2)
+        self.assertEqual(_source_mode_label(mixed), "Truth Social + X mentions")
 
     def test_watchlist_helpers_save_symbols_and_build_text(self) -> None:
         watchlist, asset_universe = _save_watchlist(self.store, [" msft ", "spy", "nvda", "NVDA"])
@@ -367,6 +392,27 @@ class UiHelperTests(unittest.TestCase):
         self.assertIn("Trump-authored only", source)
         self.assertIn("research_trump_authored_only", source)
         self.assertIn("trump_authored_only=trump_authored_only", source)
+
+    def test_research_view_seeds_truth_only_defaults(self) -> None:
+        source = inspect.getsource(render_research_view)
+
+        self.assertIn("research_source_mode_seeded", source)
+        self.assertIn("research_platforms", source)
+        self.assertIn("Truth Social-only mode detected", source)
+        self.assertIn('source_mode_name == "truth_only"', source)
+
+    def test_datasets_view_exposes_operating_mode(self) -> None:
+        source = inspect.getsource(render_datasets_view)
+
+        self.assertIn("Operating mode", source)
+        self.assertIn("_source_mode_label(source_mode)", source)
+
+    def test_discovery_view_explains_truth_only_empty_state(self) -> None:
+        source = inspect.getsource(render_discovery_view)
+
+        self.assertIn("This dataset is currently Truth Social-only", source)
+        self.assertIn("Discovery ranks non-Trump X accounts that mention Trump", source)
+        self.assertIn("Load X/mention CSVs", source)
 
     def test_replay_helpers_build_session_list_config_and_summary(self) -> None:
         feature_rows = pd.DataFrame(

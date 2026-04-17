@@ -124,6 +124,40 @@ def _refresh_required_message(settings: AppSettings, base_message: str) -> str:
     return base_message
 
 
+def _source_mode(posts: pd.DataFrame) -> dict[str, Any]:
+    if posts.empty or "source_platform" not in posts.columns:
+        return {
+            "mode": "unknown",
+            "has_truth_posts": False,
+            "has_x_posts": False,
+            "truth_post_count": 0,
+            "x_post_count": 0,
+        }
+
+    platforms = posts["source_platform"].fillna("").astype(str)
+    truth_post_count = int((platforms == "Truth Social").sum())
+    x_post_count = int((platforms == "X").sum())
+    has_truth_posts = truth_post_count > 0
+    has_x_posts = x_post_count > 0
+    mode = "truth_plus_x" if has_x_posts else "truth_only" if has_truth_posts else "unknown"
+    return {
+        "mode": mode,
+        "has_truth_posts": has_truth_posts,
+        "has_x_posts": has_x_posts,
+        "truth_post_count": truth_post_count,
+        "x_post_count": x_post_count,
+    }
+
+
+def _source_mode_label(source_mode: dict[str, Any]) -> str:
+    mode = str(source_mode.get("mode", "unknown"))
+    if mode == "truth_only":
+        return "Truth Social-only"
+    if mode == "truth_plus_x":
+        return "Truth Social + X mentions"
+    return "No source data"
+
+
 def _render_sidebar_access_panel(settings: AppSettings) -> None:
     st.sidebar.markdown("---")
     st.sidebar.markdown("**Access**")
@@ -737,6 +771,8 @@ def render_datasets_view(
     st.caption("Refresh historical sources, store normalized datasets, and inspect the local DuckDB + Parquet catalog.")
     can_write = _writes_enabled(settings)
     missing_datasets = missing_core_datasets(store)
+    posts = store.read_frame("normalized_posts")
+    source_mode = _source_mode(posts)
     if is_public_mode(settings) and not can_write:
         st.info("This hosted deployment is in public read-only mode. Unlock admin access in the sidebar to refresh data, edit the watchlist, or change live configuration.")
 
@@ -747,16 +783,17 @@ def render_datasets_view(
     summary = health_state["summary"]
 
     st.markdown("**Hosted Operations**")
-    ops_cols = st.columns(5)
-    ops_cols[0].metric("App mode", _app_mode_label(settings).replace("_", " ").title())
-    ops_cols[1].metric("Scheduler", "Enabled" if settings.scheduler_enabled else "Disabled")
-    ops_cols[2].metric("Last refresh mode", str(summary.get("last_refresh_mode", "n/a")).upper())
+    ops_cols = st.columns(6)
+    ops_cols[0].metric("Operating mode", _source_mode_label(source_mode))
+    ops_cols[1].metric("App mode", _app_mode_label(settings).replace("_", " ").title())
+    ops_cols[2].metric("Scheduler", "Enabled" if settings.scheduler_enabled else "Disabled")
+    ops_cols[3].metric("Last refresh mode", str(summary.get("last_refresh_mode", "n/a")).upper())
     last_refresh_at = summary.get("last_refresh_at", pd.NaT)
-    ops_cols[3].metric(
+    ops_cols[4].metric(
         "Last refresh at",
         pd.Timestamp(last_refresh_at).tz_convert(EASTERN).strftime("%Y-%m-%d %H:%M") if pd.notna(last_refresh_at) else "n/a",
     )
-    ops_cols[4].metric("Missing core datasets", f"{len(missing_datasets):,}")
+    ops_cols[5].metric("Missing core datasets", f"{len(missing_datasets):,}")
     st.caption(f"State root: `{settings.state_root}` | DuckDB: `{settings.db_path}`")
 
     if missing_datasets:
@@ -1002,7 +1039,6 @@ def render_datasets_view(
         ]
         st.dataframe(asset_session_features[keep].tail(20), use_container_width=True, hide_index=True)
 
-    posts = store.read_frame("normalized_posts")
     if not posts.empty:
         st.markdown("**Normalized Post Sample**")
         sample_columns = [
@@ -1031,6 +1067,7 @@ def render_discovery_view(
     tracked_accounts = store.read_frame("tracked_accounts")
     ranking_history = store.read_frame("account_rankings")
     overrides = discovery_service.normalize_manual_overrides(store.read_frame("manual_account_overrides"))
+    source_mode = _source_mode(posts)
 
     if posts.empty:
         st.info(_refresh_required_message(settings, "Refresh datasets first so the workbench has posts to analyze."))
@@ -1138,6 +1175,12 @@ def render_discovery_view(
             _rebuild_discovery_state(store, discovery_service, posts, posts["post_timestamp"].max())
             st.success(f"Saved {action} override for @{selected_row['author_handle']}.")
             st.rerun()
+    elif source_mode["mode"] == "truth_only":
+        st.info(
+            "This dataset is currently Truth Social-only. Discovery ranks non-Trump X accounts that mention Trump, "
+            "so it is optional for reviewing sentiment based only on Donald Trump's Truth Social posts. "
+            "Load X/mention CSVs in `Datasets` if you want to populate account discovery.",
+        )
     else:
         st.info("No discovery ranking snapshot is available yet. Add or refresh X mention data to populate this view.")
 
@@ -1192,6 +1235,7 @@ def render_research_view(
     asset_post_mappings = store.read_frame("asset_post_mappings")
     asset_session_features = store.read_frame("asset_session_features")
     tracked_accounts = store.read_frame("tracked_accounts")
+    source_mode = _source_mode(posts)
     if posts.empty or sp500.empty:
         st.info(_refresh_required_message(settings, "Refresh datasets first so the research view has source data."))
         return
@@ -1204,21 +1248,39 @@ def render_research_view(
         min_value=settings.term_start.date(),
         max_value=today_et.date(),
     )
+    source_mode_name = str(source_mode["mode"])
+    if st.session_state.get("research_source_mode_seeded") != source_mode_name:
+        st.session_state["research_platforms"] = ["Truth Social"] if source_mode_name == "truth_only" else ["Truth Social", "X"]
+        st.session_state["research_trump_authored_only"] = source_mode_name == "truth_only"
+        st.session_state["research_source_mode_seeded"] = source_mode_name
     selected_platforms = controls[1].multiselect(
         "Platforms",
         options=["Truth Social", "X"],
-        default=["Truth Social", "X"],
+        key="research_platforms",
     )
     include_reshares = controls[2].checkbox("Include reshares", value=False)
     tracked_only = controls[3].checkbox("Tracked accounts only", value=False)
     trump_authored_only = controls[4].checkbox(
         "Trump-authored only",
-        value=False,
         help="Restrict research inputs to posts where the normalized author is Donald Trump's account.",
         key="research_trump_authored_only",
     )
     scale_markers = controls[5].checkbox("Scale markers", value=True)
     keyword = st.text_input("Keyword filter", value="")
+
+    if source_mode["mode"] == "truth_only":
+        if selected_platforms == ["Truth Social"] and trump_authored_only:
+            st.info(
+                f"Truth Social-only mode detected: the current analysis is scoped to Donald Trump's Truth Social posts "
+                f"from {int(source_mode['truth_post_count']):,} stored Truth Social rows. Use `Platforms` and "
+                "`Trump-authored only` above to verify or change the research scope.",
+            )
+        else:
+            st.info(
+                f"Truth Social-only mode detected with {int(source_mode['truth_post_count']):,} stored Truth Social rows. "
+                "The default scope is `Platforms = Truth Social` and `Trump-authored only`; adjust the controls above "
+                "if you intentionally want a broader or different view.",
+            )
 
     if isinstance(date_range, tuple) and len(date_range) == 2:
         start_date = pd.Timestamp(date_range[0])
