@@ -106,6 +106,11 @@ from .research import (
     make_post_table,
     make_session_table,
 )
+from .research_exports import (
+    build_research_export_bundle,
+    build_research_export_manifest,
+    research_export_filename,
+)
 from .storage import DuckDBStore
 from .utils import fmt_score
 
@@ -1324,15 +1329,31 @@ def render_research_view(
             & (narrative_asset_view["session_date"] <= end_date.normalize())
         ].copy()
 
-    metric_cols = st.columns(6)
-    metric_cols[0].metric("Sessions with posts", f"{int((events['post_count'] > 0).sum()):,}")
-    metric_cols[1].metric("Posts in view", f"{int(events['post_count'].sum()):,}")
-    metric_cols[2].metric("Truth posts", f"{int(mapped.loc[mapped['author_is_trump']].shape[0]):,}")
-    metric_cols[3].metric("Tracked X posts", f"{int(mapped.loc[_series_or_false(mapped, 'is_active_tracked_account')].shape[0]):,}")
-    metric_cols[4].metric("Mean sentiment", fmt_score(mapped["sentiment_score"].mean() if not mapped.empty else 0.0))
-    metric_cols[5].metric("S&P 500 change", f"{((events['close'].iloc[-1] / events['close'].iloc[0]) - 1.0):+.2%}" if len(events) > 1 else "n/a")
+    sessions_with_posts = int((events["post_count"] > 0).sum()) if "post_count" in events.columns else 0
+    posts_in_view = int(events["post_count"].sum()) if "post_count" in events.columns else 0
+    truth_posts = int(mapped.loc[_series_or_false(mapped, "author_is_trump").astype(bool)].shape[0]) if not mapped.empty else 0
+    tracked_x_posts = int(mapped.loc[_series_or_false(mapped, "is_active_tracked_account").astype(bool)].shape[0]) if not mapped.empty else 0
+    mean_sentiment = float(mapped["sentiment_score"].mean()) if not mapped.empty and "sentiment_score" in mapped.columns else 0.0
+    sp500_change = float((events["close"].iloc[-1] / events["close"].iloc[0]) - 1.0) if len(events) > 1 else None
+    headline_metrics = {
+        "sessions_with_posts": sessions_with_posts,
+        "posts_in_view": posts_in_view,
+        "truth_posts": truth_posts,
+        "tracked_x_posts": tracked_x_posts,
+        "mean_sentiment": mean_sentiment,
+        "sp500_change": sp500_change,
+    }
 
-    st.plotly_chart(build_combined_chart(events, scale_markers=scale_markers), use_container_width=True)
+    metric_cols = st.columns(6)
+    metric_cols[0].metric("Sessions with posts", f"{sessions_with_posts:,}")
+    metric_cols[1].metric("Posts in view", f"{posts_in_view:,}")
+    metric_cols[2].metric("Truth posts", f"{truth_posts:,}")
+    metric_cols[3].metric("Tracked X posts", f"{tracked_x_posts:,}")
+    metric_cols[4].metric("Mean sentiment", fmt_score(mean_sentiment))
+    metric_cols[5].metric("S&P 500 change", f"{sp500_change:+.2%}" if sp500_change is not None else "n/a")
+
+    combined_chart = build_combined_chart(events, scale_markers=scale_markers)
+    st.plotly_chart(combined_chart, use_container_width=True)
 
     session_table = make_session_table(events)
     if not session_table.empty:
@@ -1347,6 +1368,53 @@ def render_research_view(
     if not post_table.empty:
         with st.expander("Underlying posts", expanded=False):
             st.dataframe(post_table, use_container_width=True, hide_index=True)
+
+    export_narrative_frequency = build_narrative_frequency_frame(mapped)
+    export_narrative_returns = build_narrative_return_frame(mapped, market, bucket_field="semantic_topic")
+    export_narrative_asset_heatmap = build_narrative_asset_heatmap_frame(narrative_asset_view)
+    export_narrative_posts = make_narrative_post_table(mapped).head(25)
+    export_narrative_events = make_narrative_event_table(mapped, market)
+    export_manifest = build_research_export_manifest(
+        filters={
+            "date_start": start_date.date().isoformat(),
+            "date_end": end_date.date().isoformat(),
+            "platforms": list(selected_platforms),
+            "keyword": keyword,
+            "include_reshares": include_reshares,
+            "tracked_only": tracked_only,
+            "trump_authored_only": trump_authored_only,
+            "narrative_bucket_field": "semantic_topic",
+        },
+        source_mode=source_mode,
+        headline_metrics=headline_metrics,
+    )
+    export_bundle = build_research_export_bundle(
+        manifest=export_manifest,
+        chart=combined_chart,
+        sessions=session_table,
+        posts=post_table,
+        narrative_frequency=export_narrative_frequency,
+        narrative_returns=export_narrative_returns,
+        narrative_asset_heatmap=export_narrative_asset_heatmap,
+        narrative_posts=export_narrative_posts,
+        narrative_events=export_narrative_events,
+    )
+    st.markdown("**Export current research pack**")
+    st.caption(
+        "Download a ZIP bundle for the current Research View filters. Includes a manifest, Markdown summary, "
+        "social activity chart HTML, session/post CSVs, and all-narrative CSV outputs for this filtered slice.",
+    )
+    export_cols = st.columns([1.2, 1, 1])
+    export_cols[0].metric("Files", "10")
+    export_cols[1].metric("Session rows", f"{len(session_table):,}")
+    export_cols[2].metric("Post rows", f"{len(post_table):,}")
+    st.download_button(
+        "Download research pack (.zip)",
+        data=export_bundle,
+        file_name=research_export_filename(start_date, end_date),
+        mime="application/zip",
+        use_container_width=True,
+    )
 
     narratives_tab, asset_tab = st.tabs(["Narratives", "Multi-Asset Comparison"])
 

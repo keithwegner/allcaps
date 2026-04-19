@@ -267,6 +267,7 @@ Use it to:
 - see S&P 500 price history with post-session markers
 - inspect sentiment candlesticks built from mapped post sessions
 - review session-level and post-level tables
+- download a ZIP research pack for the current filters
 - drill into an intraday SPY reaction window for a selected post
 
 Important note:
