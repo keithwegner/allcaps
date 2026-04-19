@@ -312,10 +312,12 @@ Use it to:
 - review explanation details for the winner and runner-up
 - review persisted live board and decision history over time
 - enable paper trading, inspect the paper decision journal, and track realized equity vs `SPY`
+- inspect the `Performance Observatory` for warn-only diagnostics on paper PnL, alpha, drawdown, fallback rate, score calibration, and live candidate-board drift
 
 Important note:
 
 - This page will not do much until you have already created at least one saved joint portfolio run in `Models & Backtests`
+- The `Performance Observatory` is informational only. It does not retrain models, block live decisions, or change paper-trading behavior.
 
 ## Data Inputs
 
@@ -410,6 +412,12 @@ If `Live Monitor` shows no paper portfolio history:
 - save and pin a joint portfolio run first
 - enable paper trading from the `Paper Portfolio` tab
 - use polling or let the scheduler persist live decisions before the next session opens
+
+If the `Performance Observatory` has limited diagnostics:
+
+- wait for paper decisions to settle against next-session prices
+- use polling or the scheduler to build more live snapshot history
+- treat early insufficient-sample warnings as expected until several sessions have settled
 
 If the intraday drill-down fails:
 
