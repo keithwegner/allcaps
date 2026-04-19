@@ -401,6 +401,15 @@ class UiHelperTests(unittest.TestCase):
         self.assertIn("Truth Social-only mode detected", source)
         self.assertIn('source_mode_name == "truth_only"', source)
 
+    def test_research_view_exposes_export_download_for_filtered_slice(self) -> None:
+        source = inspect.getsource(render_research_view)
+
+        self.assertIn("Export current research pack", source)
+        self.assertIn("st.download_button", source)
+        self.assertIn("build_research_export_bundle", source)
+        self.assertIn("sessions=session_table", source)
+        self.assertIn("posts=post_table", source)
+
     def test_datasets_view_exposes_operating_mode(self) -> None:
         source = inspect.getsource(render_datasets_view)
 
