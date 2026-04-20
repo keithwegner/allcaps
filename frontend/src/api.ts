@@ -34,6 +34,65 @@ export type RunsPayload = {
   runs: RecordRow[];
 };
 
+export type SessionOption = {
+  value: string;
+  label: string;
+};
+
+export type RunDetailPayload = {
+  found: boolean;
+  run_id: string;
+  errors: string[];
+  run: RecordRow;
+  settings: RecordRow;
+  metrics: RecordRow;
+  selected_params: Record<string, unknown>;
+  model_artifact: Record<string, unknown>;
+  charts: {
+    equity?: PlotlyFigure;
+    benchmarks?: PlotlyFigure;
+    diagnostics?: PlotlyFigure;
+  };
+  tables: {
+    benchmarks?: RecordRow[];
+    variant_summary?: RecordRow[];
+    narrative_lift?: RecordRow[];
+    feature_family_summary?: RecordRow[];
+    windows?: RecordRow[];
+    feature_importance?: RecordRow[];
+    diagnostics?: RecordRow[];
+    trades?: RecordRow[];
+    candidate_predictions?: RecordRow[];
+  };
+  row_counts: RecordRow;
+  session_options: SessionOption[];
+  selected_session: {
+    session_date?: string;
+    prediction?: RecordRow[];
+    decision?: RecordRow[];
+    candidates?: RecordRow[];
+    feature_contributions?: RecordRow[];
+    post_attribution?: RecordRow[];
+    account_attribution?: RecordRow[];
+  };
+  leakage_audit: Record<string, unknown>;
+};
+
+export type RunComparisonPayload = {
+  ready: boolean;
+  base_run_id: string;
+  run_ids: string[];
+  missing_run_ids: string[];
+  scorecard: RecordRow[];
+  setting_diffs: RecordRow[];
+  feature_diffs: RecordRow[];
+  benchmark_deltas: RecordRow[];
+  change_notes: string[];
+  charts: {
+    equity?: PlotlyFigure;
+  };
+};
+
 export type LivePayload = {
   configured: boolean;
   errors: string[];
@@ -155,6 +214,26 @@ export const api = {
   status: () => getJson<StatusPayload>("/api/status"),
   health: () => getJson<HealthPayload>("/api/datasets/health"),
   runs: () => getJson<RunsPayload>("/api/runs"),
+  runDetail: (runId: string, options: { variantName?: string; sessionDate?: string } = {}) => {
+    const params = new URLSearchParams();
+    if (options.variantName) {
+      params.set("variant_name", options.variantName);
+    }
+    if (options.sessionDate) {
+      params.set("session_date", options.sessionDate);
+    }
+    const query = params.toString();
+    return getJson<RunDetailPayload>(`/api/runs/${encodeURIComponent(runId)}${query ? `?${query}` : ""}`);
+  },
+  runComparison: (runIds: string[], baseRunId?: string) => {
+    const params = new URLSearchParams();
+    runIds.forEach((runId) => params.append("run_ids", runId));
+    if (baseRunId) {
+      params.set("base_run_id", baseRunId);
+    }
+    const query = params.toString();
+    return getJson<RunComparisonPayload>(`/api/runs/compare${query ? `?${query}` : ""}`);
+  },
   research: (filters?: ResearchFilters) => getJson<ResearchPayload>(`/api/research${researchQuery(filters)}`),
   researchExportUrl: (filters?: ResearchFilters) => `${API_BASE_URL}/api/research/export${researchQuery(filters)}`,
   live: () => getJson<LivePayload>("/api/live/current"),
