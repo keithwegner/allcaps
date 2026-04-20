@@ -18,6 +18,7 @@ from .live_monitor import build_live_portfolio_run_state, validate_live_monitor_
 from .market import MarketDataService
 from .modeling import ModelService
 from .paper_trading import PaperTradingService, paper_config_matches_live
+from .performance import PerformanceObservatoryService
 from .runtime import missing_core_datasets, refresh_datasets
 from .storage import DuckDBStore
 
@@ -106,6 +107,7 @@ def run_scheduler_cycle(
     experiment_store: ExperimentStore,
     model_service: ModelService,
     paper_service: PaperTradingService,
+    performance_service: PerformanceObservatoryService | None = None,
     generated_at: pd.Timestamp | None = None,
 ) -> SchedulerDecision:
     if not decision.should_run:
@@ -149,6 +151,8 @@ def run_scheduler_cycle(
     paper_config = paper_service.load_current_config()
     if paper_config_matches_live(paper_config, live_config):
         paper_service.process_live_history(paper_config, as_of=snapshot_time)
+        if performance_service is not None and paper_config is not None:
+            performance_service.persist_snapshot(paper_config.paper_portfolio_id, generated_at=snapshot_time)
     return decision
 
 
@@ -172,6 +176,7 @@ def run_scheduler_once(settings: AppSettings) -> SchedulerDecision:
         experiment_store = ExperimentStore(store)
         model_service = ModelService()
         paper_service = PaperTradingService(store)
+        performance_service = PerformanceObservatoryService(store)
         return run_scheduler_cycle(
             settings=settings,
             store=store,
@@ -184,6 +189,7 @@ def run_scheduler_once(settings: AppSettings) -> SchedulerDecision:
             experiment_store=experiment_store,
             model_service=model_service,
             paper_service=paper_service,
+            performance_service=performance_service,
         )
     finally:
         release_refresh_lock(settings, lock_fd)

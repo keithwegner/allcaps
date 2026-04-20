@@ -23,6 +23,7 @@ from trump_workbench.paper_trading import (
     ensure_paper_portfolio_registry_frame,
     ensure_paper_trade_ledger_frame,
 )
+from trump_workbench.performance import PerformanceObservatoryService, ensure_performance_diagnostic_frame
 from trump_workbench.portfolio import rank_portfolio_candidates
 from trump_workbench.runtime import refresh_datasets
 from trump_workbench.scheduler import SchedulerDecision, run_scheduler_cycle
@@ -139,6 +140,7 @@ class IntegrationWorkflowTests(unittest.TestCase):
         self.backtests = BacktestService(self.model_service)
         self.experiments = ExperimentStore(self.store)
         self.paper_service = PaperTradingService(self.store)
+        self.performance_service = PerformanceObservatoryService(self.store)
         self.health_service = DataHealthService()
 
     def tearDown(self) -> None:
@@ -717,6 +719,7 @@ class IntegrationWorkflowTests(unittest.TestCase):
             experiment_store=self.experiments,
             model_service=self.model_service,
             paper_service=self.paper_service,
+            performance_service=self.performance_service,
             generated_at=cutoff + pd.Timedelta(hours=8),
         )
 
@@ -731,6 +734,11 @@ class IntegrationWorkflowTests(unittest.TestCase):
         self.assertEqual(str(portfolio_journal.iloc[0]["settlement_status"]), "settled")
         self.assertEqual(len(portfolio_trades), 1)
         self.assertEqual(str(portfolio_trades.iloc[0]["asset_symbol"]), "QQQ")
+        latest_performance = ensure_performance_diagnostic_frame(self.store.read_frame("model_performance_latest"))
+        performance_history = ensure_performance_diagnostic_frame(self.store.read_frame("model_performance_history"))
+        self.assertFalse(latest_performance.empty)
+        self.assertFalse(performance_history.empty)
+        self.assertEqual(set(latest_performance["paper_portfolio_id"].astype(str)), {paper_config.paper_portfolio_id})
 
 
 if __name__ == "__main__":

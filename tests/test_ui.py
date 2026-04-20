@@ -33,6 +33,7 @@ from trump_workbench.ui import (
     _watchlist_text_value,
     render_datasets_view,
     render_discovery_view,
+    render_live_monitor,
     render_models_view,
     render_research_view,
 )
@@ -409,6 +410,15 @@ class UiHelperTests(unittest.TestCase):
         self.assertIn("build_research_export_bundle", source)
         self.assertIn("sessions=session_table", source)
         self.assertIn("posts=post_table", source)
+
+    def test_live_monitor_exposes_performance_observatory_without_gating_decisions(self) -> None:
+        source = inspect.getsource(render_live_monitor)
+
+        self.assertIn("Performance Observatory", source)
+        self.assertIn("PerformanceObservatoryService", source)
+        self.assertIn("load_latest_for_portfolio", source)
+        self.assertIn("evaluate_paper_portfolio", source)
+        self.assertIn("These diagnostics do not gate live decisions", source)
 
     def test_datasets_view_exposes_operating_mode(self) -> None:
         source = inspect.getsource(render_datasets_view)

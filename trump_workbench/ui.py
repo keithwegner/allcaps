@@ -69,6 +69,17 @@ from .paper_trading import (
     ensure_paper_trade_ledger_frame,
     paper_config_matches_live,
 )
+from .performance import (
+    PerformanceObservatoryService,
+    build_equity_comparison_frame,
+    build_live_score_drift_frame,
+    build_performance_summary,
+    build_rolling_return_frame,
+    build_score_bucket_outcome_frame,
+    build_score_outcome_frame,
+    build_winner_distribution_frame,
+    ensure_performance_diagnostic_frame,
+)
 from .runtime import (
     append_refresh_history as runtime_append_refresh_history,
     build_source_adapters as runtime_build_source_adapters,
@@ -3474,6 +3485,7 @@ def render_live_monitor(
         return
 
     paper_service = PaperTradingService(store)
+    performance_service = PerformanceObservatoryService(store)
     active_run_rows = joint_portfolio_runs.loc[
         joint_portfolio_runs["run_id"].astype(str) == str(active_config.portfolio_run_id)
     ].copy()
@@ -3532,7 +3544,7 @@ def render_live_monitor(
     winner_row = winner_rows.iloc[0] if not winner_rows.empty else None
     winner_confidence = float(winner_row["confidence"]) if winner_row is not None else 0.0
     display_asset = winner_asset or "FLAT"
-    tabs = st.tabs(["Current Decision", "Why This Asset Won", "History", "Paper Portfolio"])
+    tabs = st.tabs(["Current Decision", "Why This Asset Won", "History", "Paper Portfolio", "Performance Observatory"])
 
     with tabs[0]:
         metric_cols = st.columns(8)
@@ -3925,6 +3937,238 @@ def render_live_monitor(
                     use_container_width=True,
                     hide_index=True,
                 )
+
+    with tabs[4]:
+        st.caption("Warn-only observability for the selected paper portfolio. These diagnostics do not gate live decisions, retrain models, or change trading behavior.")
+        registry = paper_service.list_portfolios()
+        if registry.empty:
+            st.info("Create a paper portfolio before using the Performance Observatory.")
+        else:
+            registry_view = registry.copy()
+            registry_view["status"] = np.where(
+                registry_view["archived_at"].notna(),
+                "archived",
+                np.where(registry_view["enabled"], "active", "disabled"),
+            )
+            option_ids = registry_view["paper_portfolio_id"].astype(str).tolist()
+            current_config = paper_service.load_current_config()
+            default_performance_id = (
+                current_config.paper_portfolio_id
+                if current_config is not None and str(current_config.paper_portfolio_id) in option_ids
+                else option_ids[0]
+            )
+            selected_performance_id = st.selectbox(
+                "Performance portfolio",
+                options=option_ids,
+                index=option_ids.index(default_performance_id) if default_performance_id in option_ids else 0,
+                format_func=lambda paper_id: (
+                    lambda row: f"{paper_id} | {row['status']} | {row['portfolio_run_name']} | {row['deployment_variant'] or 'n/a'}"
+                )(registry_view.loc[registry_view["paper_portfolio_id"].astype(str) == str(paper_id)].iloc[0]),
+                key="performance-observatory-portfolio-select",
+            )
+            selected_performance_row = registry_view.loc[
+                registry_view["paper_portfolio_id"].astype(str) == str(selected_performance_id)
+            ].iloc[0]
+
+            diagnostics = performance_service.load_latest_for_portfolio(selected_performance_id)
+            if diagnostics.empty:
+                diagnostics = performance_service.evaluate_paper_portfolio(
+                    selected_performance_id,
+                    generated_at=board_generated_at,
+                )
+                st.caption("No persisted observability snapshot exists yet, so the dashboard is showing a current in-memory evaluation.")
+            else:
+                latest_generated_at = diagnostics["generated_at"].max()
+                st.caption(
+                    "Showing the latest persisted observability snapshot"
+                    + (f" from {pd.Timestamp(latest_generated_at):%Y-%m-%d %H:%M UTC}." if pd.notna(latest_generated_at) else "."),
+                )
+
+            observatory_registry = ensure_paper_portfolio_registry_frame(store.read_frame("paper_portfolio_registry"))
+            observatory_journal = ensure_paper_decision_journal_frame(store.read_frame("paper_decision_journal"))
+            observatory_trades = ensure_paper_trade_ledger_frame(store.read_frame("paper_trade_ledger"))
+            observatory_equity = ensure_paper_equity_curve_frame(store.read_frame("paper_equity_curve"))
+            observatory_benchmark = ensure_paper_benchmark_curve_frame(store.read_frame("paper_benchmark_curve"))
+            summary = build_performance_summary(
+                diagnostics=diagnostics,
+                registry=observatory_registry,
+                journal=observatory_journal,
+                trades=observatory_trades,
+                equity=observatory_equity,
+                benchmark=observatory_benchmark,
+                paper_portfolio_id=selected_performance_id,
+            )
+
+            def _pct_or_na(value: object) -> str:
+                numeric = pd.to_numeric(value, errors="coerce")
+                return f"{float(numeric):+.2%}" if pd.notna(numeric) else "n/a"
+
+            def _num_or_na(value: object) -> str:
+                numeric = pd.to_numeric(value, errors="coerce")
+                return f"{float(numeric):.2f}" if pd.notna(numeric) else "n/a"
+
+            perf_cols = st.columns(5)
+            perf_cols[0].metric("Overall", str(summary.get("overall_severity", "ok")).upper())
+            perf_cols[1].metric("Total return", _pct_or_na(summary.get("total_return")))
+            perf_cols[2].metric("SPY return", _pct_or_na(summary.get("benchmark_return")))
+            perf_cols[3].metric("Alpha", _pct_or_na(summary.get("alpha")))
+            perf_cols[4].metric("Max drawdown", _pct_or_na(summary.get("max_drawdown")))
+            quality_cols = st.columns(5)
+            quality_cols[0].metric("Win rate", _pct_or_na(summary.get("win_rate")))
+            quality_cols[1].metric("Trade count", f"{int(summary.get('trade_count', 0)):,}")
+            quality_cols[2].metric("Pending decisions", f"{int(summary.get('pending_decisions', 0)):,}")
+            quality_cols[3].metric("Fallback rate", _pct_or_na(summary.get("fallback_rate")))
+            quality_cols[4].metric("Score/outcome corr", _num_or_na(summary.get("score_outcome_correlation")))
+
+            equity_compare = build_equity_comparison_frame(
+                observatory_equity,
+                observatory_benchmark,
+                selected_performance_id,
+            )
+            rolling_returns = build_rolling_return_frame(observatory_trades, selected_performance_id)
+            score_outcomes = build_score_outcome_frame(
+                observatory_journal,
+                observatory_trades,
+                selected_performance_id,
+            )
+            winner_distribution = build_winner_distribution_frame(observatory_journal, selected_performance_id)
+            drift_frame = build_live_score_drift_frame(
+                live_asset_snapshots=store.read_frame("live_asset_snapshots"),
+                portfolio_run_id=str(selected_performance_row.get("portfolio_run_id", "") or ""),
+                deployment_variant=str(selected_performance_row.get("deployment_variant", "") or ""),
+            )
+
+            chart_cols = st.columns(2)
+            with chart_cols[0]:
+                if equity_compare.empty:
+                    st.info("No equity history is available yet.")
+                else:
+                    equity_fig = go.Figure()
+                    equity_fig.add_trace(
+                        go.Scatter(
+                            x=equity_compare["next_session_date"],
+                            y=equity_compare["paper_portfolio_equity"],
+                            mode="lines+markers",
+                            name="Paper portfolio",
+                        ),
+                    )
+                    if "spy_benchmark_equity" in equity_compare.columns:
+                        equity_fig.add_trace(
+                            go.Scatter(
+                                x=equity_compare["next_session_date"],
+                                y=equity_compare["spy_benchmark_equity"],
+                                mode="lines+markers",
+                                name="SPY benchmark",
+                            ),
+                        )
+                    equity_fig.update_layout(title="Equity vs SPY", xaxis_title="Session", yaxis_title="Equity")
+                    st.plotly_chart(equity_fig, use_container_width=True)
+
+            with chart_cols[1]:
+                if rolling_returns.empty:
+                    st.info("No settled trade returns are available yet.")
+                else:
+                    rolling_fig = go.Figure()
+                    rolling_fig.add_trace(
+                        go.Scatter(
+                            x=rolling_returns["next_session_date"],
+                            y=rolling_returns["rolling_net_return"],
+                            mode="lines+markers",
+                            name="Rolling net return",
+                        ),
+                    )
+                    rolling_fig.update_layout(title="Rolling net return", xaxis_title="Session", yaxis_title="Return")
+                    st.plotly_chart(rolling_fig, use_container_width=True)
+
+            calibration_cols = st.columns(2)
+            with calibration_cols[0]:
+                if score_outcomes.empty:
+                    st.info("No score/outcome pairs are available yet.")
+                else:
+                    score_fig = go.Figure()
+                    for asset_symbol, group in score_outcomes.groupby(score_outcomes["winning_asset"].astype(str)):
+                        score_fig.add_trace(
+                            go.Scatter(
+                                x=group["winner_score"],
+                                y=group["net_return"],
+                                mode="markers",
+                                name=str(asset_symbol or "unknown"),
+                            ),
+                        )
+                    score_fig.update_layout(title="Winner score vs realized return", xaxis_title="Winner score", yaxis_title="Net return")
+                    st.plotly_chart(score_fig, use_container_width=True)
+
+            with calibration_cols[1]:
+                if winner_distribution.empty:
+                    st.info("No paper decisions are available yet.")
+                else:
+                    winner_fig = go.Figure(
+                        data=[
+                            go.Bar(
+                                x=winner_distribution["winning_asset"],
+                                y=winner_distribution["decision_count"],
+                                name="Decisions",
+                            ),
+                        ],
+                    )
+                    winner_fig.update_layout(title="Winner asset distribution", xaxis_title="Asset", yaxis_title="Decisions")
+                    st.plotly_chart(winner_fig, use_container_width=True)
+
+            if drift_frame.empty:
+                st.info("No live score drift history is available yet.")
+            else:
+                drift_fig = go.Figure()
+                for metric_name, group in drift_frame.groupby("metric_name", sort=False):
+                    drift_fig.add_trace(
+                        go.Bar(
+                            x=group["asset_symbol"],
+                            y=group["z_score"],
+                            name=str(metric_name),
+                        ),
+                    )
+                drift_fig.update_layout(
+                    title="Live score drift by asset",
+                    xaxis_title="Asset",
+                    yaxis_title="Recent-vs-baseline z score",
+                    barmode="group",
+                )
+                st.plotly_chart(drift_fig, use_container_width=True)
+                st.dataframe(drift_frame, use_container_width=True, hide_index=True)
+
+            score_buckets = build_score_bucket_outcome_frame(
+                observatory_journal,
+                observatory_trades,
+                selected_performance_id,
+            )
+            if not score_buckets.empty:
+                st.markdown("**Score bucket outcomes**")
+                st.dataframe(score_buckets, use_container_width=True, hide_index=True)
+
+            st.markdown("**Latest diagnostics**")
+            normalized_diagnostics = ensure_performance_diagnostic_frame(diagnostics)
+            if normalized_diagnostics.empty:
+                st.info("No diagnostics are available for this portfolio yet.")
+            else:
+                severity_options = ["ok", "warn", "severe"]
+                selected_severities = st.multiselect(
+                    "Severity filter",
+                    options=severity_options,
+                    default=["warn", "severe"],
+                    key="performance-observatory-severity-filter",
+                )
+                scope_options = sorted(normalized_diagnostics["scope_kind"].dropna().astype(str).unique().tolist())
+                selected_scopes = st.multiselect(
+                    "Scope filter",
+                    options=scope_options,
+                    default=scope_options,
+                    key="performance-observatory-scope-filter",
+                )
+                diagnostics_view = normalized_diagnostics.copy()
+                if selected_severities:
+                    diagnostics_view = diagnostics_view.loc[diagnostics_view["severity"].isin(selected_severities)].copy()
+                if selected_scopes:
+                    diagnostics_view = diagnostics_view.loc[diagnostics_view["scope_kind"].astype(str).isin(selected_scopes)].copy()
+                st.dataframe(diagnostics_view, use_container_width=True, hide_index=True)
 
 
 def render_historical_replay_view(
