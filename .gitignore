@@ -10,5 +10,7 @@ htmlcov/
 .venv/
 .workbench/
 docker-state/
+frontend/dist/
+frontend/node_modules/
 __pycache__/
 *.pyc

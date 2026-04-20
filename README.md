@@ -2,6 +2,8 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![UI: Streamlit](https://img.shields.io/badge/ui-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
+[![API: FastAPI](https://img.shields.io/badge/api-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Frontend: React](https://img.shields.io/badge/frontend-React%20%2B%20Vite-61DAFB?logo=react&logoColor=black)](https://vite.dev/)
 [![Storage: DuckDB + Parquet](https://img.shields.io/badge/storage-DuckDB%20%2B%20Parquet-FFF000?logo=duckdb&logoColor=black)](https://duckdb.org/)
 [![CI](https://github.com/keithwegner/allcaps/actions/workflows/ci.yml/badge.svg)](https://github.com/keithwegner/allcaps/actions/workflows/ci.yml)
 [![Status: Experimental](https://img.shields.io/badge/status-experimental-orange)](https://github.com/keithwegner/allcaps)
@@ -23,6 +25,7 @@ In plain English, the app helps you:
 - [What You Need Before You Start](#what-you-need-before-you-start)
 - [Quick Start](#quick-start)
 - [Contributor Workflow](#contributor-workflow)
+- [Web-First Migration Preview](#web-first-migration-preview)
 - [Run With Docker](#run-with-docker)
 - [Hosting On Render](#hosting-on-render)
 - [Hosted Environment Variables](#hosted-environment-variables)
@@ -30,10 +33,10 @@ In plain English, the app helps you:
 - [Trump Truth Social-Only Workflow](#trump-truth-social-only-workflow)
 - [How To Work With Each Page](#how-to-work-with-each-page)
   - [`Datasets`](#datasets)
-- [`Discovery`](#discovery)
-- [`Research View`](#research-view)
-- [`Models & Backtests`](#models--backtests)
-- [`Live Monitor`](#live-monitor)
+  - [`Discovery`](#discovery)
+  - [`Research View`](#research-view)
+  - [`Models & Backtests`](#models--backtests)
+  - [`Live Monitor`](#live-monitor)
 - [Data Inputs](#data-inputs)
 - [CSV Expectations](#csv-expectations)
 - [What Gets Stored Locally](#what-gets-stored-locally)
@@ -81,6 +84,37 @@ bash scripts/ci.sh
 ```
 
 `main` is intended to stay behind pull requests with a green `ci` check, so `bash scripts/ci.sh` is the local pre-push baseline.
+
+## Web-First Migration Preview
+
+The Streamlit app remains the primary user interface while the web-first migration is built in slices. The first migration surface adds:
+
+- a read-only FastAPI backend in `trump_workbench/api.py`
+- a React + TypeScript + Vite frontend in `frontend/`
+- API-backed views for status, data health, saved runs, live decisions, paper portfolios, and performance diagnostics
+
+Run the API locally:
+
+```bash
+uvicorn trump_workbench.api:app --reload --host 127.0.0.1 --port 8000
+```
+
+Run the frontend locally in a second terminal:
+
+```bash
+npm install --prefix frontend
+npm run dev --prefix frontend
+```
+
+Open:
+
+- [http://127.0.0.1:5173](http://127.0.0.1:5173)
+
+Optional frontend env var:
+
+- `VITE_ALLCAPS_API_BASE_URL=http://127.0.0.1:8000`
+
+The FastAPI surface is intentionally read-only in this slice. Admin mutations, model training, and refresh workflows still live in Streamlit until they are moved behind explicit job APIs.
 
 On the first launch, the app may take a little longer because it can bootstrap local working datasets automatically.
 
