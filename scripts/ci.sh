@@ -30,6 +30,17 @@ echo "==> Coverage gate"
 "$PYTHON_BIN" -m coverage report --fail-under=90 -m
 "$PYTHON_BIN" -m coverage xml
 
+if [[ -f "$ROOT_DIR/frontend/package.json" ]]; then
+  if command -v npm >/dev/null 2>&1; then
+    echo "==> Frontend build"
+    npm ci --prefix "$ROOT_DIR/frontend"
+    npm run build --prefix "$ROOT_DIR/frontend"
+  else
+    echo "npm is required for the frontend build but was not found on PATH." >&2
+    exit 1
+  fi
+fi
+
 echo "==> Streamlit smoke test"
 rm -f "$LOG_FILE"
 "$PYTHON_BIN" -m streamlit run app.py --server.headless true --server.port "$PORT" >"$LOG_FILE" 2>&1 &

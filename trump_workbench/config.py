@@ -52,6 +52,12 @@ class AppSettings:
     scheduler_full_hour: int = field(default_factory=lambda: min(23, max(0, _env_int("ALLCAPS_SCHEDULER_FULL_HOUR", 3))))
     scheduler_full_minute: int = field(default_factory=lambda: min(59, max(0, _env_int("ALLCAPS_SCHEDULER_FULL_MINUTE", 0))))
     scheduler_loop_seconds: int = field(default_factory=lambda: max(15, _env_int("ALLCAPS_SCHEDULER_LOOP_SECONDS", 60)))
+    api_cors_origins_raw: str = field(
+        default_factory=lambda: os.getenv(
+            "ALLCAPS_API_CORS_ORIGINS",
+            "http://127.0.0.1:5173,http://localhost:5173",
+        ).strip(),
+    )
     remote_x_csv_url: str = field(
         default_factory=lambda: os.getenv("ALLCAPS_REMOTE_X_CSV_URL", os.getenv("TRUMP_X_CSV_URL", "")).strip(),
     )
@@ -116,3 +122,11 @@ class AppSettings:
     @property
     def scheduler_lock_path(self) -> Path:
         return self.workbench_dir / "scheduler_refresh.lock"
+
+    @property
+    def api_cors_origins(self) -> tuple[str, ...]:
+        return tuple(
+            origin.strip()
+            for origin in self.api_cors_origins_raw.split(",")
+            if origin.strip()
+        )
