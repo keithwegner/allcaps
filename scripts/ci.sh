@@ -35,6 +35,9 @@ if [[ -f "$ROOT_DIR/frontend/package.json" ]]; then
     echo "==> Frontend build"
     npm ci --prefix "$ROOT_DIR/frontend"
     npm run build --prefix "$ROOT_DIR/frontend"
+    echo "==> Frontend UI tests"
+    npm exec --prefix "$ROOT_DIR/frontend" playwright install chromium
+    npm run test:ui --prefix "$ROOT_DIR/frontend"
   else
     echo "npm is required for the frontend build but was not found on PATH." >&2
     exit 1
