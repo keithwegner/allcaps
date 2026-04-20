@@ -116,6 +116,13 @@ Optional frontend env var:
 
 The FastAPI surface is intentionally read-only in this slice. Admin mutations, model training, and refresh workflows still live in Streamlit until they are moved behind explicit job APIs.
 
+Run browser UI tests for the React shell:
+
+```bash
+npm exec --prefix frontend playwright install chromium
+npm run test:ui --prefix frontend
+```
+
 On the first launch, the app may take a little longer because it can bootstrap local working datasets automatically.
 
 The app opens as a multi-page Streamlit workbench with these sections:
@@ -479,6 +486,8 @@ The code is organized as a modular monolith under `trump_workbench/`:
 - `experiments.py` for saved runs and artifacts
 - `research.py` for descriptive visualization helpers
 - `ui.py` for the Streamlit app shell
+- `api.py` for the read-only FastAPI migration surface
+- `frontend/` for the React + TypeScript web shell
 
 ## Testing
 
@@ -499,4 +508,17 @@ Run the configured coverage report:
 ```bash
 python -m coverage run -m unittest discover -s tests
 python -m coverage report -m
+```
+
+Run the React browser UI tests:
+
+```bash
+npm exec --prefix frontend playwright install chromium
+npm run test:ui --prefix frontend
+```
+
+Run the same checks as GitHub Actions:
+
+```bash
+bash scripts/ci.sh
 ```

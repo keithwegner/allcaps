@@ -12,5 +12,7 @@ htmlcov/
 docker-state/
 frontend/dist/
 frontend/node_modules/
+frontend/playwright-report/
+frontend/test-results/
 __pycache__/
 *.pyc
