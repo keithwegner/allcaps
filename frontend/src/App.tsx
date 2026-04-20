@@ -1,11 +1,22 @@
 import { useMemo, useState } from "react";
+import type { ComponentType } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { api, type RecordRow } from "./api";
+import createPlotlyComponentModule from "react-plotly.js/factory";
+import Plotly from "plotly.js-dist-min";
+import type { Data, Frame, Layout } from "plotly.js";
+import { api, type PlotlyFigure, type RecordRow, type ResearchFilters } from "./api";
 
-type PageKey = "overview" | "data" | "live" | "paper";
+type PlotComponentFactory = (plotly: unknown) => ComponentType<Record<string, unknown>>;
+const createPlotlyComponent = (
+  (createPlotlyComponentModule as { default?: PlotComponentFactory }).default ?? createPlotlyComponentModule
+) as PlotComponentFactory;
+const Plot = createPlotlyComponent(Plotly);
+
+type PageKey = "overview" | "research" | "data" | "live" | "paper";
 
 const pages: Array<{ key: PageKey; label: string; deck: string }> = [
   { key: "overview", label: "Overview", deck: "API status and migration posture" },
+  { key: "research", label: "Research", deck: "Sentiment, narratives, and export pack" },
   { key: "data", label: "Data Health", deck: "Freshness, completeness, and anomalies" },
   { key: "live", label: "Live Decision", deck: "Current portfolio board" },
   { key: "paper", label: "Paper + Performance", deck: "Portfolio audit and drift" },
@@ -46,6 +57,37 @@ function MetricCard({ label, value, caption }: { label: string; value: unknown; 
   );
 }
 
+function selectedOptions(options: HTMLCollectionOf<HTMLOptionElement>): string[] {
+  return Array.from(options)
+    .filter((option) => option.selected)
+    .map((option) => option.value);
+}
+
+function PlotlyChart({ figure, title }: { figure?: PlotlyFigure; title: string }) {
+  if (!figure) {
+    return <div className="empty-state">No chart data returned yet.</div>;
+  }
+  return (
+    <div className="chart-frame" aria-label={title}>
+      <Plot
+        data={(figure.data ?? []) as Data[]}
+        layout={
+          {
+            autosize: true,
+            ...(figure.layout ?? {}),
+            paper_bgcolor: "rgba(0,0,0,0)",
+            plot_bgcolor: "rgba(0,0,0,0)",
+          } as Partial<Layout>
+        }
+        frames={(figure.frames ?? []) as Frame[]}
+        config={{ displayModeBar: false, responsive: true }}
+        style={{ width: "100%", height: "100%" }}
+        useResizeHandler
+      />
+    </div>
+  );
+}
+
 function DataTable({ rows, emptyLabel = "No rows returned yet." }: { rows: RecordRow[]; emptyLabel?: string }) {
   const columns = useMemo(() => {
     const keys = new Set<string>();
@@ -78,6 +120,292 @@ function DataTable({ rows, emptyLabel = "No rows returned yet." }: { rows: Recor
         </tbody>
       </table>
     </div>
+  );
+}
+
+function ResearchPage() {
+  const [filters, setFilters] = useState<ResearchFilters>({});
+  const research = useQuery({ queryKey: ["research", filters], queryFn: () => api.research(filters) });
+
+  const payload = research.data;
+  const currentFilters = { ...(payload?.filters ?? {}), ...filters };
+  const options = payload?.narrative_filter_options ?? {};
+  const updateFilters = (next: ResearchFilters) => setFilters((previous) => ({ ...previous, ...next }));
+
+  if (research.isLoading) {
+    return <LoadingBlock label="Loading research workspace..." />;
+  }
+  if (research.error) {
+    return <ErrorBlock error={research.error} />;
+  }
+
+  return (
+    <section className="page-grid">
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Read-only migration slice</p>
+            <h2>Research workspace</h2>
+          </div>
+          <StatusPill label={payload?.source_mode.mode === "truth_only" ? "Truth Social-only" : "Research API"} tone="ok" />
+        </div>
+        {payload?.source_mode.mode === "truth_only" ? (
+          <p>
+            Truth Social-only mode is active. The default scope is Donald Trump-authored Truth Social posts; use the platform
+            and author controls below to verify or intentionally broaden the slice.
+          </p>
+        ) : null}
+        {!payload?.ready ? <div className="empty-state">{payload?.message ?? "Research data is not ready yet."}</div> : null}
+        <div className="filter-grid">
+          <label>
+            Start date
+            <input
+              type="date"
+              value={currentFilters.date_start ?? ""}
+              onChange={(event) => updateFilters({ date_start: event.target.value })}
+            />
+          </label>
+          <label>
+            End date
+            <input
+              type="date"
+              value={currentFilters.date_end ?? ""}
+              onChange={(event) => updateFilters({ date_end: event.target.value })}
+            />
+          </label>
+          <label>
+            Platforms
+            <select
+              multiple
+              value={currentFilters.platforms ?? []}
+              onChange={(event) => updateFilters({ platforms: selectedOptions(event.currentTarget.selectedOptions) })}
+            >
+              <option value="Truth Social">Truth Social</option>
+              <option value="X">X</option>
+            </select>
+          </label>
+          <label>
+            Keyword
+            <input
+              type="search"
+              value={currentFilters.keyword ?? ""}
+              onChange={(event) => updateFilters({ keyword: event.target.value })}
+              placeholder="Optional exact text filter"
+            />
+          </label>
+          <label className="checkbox-field">
+            <input
+              type="checkbox"
+              checked={Boolean(currentFilters.trump_authored_only)}
+              onChange={(event) => updateFilters({ trump_authored_only: event.target.checked })}
+            />
+            Trump-authored only
+          </label>
+          <label className="checkbox-field">
+            <input
+              type="checkbox"
+              checked={Boolean(currentFilters.include_reshares)}
+              onChange={(event) => updateFilters({ include_reshares: event.target.checked })}
+            />
+            Include reshares
+          </label>
+          <label className="checkbox-field">
+            <input
+              type="checkbox"
+              checked={Boolean(currentFilters.tracked_only)}
+              onChange={(event) => updateFilters({ tracked_only: event.target.checked })}
+            />
+            Trump + tracked only
+          </label>
+          <label className="checkbox-field">
+            <input
+              type="checkbox"
+              checked={currentFilters.scale_markers !== false}
+              onChange={(event) => updateFilters({ scale_markers: event.target.checked })}
+            />
+            Scale activity
+          </label>
+        </div>
+      </article>
+
+      <div className="metric-grid">
+        <MetricCard label="Sessions with posts" value={payload?.headline_metrics.sessions_with_posts ?? 0} />
+        <MetricCard label="Posts in view" value={payload?.headline_metrics.posts_in_view ?? 0} />
+        <MetricCard label="Truth posts" value={payload?.headline_metrics.truth_posts ?? 0} />
+        <MetricCard label="Mean sentiment" value={payload?.headline_metrics.mean_sentiment ?? 0} />
+      </div>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <h2>Social activity vs. market baseline</h2>
+          <a className="button-link" href={api.researchExportUrl(currentFilters)} download={payload?.export_filename ?? "research-pack.zip"}>
+            Export research pack
+          </a>
+        </div>
+        <PlotlyChart figure={payload?.charts.social_activity} title="Social activity vs. market baseline" />
+      </article>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <h2>Session table</h2>
+        </div>
+        <DataTable rows={payload?.session_rows ?? []} />
+      </article>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <h2>Underlying posts</h2>
+        </div>
+        <DataTable rows={payload?.post_rows ?? []} />
+      </article>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Narrative Lab</p>
+            <h2>Structured narrative inspection</h2>
+          </div>
+          <StatusPill label={`${payload?.narrative_metrics.narrative_tagged_posts ?? 0} posts`} />
+        </div>
+        <div className="filter-grid filter-grid--compact">
+          <label>
+            Topic
+            <select value={currentFilters.narrative_topic ?? "All"} onChange={(event) => updateFilters({ narrative_topic: event.target.value })}>
+              {(options.topics ?? ["All"]).map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Policy bucket
+            <select value={currentFilters.narrative_policy ?? "All"} onChange={(event) => updateFilters({ narrative_policy: event.target.value })}>
+              {(options.policy_buckets ?? ["All"]).map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Stance
+            <select value={currentFilters.narrative_stance ?? "All"} onChange={(event) => updateFilters({ narrative_stance: event.target.value })}>
+              {(options.stances ?? ["All"]).map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Urgency
+            <select value={currentFilters.narrative_urgency ?? "All"} onChange={(event) => updateFilters({ narrative_urgency: event.target.value })}>
+              {(options.urgency_bands ?? ["All", "low", "medium", "high"]).map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Asset target
+            <select value={currentFilters.narrative_asset ?? "All"} onChange={(event) => updateFilters({ narrative_asset: event.target.value })}>
+              {(options.assets ?? ["All"]).map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Return bucket
+            <select
+              value={currentFilters.narrative_bucket_field ?? "semantic_topic"}
+              onChange={(event) => updateFilters({ narrative_bucket_field: event.target.value })}
+            >
+              {(options.bucket_fields ?? [{ value: "semantic_topic", label: "Topic" }]).map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Narrative platforms
+            <select
+              multiple
+              value={currentFilters.narrative_platforms ?? options.platforms ?? []}
+              onChange={(event) => updateFilters({ narrative_platforms: selectedOptions(event.currentTarget.selectedOptions) })}
+            >
+              {(options.platforms ?? []).map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Tracked scope
+            <select
+              value={currentFilters.narrative_tracked_scope ?? "All posts"}
+              onChange={(event) => updateFilters({ narrative_tracked_scope: event.target.value })}
+            >
+              {(options.tracked_scopes ?? ["All posts"]).map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="metric-grid metric-grid--small">
+          <MetricCard label="Narrative sessions" value={payload?.narrative_metrics.narrative_sessions ?? 0} />
+          <MetricCard label="Cache hit rate" value={payload?.narrative_metrics.cache_hit_rate ?? 0} />
+          <MetricCard label="Providers used" value={payload?.narrative_metrics.providers_used ?? 0} />
+          <MetricCard label="Rows in heatmap" value={payload?.narrative_asset_heatmap.length ?? 0} />
+        </div>
+      </article>
+
+      <article className="panel panel--wide chart-grid">
+        <div>
+          <h2>Narrative frequency</h2>
+          <PlotlyChart figure={payload?.charts.narrative_frequency} title="Narrative frequency" />
+        </div>
+        <div>
+          <h2>Next-session return by narrative</h2>
+          <PlotlyChart figure={payload?.charts.narrative_returns} title="Next-session return by narrative" />
+        </div>
+      </article>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <h2>Asset-by-narrative heatmap</h2>
+        </div>
+        <PlotlyChart figure={payload?.charts.narrative_asset_heatmap} title="Asset-by-narrative heatmap" />
+      </article>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <h2>Top narrative posts</h2>
+        </div>
+        <DataTable rows={payload?.narrative_posts ?? []} />
+      </article>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <h2>Selected-narrative event table</h2>
+        </div>
+        <DataTable rows={payload?.narrative_events ?? []} />
+      </article>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <h2>Provider and cache indicators</h2>
+        </div>
+        <DataTable rows={payload?.provider_summary ?? []} />
+      </article>
+    </section>
   );
 }
 
@@ -329,6 +657,7 @@ export function App() {
       </section>
 
       {activePage === "overview" ? <OverviewPage /> : null}
+      {activePage === "research" ? <ResearchPage /> : null}
       {activePage === "data" ? <DataHealthPage /> : null}
       {activePage === "live" ? <LiveDecisionPage /> : null}
       {activePage === "paper" ? <PaperPerformancePage /> : null}

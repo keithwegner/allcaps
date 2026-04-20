@@ -66,10 +66,10 @@ The app can start with just Truth Social plus market data, but the **Discovery**
 ## Quick Start
 
 ```bash
-python -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
+python -m pip install -r requirements.txt
+python -m streamlit run app.py
 ```
 
 ## Contributor Workflow
@@ -91,13 +91,17 @@ The Streamlit app remains the primary user interface while the web-first migrati
 
 - a read-only FastAPI backend in `trump_workbench/api.py`
 - a React + TypeScript + Vite frontend in `frontend/`
-- API-backed views for status, data health, saved runs, live decisions, paper portfolios, and performance diagnostics
+- API-backed views for status, research, data health, saved runs, live decisions, paper portfolios, and performance diagnostics
+- a migrated read-only Research workspace with sentiment filters, interactive Plotly charts, Narrative Lab outputs, and research ZIP export
 
 Run the API locally:
 
 ```bash
-uvicorn trump_workbench.api:app --reload --host 127.0.0.1 --port 8000
+source .venv/bin/activate
+python -m uvicorn trump_workbench.api:app --reload --host 127.0.0.1 --port 8000
 ```
+
+Use `python -m uvicorn` from the active project virtual environment. Running bare `uvicorn` can accidentally use a global/Homebrew Python install that does not have this repository's dependencies installed.
 
 Run the frontend locally in a second terminal:
 

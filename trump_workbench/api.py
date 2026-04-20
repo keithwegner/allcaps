@@ -4,10 +4,11 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI
+from fastapi import FastAPI, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import AppSettings
+from .enrichment import LLMEnrichmentService
 from .experiments import ExperimentStore
 from .health import DataHealthService, build_health_summary, build_health_trend_frame, ensure_refresh_history_frame
 from .live_monitor import build_live_portfolio_run_state, validate_live_monitor_config
@@ -31,6 +32,7 @@ from .performance import (
     build_winner_distribution_frame,
 )
 from .runtime import missing_core_datasets
+from .research_workspace import build_research_workspace, detect_source_mode
 from .storage import DuckDBStore
 
 
@@ -60,37 +62,13 @@ def _frame_records(frame: pd.DataFrame, limit: int | None = None) -> list[dict[s
     return [_json_safe(record) for record in out.to_dict(orient="records")]
 
 
-def _source_mode(posts: pd.DataFrame) -> dict[str, Any]:
-    if posts.empty or "source_platform" not in posts.columns:
-        return {
-            "mode": "unknown",
-            "has_truth_posts": False,
-            "has_x_posts": False,
-            "truth_post_count": 0,
-            "x_post_count": 0,
-        }
-
-    platforms = posts["source_platform"].fillna("").astype(str)
-    truth_post_count = int((platforms == "Truth Social").sum())
-    x_post_count = int((platforms == "X").sum())
-    has_truth_posts = truth_post_count > 0
-    has_x_posts = x_post_count > 0
-    mode = "truth_plus_x" if has_x_posts else "truth_only" if has_truth_posts else "unknown"
-    return {
-        "mode": mode,
-        "has_truth_posts": has_truth_posts,
-        "has_x_posts": has_x_posts,
-        "truth_post_count": truth_post_count,
-        "x_post_count": x_post_count,
-    }
-
-
 def create_app(settings: AppSettings | None = None, store: DuckDBStore | None = None) -> FastAPI:
     settings = settings or AppSettings()
     store = store or DuckDBStore(settings)
     health_service = DataHealthService()
     experiment_store = ExperimentStore(store)
     model_service = ModelService()
+    enrichment_service = LLMEnrichmentService(store)
     paper_service = PaperTradingService(store)
     performance_service = PerformanceObservatoryService(store)
 
@@ -121,10 +99,98 @@ def create_app(settings: AppSettings | None = None, store: DuckDBStore | None = 
                 "mode": "public" if settings.public_mode else "private",
                 "state_root": str(settings.state_root),
                 "db_path": str(settings.db_path),
-                "source_mode": _source_mode(posts),
+                "source_mode": detect_source_mode(posts),
                 "missing_core_datasets": missing_core_datasets(store),
                 "dataset_count": int(len(registry)),
             },
+        )
+
+    @app.get("/api/research")
+    def research(
+        date_start: str | None = None,
+        date_end: str | None = None,
+        platforms: list[str] | None = Query(default=None),
+        include_reshares: bool | None = None,
+        tracked_only: bool | None = None,
+        trump_authored_only: bool | None = None,
+        keyword: str | None = None,
+        scale_markers: bool | None = None,
+        narrative_topic: str | None = None,
+        narrative_policy: str | None = None,
+        narrative_stance: str | None = None,
+        narrative_urgency: str | None = None,
+        narrative_asset: str | None = None,
+        narrative_platforms: list[str] | None = Query(default=None),
+        narrative_tracked_scope: str | None = None,
+        narrative_bucket_field: str | None = None,
+    ) -> dict[str, Any]:
+        result = build_research_workspace(
+            settings=settings,
+            store=store,
+            enrichment_service=enrichment_service,
+            date_start=date_start,
+            date_end=date_end,
+            platforms=platforms,
+            include_reshares=include_reshares,
+            tracked_only=tracked_only,
+            trump_authored_only=trump_authored_only,
+            keyword=keyword,
+            scale_markers=scale_markers,
+            narrative_topic=narrative_topic,
+            narrative_policy=narrative_policy,
+            narrative_stance=narrative_stance,
+            narrative_urgency=narrative_urgency,
+            narrative_asset=narrative_asset,
+            narrative_platforms=narrative_platforms,
+            narrative_tracked_scope=narrative_tracked_scope,
+            narrative_bucket_field=narrative_bucket_field,
+        )
+        return _json_safe(result.payload)
+
+    @app.get("/api/research/export")
+    def research_export(
+        date_start: str | None = None,
+        date_end: str | None = None,
+        platforms: list[str] | None = Query(default=None),
+        include_reshares: bool | None = None,
+        tracked_only: bool | None = None,
+        trump_authored_only: bool | None = None,
+        keyword: str | None = None,
+        scale_markers: bool | None = None,
+        narrative_topic: str | None = None,
+        narrative_policy: str | None = None,
+        narrative_stance: str | None = None,
+        narrative_urgency: str | None = None,
+        narrative_asset: str | None = None,
+        narrative_platforms: list[str] | None = Query(default=None),
+        narrative_tracked_scope: str | None = None,
+        narrative_bucket_field: str | None = None,
+    ) -> Response:
+        result = build_research_workspace(
+            settings=settings,
+            store=store,
+            enrichment_service=enrichment_service,
+            date_start=date_start,
+            date_end=date_end,
+            platforms=platforms,
+            include_reshares=include_reshares,
+            tracked_only=tracked_only,
+            trump_authored_only=trump_authored_only,
+            keyword=keyword,
+            scale_markers=scale_markers,
+            narrative_topic=narrative_topic,
+            narrative_policy=narrative_policy,
+            narrative_stance=narrative_stance,
+            narrative_urgency=narrative_urgency,
+            narrative_asset=narrative_asset,
+            narrative_platforms=narrative_platforms,
+            narrative_tracked_scope=narrative_tracked_scope,
+            narrative_bucket_field=narrative_bucket_field,
+        )
+        return Response(
+            content=result.export_bundle,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{result.export_filename}"'},
         )
 
     @app.get("/api/datasets/health")
@@ -262,4 +328,3 @@ def create_app(settings: AppSettings | None = None, store: DuckDBStore | None = 
 
 
 app = create_app()
-
