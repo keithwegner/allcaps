@@ -68,6 +68,143 @@ const runsPayload = {
   ],
 };
 
+const researchPayload = {
+  ready: true,
+  message: "",
+  source_mode: {
+    mode: "truth_only",
+    truth_post_count: 42,
+    x_post_count: 0,
+  },
+  filters: {
+    date_start: "2025-01-20",
+    date_end: "2026-04-20",
+    platforms: ["Truth Social"],
+    include_reshares: false,
+    tracked_only: false,
+    trump_authored_only: true,
+    keyword: "",
+    scale_markers: true,
+    narrative_topic: "All",
+    narrative_policy: "All",
+    narrative_stance: "All",
+    narrative_urgency: "All",
+    narrative_asset: "All",
+    narrative_platforms: ["Truth Social"],
+    narrative_tracked_scope: "All posts",
+    narrative_bucket_field: "semantic_topic",
+  },
+  headline_metrics: {
+    sessions_with_posts: 12,
+    posts_in_view: 42,
+    truth_posts: 42,
+    tracked_x_posts: 0,
+    mean_sentiment: 0.18,
+    sp500_change: 0.04,
+  },
+  charts: {
+    social_activity: {
+      data: [{ type: "scatter", mode: "lines", x: ["2026-04-17"], y: [6800], name: "S&P 500 close" }],
+      layout: { title: { text: "Research View: social activity vs. market baseline" } },
+    },
+    narrative_frequency: {
+      data: [{ type: "bar", x: ["2026-04-17"], y: [3], name: "markets" }],
+      layout: { title: { text: "Narrative frequency over time" } },
+    },
+    narrative_returns: {
+      data: [{ type: "bar", x: ["markets"], y: [0.01], name: "returns" }],
+      layout: { title: { text: "Next-session return by narrative bucket" } },
+    },
+    narrative_asset_heatmap: {
+      data: [{ type: "heatmap", x: ["SPY"], y: ["markets"], z: [[3]] }],
+      layout: { title: { text: "Asset-by-narrative heatmap" } },
+    },
+  },
+  session_rows: [
+    {
+      trade_date: "2026-04-17",
+      post_count: 3,
+      truth_posts: 3,
+      sentiment_avg: 0.18,
+      sp500_close: 6800,
+    },
+  ],
+  post_rows: [
+    {
+      source_platform: "Truth Social",
+      author_handle: "realDonaldTrump",
+      post_time_et: "2026-04-17 08:00",
+      sentiment_score: 0.18,
+      post_text: "The economy is strong.",
+    },
+  ],
+  narrative_filter_options: {
+    topics: ["All", "markets", "trade"],
+    policy_buckets: ["All", "economy"],
+    stances: ["All", "positive"],
+    urgency_bands: ["All", "low", "medium", "high"],
+    assets: ["All", "SPY"],
+    platforms: ["Truth Social"],
+    tracked_scopes: ["All posts", "Trump + tracked accounts", "Tracked accounts only"],
+    bucket_fields: [
+      { value: "semantic_topic", label: "Topic" },
+      { value: "semantic_policy_bucket", label: "Policy bucket" },
+    ],
+  },
+  narrative_metrics: {
+    narrative_tagged_posts: 42,
+    narrative_sessions: 12,
+    cache_hit_rate: 0.9,
+    providers_used: 1,
+  },
+  provider_summary: [
+    {
+      semantic_provider: "heuristic-fallback",
+      posts: 42,
+      cache_hit_rate: 0.9,
+    },
+  ],
+  narrative_frequency: [
+    {
+      session_date: "2026-04-17",
+      semantic_topic: "markets",
+      post_count: 3,
+    },
+  ],
+  narrative_returns: [
+    {
+      semantic_topic: "markets",
+      avg_next_session_return: 0.01,
+      session_count: 4,
+    },
+  ],
+  narrative_asset_heatmap: [
+    {
+      semantic_topic: "markets",
+      asset_symbol: "SPY",
+      post_count: 3,
+    },
+  ],
+  narrative_posts: [
+    {
+      session_date: "2026-04-17",
+      semantic_topic: "markets",
+      semantic_policy_bucket: "economy",
+      author_handle: "realDonaldTrump",
+      post_text: "The economy is strong.",
+    },
+  ],
+  narrative_events: [
+    {
+      trade_date: "2026-04-17",
+      post_count: 3,
+      primary_topics: "markets",
+      next_session_return: 0.01,
+    },
+  ],
+  export_filename: "research-pack-20250120-20260420.zip",
+};
+
 const livePayload = {
   configured: true,
   errors: [],
@@ -167,6 +304,7 @@ async function mockApi(page: Page) {
   await fulfillJson(page, "/api/status", statusPayload);
   await fulfillJson(page, "/api/datasets/health", healthPayload);
   await fulfillJson(page, "/api/runs", runsPayload);
+  await fulfillJson(page, "/api/research**", researchPayload);
   await fulfillJson(page, "/api/live/current", livePayload);
   await fulfillJson(page, "/api/paper/portfolios", portfoliosPayload);
   await fulfillJson(page, "/api/performance/paper-1", performancePayload);
@@ -194,6 +332,23 @@ test("shows data health warnings and registry rows", async ({ page }) => {
   await expect(page.getByText("asset_intraday")).toBeVisible();
   await expect(page.getByText("freshness_hours")).toBeVisible();
   await expect(page.getByText("normalized_posts")).toBeVisible();
+});
+
+test("shows the migrated research workspace with narratives and export", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: /Research/ }).click();
+
+  await expect(page.getByRole("heading", { name: "Sentiment, narratives, and export pack" })).toBeVisible();
+  await expect(page.getByText("Truth Social-only mode is active")).toBeVisible();
+  await expect(page.getByRole("link", { name: "Export research pack" })).toHaveAttribute(
+    "href",
+    /\/api\/research\/export/,
+  );
+  await expect(page.getByRole("heading", { name: "Session table" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "realDonaldTrump" }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Structured narrative inspection" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "markets" }).first()).toBeVisible();
+  await expect(page.getByText("heuristic-fallback")).toBeVisible();
 });
 
 test("shows the current live decision and candidate board", async ({ page }) => {

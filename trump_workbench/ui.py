@@ -122,6 +122,7 @@ from .research_exports import (
     build_research_export_manifest,
     research_export_filename,
 )
+from .research_workspace import detect_source_mode, source_mode_label
 from .storage import DuckDBStore
 from .utils import fmt_score
 
@@ -141,37 +142,11 @@ def _refresh_required_message(settings: AppSettings, base_message: str) -> str:
 
 
 def _source_mode(posts: pd.DataFrame) -> dict[str, Any]:
-    if posts.empty or "source_platform" not in posts.columns:
-        return {
-            "mode": "unknown",
-            "has_truth_posts": False,
-            "has_x_posts": False,
-            "truth_post_count": 0,
-            "x_post_count": 0,
-        }
-
-    platforms = posts["source_platform"].fillna("").astype(str)
-    truth_post_count = int((platforms == "Truth Social").sum())
-    x_post_count = int((platforms == "X").sum())
-    has_truth_posts = truth_post_count > 0
-    has_x_posts = x_post_count > 0
-    mode = "truth_plus_x" if has_x_posts else "truth_only" if has_truth_posts else "unknown"
-    return {
-        "mode": mode,
-        "has_truth_posts": has_truth_posts,
-        "has_x_posts": has_x_posts,
-        "truth_post_count": truth_post_count,
-        "x_post_count": x_post_count,
-    }
+    return detect_source_mode(posts)
 
 
 def _source_mode_label(source_mode: dict[str, Any]) -> str:
-    mode = str(source_mode.get("mode", "unknown"))
-    if mode == "truth_only":
-        return "Truth Social-only"
-    if mode == "truth_plus_x":
-        return "Truth Social + X mentions"
-    return "No source data"
+    return source_mode_label(source_mode)
 
 
 def _render_sidebar_access_panel(settings: AppSettings) -> None:

@@ -12,13 +12,17 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5.90.12",
+    "plotly.js-dist-min": "^3.5.0",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "react-plotly.js": "^2.6.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
+    "@types/plotly.js-dist-min": "^2.3.4",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
+    "@types/react-plotly.js": "^2.6.4",
     "@vitejs/plugin-react": "^5.1.2",
     "typescript": "^5.9.3",
     "vite": "^8.0.8"

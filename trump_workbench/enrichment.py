@@ -152,6 +152,12 @@ class LLMEnrichmentService:
         self.provider = provider
 
     def enrich_posts(self, posts: pd.DataFrame, enabled: bool) -> pd.DataFrame:
+        return self._enrich_posts(posts, enabled=enabled, persist_cache=True)
+
+    def enrich_posts_readonly(self, posts: pd.DataFrame, enabled: bool) -> pd.DataFrame:
+        return self._enrich_posts(posts, enabled=enabled, persist_cache=False)
+
+    def _enrich_posts(self, posts: pd.DataFrame, enabled: bool, persist_cache: bool) -> pd.DataFrame:
         out = posts.copy()
         if out.empty:
             for column in SEMANTIC_COLUMNS[1:]:
@@ -205,15 +211,16 @@ class LLMEnrichmentService:
             frames = [frame for frame in [cache, new_rows] if not frame.empty]
             cache = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=SEMANTIC_COLUMNS)
             cache = self._prepare_cache(cache)
-            provider_name = self.provider.provider_name if self.provider is not None else "heuristic-fallback"
-            self.store.save_frame(
-                "semantic_cache",
-                cache,
-                metadata={
-                    "provider": provider_name,
-                    "schema_version": SEMANTIC_SCHEMA_VERSION,
-                },
-            )
+            if persist_cache:
+                provider_name = self.provider.provider_name if self.provider is not None else "heuristic-fallback"
+                self.store.save_frame(
+                    "semantic_cache",
+                    cache,
+                    metadata={
+                        "provider": provider_name,
+                        "schema_version": SEMANTIC_SCHEMA_VERSION,
+                    },
+                )
 
         cached = keyed.merge(cache, on="semantic_key", how="left")
         cached["semantic_cache_hit"] = keyed["semantic_key"].astype(str).isin(complete_cache_keys).values
