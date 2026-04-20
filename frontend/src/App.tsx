@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import createPlotlyComponentModule from "react-plotly.js/factory";
 import Plotly from "plotly.js-dist-min";
 import type { Data, Frame, Layout } from "plotly.js";
-import { api, type PlotlyFigure, type RecordRow, type ResearchFilters } from "./api";
+import { api, type PlotlyFigure, type RecordRow, type ResearchAssetFilters, type ResearchFilters } from "./api";
 
 type PlotComponentFactory = (plotly: unknown) => ComponentType<Record<string, unknown>>;
 const createPlotlyComponent = (
@@ -126,12 +126,30 @@ function DataTable({ rows, emptyLabel = "No rows returned yet." }: { rows: Recor
 
 function ResearchPage() {
   const [filters, setFilters] = useState<ResearchFilters>({});
+  const [assetFilters, setAssetFilters] = useState<ResearchAssetFilters>({});
   const research = useQuery({ queryKey: ["research", filters], queryFn: () => api.research(filters) });
 
   const payload = research.data;
   const currentFilters = { ...(payload?.filters ?? {}), ...filters };
+  const assetQueryFilters: ResearchAssetFilters = {
+    date_start: currentFilters.date_start,
+    date_end: currentFilters.date_end,
+    platforms: currentFilters.platforms,
+    include_reshares: currentFilters.include_reshares,
+    tracked_only: currentFilters.tracked_only,
+    trump_authored_only: currentFilters.trump_authored_only,
+    keyword: currentFilters.keyword,
+    ...assetFilters,
+  };
+  const assetLab = useQuery({
+    queryKey: ["research-assets", assetQueryFilters],
+    queryFn: () => api.researchAssets(assetQueryFilters),
+  });
+  const assetPayload = assetLab.data;
+  const currentAssetControls = { ...(assetPayload?.controls ?? {}), ...assetFilters };
   const options = payload?.narrative_filter_options ?? {};
   const updateFilters = (next: ResearchFilters) => setFilters((previous) => ({ ...previous, ...next }));
+  const updateAssetFilters = (next: ResearchAssetFilters) => setAssetFilters((previous) => ({ ...previous, ...next }));
 
   if (research.isLoading) {
     return <LoadingBlock label="Loading research workspace..." />;
@@ -405,6 +423,173 @@ function ResearchPage() {
           <h2>Provider and cache indicators</h2>
         </div>
         <DataTable rows={payload?.provider_summary ?? []} />
+      </article>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Asset Lab</p>
+            <h2>Multi-asset comparison, event study, and intraday reaction</h2>
+          </div>
+          <StatusPill label={assetPayload?.ready ? "Stored data" : "Setup needed"} tone={assetPayload?.ready ? "ok" : "warn"} />
+        </div>
+        {assetLab.isLoading ? <LoadingBlock label="Loading asset lab..." /> : null}
+        {assetLab.error ? <ErrorBlock error={assetLab.error} /> : null}
+        {assetPayload && !assetPayload.ready ? <div className="empty-state">{assetPayload.message}</div> : null}
+        <div className="filter-grid filter-grid--compact">
+          <label>
+            Selected asset
+            <select
+              value={String(currentAssetControls.selected_asset ?? "")}
+              onChange={(event) => {
+                updateAssetFilters({
+                  selected_asset: event.target.value,
+                  benchmark_symbol: "None",
+                  intraday_session_date: "",
+                  intraday_anchor_post_id: "",
+                });
+              }}
+            >
+              {(assetPayload?.asset_options ?? []).map((option) => (
+                <option key={option.symbol} value={option.symbol}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Comparison mode
+            <select
+              value={String(currentAssetControls.comparison_mode ?? "normalized")}
+              onChange={(event) => updateAssetFilters({ comparison_mode: event.target.value as "price" | "normalized" })}
+            >
+              <option value="normalized">Normalized returns</option>
+              <option value="price">Price overlay</option>
+            </select>
+          </label>
+          <label>
+            ETF baseline
+            <select
+              value={String(currentAssetControls.benchmark_symbol ?? "None")}
+              onChange={(event) => updateAssetFilters({ benchmark_symbol: event.target.value, intraday_anchor_post_id: "" })}
+            >
+              {(assetPayload?.benchmark_options ?? ["None"]).map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Intraday anchor
+            <select
+              value={String(currentAssetControls.intraday_anchor_post_id ?? "")}
+              onChange={(event) => {
+                const option = assetPayload?.intraday_anchor_options.find((item) => item.anchor_id === event.target.value);
+                updateAssetFilters({
+                  intraday_anchor_post_id: event.target.value,
+                  intraday_session_date: option?.session_date ?? "",
+                });
+              }}
+            >
+              <option value="">Latest eligible anchor</option>
+              {(assetPayload?.intraday_anchor_options ?? []).map((option) => (
+                <option key={option.anchor_id} value={option.anchor_id}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Sessions before
+            <input
+              type="number"
+              min={1}
+              max={10}
+              value={Number(currentAssetControls.pre_sessions ?? 3)}
+              onChange={(event) => updateAssetFilters({ pre_sessions: Number(event.target.value) })}
+            />
+          </label>
+          <label>
+            Sessions after
+            <input
+              type="number"
+              min={1}
+              max={10}
+              value={Number(currentAssetControls.post_sessions ?? 5)}
+              onChange={(event) => updateAssetFilters({ post_sessions: Number(event.target.value) })}
+            />
+          </label>
+          <label>
+            Minutes before
+            <input
+              type="number"
+              min={30}
+              max={390}
+              step={30}
+              value={Number(currentAssetControls.before_minutes ?? 120)}
+              onChange={(event) => updateAssetFilters({ before_minutes: Number(event.target.value) })}
+            />
+          </label>
+          <label>
+            Minutes after
+            <input
+              type="number"
+              min={30}
+              max={780}
+              step={30}
+              value={Number(currentAssetControls.after_minutes ?? 240)}
+              onChange={(event) => updateAssetFilters({ after_minutes: Number(event.target.value) })}
+            />
+          </label>
+        </div>
+        <div className="metric-grid metric-grid--small">
+          <MetricCard label="Sessions" value={assetPayload?.headline_metrics.sessions_in_range ?? 0} />
+          <MetricCard label="Asset move" value={assetPayload?.headline_metrics.asset_move ?? null} />
+          <MetricCard label="Mapped posts" value={assetPayload?.headline_metrics.mapped_post_count ?? 0} />
+          <MetricCard label="Intraday bars" value={assetPayload?.headline_metrics.intraday_bars ?? 0} />
+        </div>
+      </article>
+
+      <article className="panel panel--wide chart-grid">
+        <div>
+          <h2>SPY vs. selected asset</h2>
+          <PlotlyChart figure={assetPayload?.charts.asset_comparison} title="SPY vs. selected asset" />
+        </div>
+        <div>
+          <h2>Event study</h2>
+          <PlotlyChart figure={assetPayload?.charts.event_study} title="Asset event study" />
+        </div>
+      </article>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <h2>Intraday reaction</h2>
+        </div>
+        {assetPayload?.intraday_message ? <div className="empty-state">{assetPayload.intraday_message}</div> : null}
+        <PlotlyChart figure={assetPayload?.charts.intraday_reaction} title="Intraday reaction" />
+      </article>
+
+      <article className="panel panel--wide chart-grid">
+        <div>
+          <h2>Asset session summary</h2>
+          <DataTable rows={assetPayload?.asset_session_rows ?? []} />
+        </div>
+        <div>
+          <h2>Mapped posts for selected asset</h2>
+          <DataTable rows={assetPayload?.asset_mapping_rows ?? []} />
+        </div>
+      </article>
+
+      <article className="panel panel--wide chart-grid">
+        <div>
+          <h2>Event-study rows</h2>
+          <DataTable rows={assetPayload?.event_study_rows ?? []} />
+        </div>
+        <div>
+          <h2>Intraday coverage</h2>
+          <DataTable rows={assetPayload?.intraday_coverage ?? []} />
+        </div>
       </article>
     </section>
   );

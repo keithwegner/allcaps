@@ -345,6 +345,118 @@ const researchPayload = {
   export_filename: "research-pack-20250120-20260420.zip",
 };
 
+const researchAssetPayload = {
+  ready: true,
+  message: "",
+  source_mode: {
+    mode: "truth_only",
+    truth_post_count: 42,
+    x_post_count: 0,
+  },
+  filters: researchPayload.filters,
+  controls: {
+    selected_asset: "NVDA",
+    comparison_mode: "normalized",
+    benchmark_symbol: "QQQ",
+    pre_sessions: 3,
+    post_sessions: 5,
+    intraday_session_date: "2026-04-17",
+    intraday_anchor_post_id: "truth-asset-1",
+    before_minutes: 120,
+    after_minutes: 240,
+  },
+  asset_options: [
+    {
+      symbol: "NVDA",
+      label: "NVDA - NVIDIA",
+      source: "watchlist",
+      is_watchlist: true,
+      has_daily: true,
+    },
+    {
+      symbol: "QQQ",
+      label: "QQQ - Invesco QQQ Trust",
+      source: "etf_starter",
+      is_watchlist: false,
+      has_daily: true,
+    },
+  ],
+  benchmark_options: ["None", "QQQ", "XLK"],
+  headline_metrics: {
+    sessions_in_range: 12,
+    asset_move: 0.06,
+    mapped_post_count: 4,
+    intraday_bars: 18,
+  },
+  charts: {
+    asset_comparison: {
+      data: [{ type: "scatter", mode: "lines", x: ["2026-04-17"], y: [1.04], name: "NVDA" }],
+      layout: { title: { text: "SPY vs. selected asset" } },
+    },
+    event_study: {
+      data: [{ type: "scatter", mode: "lines+markers", x: [-1, 0, 1], y: [-0.01, 0, 0.02], name: "NVDA" }],
+      layout: { title: { text: "Event study around mapped posts" } },
+    },
+    intraday_reaction: {
+      data: [{ type: "scatter", mode: "lines", x: ["2026-04-17T13:35:00Z"], y: [0.01], name: "NVDA" }],
+      layout: { title: { text: "Intraday reaction around selected post" } },
+    },
+  },
+  asset_session_rows: [
+    {
+      trade_date: "2026-04-17",
+      post_count: 3,
+      next_session_return: 0.014,
+    },
+  ],
+  asset_mapping_rows: [
+    {
+      asset_symbol: "NVDA",
+      session_date: "2026-04-17",
+      author_handle: "realDonaldTrump",
+      match_reasons: "semantic_primary_asset",
+      post_text: "The economy is strong.",
+    },
+  ],
+  comparison_rows: [
+    {
+      trade_date: "2026-04-17",
+      spy_close: 6800,
+      asset_close: 920,
+      asset_normalized_return: 0.04,
+    },
+  ],
+  event_study_rows: [
+    {
+      symbol: "NVDA",
+      relative_session: 0,
+      avg_relative_return: 0,
+      event_count: 4,
+    },
+  ],
+  intraday_anchor_options: [
+    {
+      anchor_id: "truth-asset-1",
+      session_date: "2026-04-17",
+      label: "2026-04-17 09:35 ET | @realDonaldTrump | The economy is strong.",
+      post_timestamp: "2026-04-17T13:35:00Z",
+    },
+  ],
+  intraday_coverage: [
+    { symbol: "SPY", bars: 9 },
+    { symbol: "NVDA", bars: 9 },
+    { symbol: "QQQ", bars: 9 },
+  ],
+  intraday_rows: [
+    {
+      symbol: "NVDA",
+      timestamp: "2026-04-17T13:35:00Z",
+      normalized_return: 0.01,
+    },
+  ],
+  intraday_message: "",
+};
+
 const livePayload = {
   configured: true,
   errors: [],
@@ -447,6 +559,7 @@ async function mockApi(page: Page) {
   await fulfillJson(page, "/api/runs/run-portfolio-1**", runDetailPayload);
   await fulfillJson(page, "/api/runs/compare**", runComparisonPayload);
   await fulfillJson(page, "/api/research**", researchPayload);
+  await fulfillJson(page, "/api/research/assets**", researchAssetPayload);
   await fulfillJson(page, "/api/live/current", livePayload);
   await fulfillJson(page, "/api/paper/portfolios", portfoliosPayload);
   await fulfillJson(page, "/api/performance/paper-1", performancePayload);
@@ -491,6 +604,18 @@ test("shows the migrated research workspace with narratives and export", async (
   await expect(page.getByRole("heading", { name: "Structured narrative inspection" })).toBeVisible();
   await expect(page.getByRole("cell", { name: "markets" }).first()).toBeVisible();
   await expect(page.getByText("heuristic-fallback")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Multi-asset comparison, event study, and intraday reaction" })).toBeVisible();
+  await expect(page.locator("label", { hasText: "Selected asset" }).locator("select")).toHaveValue("NVDA");
+  await expect(page.getByLabel("ETF baseline")).toHaveValue("QQQ");
+  await expect(page.getByText("Mapped posts", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "SPY vs. selected asset" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Event study", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Intraday reaction", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Mapped posts for selected asset" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "realDonaldTrump" }).first()).toBeVisible();
+  await expect(page.getByRole("cell", { name: "semantic_primary_asset" }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Intraday coverage" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "NVDA" }).first()).toBeVisible();
 });
 
 test("shows the migrated run explorer with detail and comparison tables", async ({ page }) => {

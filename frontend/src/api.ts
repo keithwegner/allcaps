@@ -181,6 +181,66 @@ export type ResearchPayload = {
   export_filename: string;
 };
 
+export type ResearchAssetFilters = Pick<
+  ResearchFilters,
+  "date_start" | "date_end" | "platforms" | "include_reshares" | "tracked_only" | "trump_authored_only" | "keyword"
+> & {
+  selected_asset?: string;
+  comparison_mode?: "price" | "normalized";
+  benchmark_symbol?: string;
+  pre_sessions?: number;
+  post_sessions?: number;
+  intraday_session_date?: string;
+  intraday_anchor_post_id?: string;
+  before_minutes?: number;
+  after_minutes?: number;
+};
+
+export type ResearchAssetPayload = {
+  ready: boolean;
+  message: string;
+  source_mode: StatusPayload["source_mode"];
+  filters: ResearchPayload["filters"];
+  controls: {
+    selected_asset: string;
+    comparison_mode: "price" | "normalized";
+    benchmark_symbol: string;
+    pre_sessions: number;
+    post_sessions: number;
+    before_minutes: number;
+    after_minutes: number;
+    intraday_session_date: string;
+    intraday_anchor_post_id: string;
+  };
+  asset_options: Array<{
+    symbol: string;
+    label: string;
+    source: string;
+    is_watchlist: boolean;
+    has_daily: boolean;
+  }>;
+  benchmark_options: string[];
+  headline_metrics: RecordRow;
+  charts: {
+    asset_comparison?: PlotlyFigure;
+    event_study?: PlotlyFigure;
+    intraday_reaction?: PlotlyFigure;
+  };
+  asset_session_rows: RecordRow[];
+  asset_mapping_rows: RecordRow[];
+  comparison_rows: RecordRow[];
+  event_study_rows: RecordRow[];
+  intraday_anchor_options: Array<{
+    anchor_id: string;
+    session_date: string;
+    label: string;
+    post_timestamp: string;
+  }>;
+  intraday_coverage: RecordRow[];
+  intraday_rows: RecordRow[];
+  intraday_message: string;
+};
+
 function researchQuery(filters: ResearchFilters = {}): string {
   const params = new URLSearchParams();
   Object.entries(filters).forEach(([key, value]) => {
@@ -235,6 +295,7 @@ export const api = {
     return getJson<RunComparisonPayload>(`/api/runs/compare${query ? `?${query}` : ""}`);
   },
   research: (filters?: ResearchFilters) => getJson<ResearchPayload>(`/api/research${researchQuery(filters)}`),
+  researchAssets: (filters?: ResearchAssetFilters) => getJson<ResearchAssetPayload>(`/api/research/assets${researchQuery(filters)}`),
   researchExportUrl: (filters?: ResearchFilters) => `${API_BASE_URL}/api/research/export${researchQuery(filters)}`,
   live: () => getJson<LivePayload>("/api/live/current"),
   paperPortfolios: () => getJson<PaperPortfoliosPayload>("/api/paper/portfolios"),
