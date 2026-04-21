@@ -29,6 +29,43 @@ export type HealthPayload = {
   registry: RecordRow[];
 };
 
+export type DatasetAdminPayload = HealthPayload & {
+  admin: {
+    mode: string;
+    write_requires_unlock: boolean;
+  };
+  status: {
+    operating_mode: string;
+    source_mode: StatusPayload["source_mode"];
+    state_root: string;
+    db_path: string;
+    scheduler_enabled: boolean;
+    missing_core_datasets: string[];
+    missing_core_dataset_count: number;
+    last_refresh: Record<string, unknown>;
+    active_job_id: string;
+  };
+  watchlist_symbols: string[];
+  asset_universe: RecordRow[];
+  source_manifests: RecordRow[];
+  asset_market_manifest: RecordRow[];
+  refresh_jobs: RecordRow[];
+  job_id?: string;
+};
+
+export type DatasetRefreshJobPayload = {
+  job_id: string;
+  found: boolean;
+  job: RecordRow | null;
+  recent_jobs: RecordRow[];
+};
+
+export type DatasetRefreshRequest = {
+  refresh_mode: "bootstrap" | "full" | "incremental";
+  remote_url?: string;
+  files?: FileList | File[];
+};
+
 export type RunsPayload = {
   count: number;
   runs: RecordRow[];
@@ -298,11 +335,45 @@ async function postJson<T>(path: string, payload: unknown = {}, token?: string):
   return response.json() as Promise<T>;
 }
 
+async function postForm<T>(path: string, formData: FormData, token?: string): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: "POST",
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: formData,
+  });
+  if (!response.ok) {
+    let detail = `${response.status} ${response.statusText}`;
+    try {
+      const body = (await response.json()) as { detail?: unknown };
+      if (body.detail) {
+        detail = Array.isArray(body.detail) ? body.detail.join("; ") : String(body.detail);
+      }
+    } catch {
+      // Keep the HTTP status fallback when the response is not JSON.
+    }
+    throw new Error(`API request failed: ${detail}`);
+  }
+  return response.json() as Promise<T>;
+}
+
 export const api = {
   baseUrl: API_BASE_URL,
   status: () => getJson<StatusPayload>("/api/status"),
   adminSession: (password = "") => postJson<AdminSessionPayload>("/api/admin/session", { password }),
   health: () => getJson<HealthPayload>("/api/datasets/health"),
+  datasetAdmin: () => getJson<DatasetAdminPayload>("/api/datasets/admin"),
+  saveWatchlist: (symbols: string[], reset: boolean, token: string) =>
+    postJson<DatasetAdminPayload>("/api/datasets/watchlist", { symbols, reset }, token),
+  startDatasetRefresh: (request: DatasetRefreshRequest, token: string) => {
+    const formData = new FormData();
+    formData.set("refresh_mode", request.refresh_mode);
+    formData.set("remote_url", request.remote_url ?? "");
+    Array.from(request.files ?? []).forEach((file) => formData.append("files", file));
+    return postForm<DatasetAdminPayload>("/api/datasets/refresh", formData, token);
+  },
+  datasetRefreshJob: (jobId: string) => getJson<DatasetRefreshJobPayload>(`/api/datasets/jobs/${encodeURIComponent(jobId)}`),
   runs: () => getJson<RunsPayload>("/api/runs"),
   runDetail: (runId: string, options: { variantName?: string; sessionDate?: string } = {}) => {
     const params = new URLSearchParams();

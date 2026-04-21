@@ -14,6 +14,8 @@ from trump_workbench.api import create_app
 from trump_workbench.config import AppSettings
 from trump_workbench.contracts import BacktestRun, MANUAL_OVERRIDE_COLUMNS, RANKING_HISTORY_COLUMNS, TRACKED_ACCOUNT_COLUMNS
 from trump_workbench.experiments import ExperimentStore
+from trump_workbench.health import HEALTH_CHECK_COLUMNS
+from trump_workbench.scheduler import acquire_refresh_lock, release_refresh_lock
 from trump_workbench.paper_trading import (
     PAPER_BENCHMARK_CURVE_COLUMNS,
     PAPER_DECISION_JOURNAL_COLUMNS,
@@ -22,6 +24,183 @@ from trump_workbench.paper_trading import (
     PAPER_TRADE_LEDGER_COLUMNS,
 )
 from trump_workbench.storage import DuckDBStore
+
+
+class FakeIngestionService:
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+
+    def _posts(self, post_id: str = "truth-refresh-1") -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "source_platform": "Truth Social",
+                    "source_type": "truth_archive",
+                    "author_account_id": "truth-account",
+                    "author_handle": "realDonaldTrump",
+                    "author_display_name": "Donald Trump",
+                    "author_is_trump": True,
+                    "post_id": post_id,
+                    "post_url": "https://truthsocial.com/@realDonaldTrump/posts/refresh",
+                    "post_timestamp": pd.Timestamp("2025-02-03 08:00:00", tz="America/New_York"),
+                    "raw_text": "Synthetic refresh post",
+                    "cleaned_text": "Synthetic refresh post",
+                    "is_reshare": False,
+                    "has_media": False,
+                    "replies_count": 0,
+                    "reblogs_count": 0,
+                    "favourites_count": 0,
+                    "mentions_trump": False,
+                    "source_provenance": "unit-test",
+                    "engagement_score": 0.0,
+                    "sentiment_score": 0.2,
+                    "sentiment_label": "positive",
+                },
+            ],
+        )
+
+    def _manifest(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "source": "fake-truth",
+                    "status": "ok",
+                    "post_count": 1,
+                    "error_message": "",
+                },
+            ],
+        )
+
+    def run_refresh(self, adapters) -> tuple[pd.DataFrame, pd.DataFrame]:
+        del adapters
+        if self.fail:
+            raise RuntimeError("fake ingestion failed")
+        return self._posts(), self._manifest()
+
+    def run_incremental_refresh(self, adapters, last_cursor) -> tuple[pd.DataFrame, pd.DataFrame]:
+        del adapters, last_cursor
+        if self.fail:
+            raise RuntimeError("fake ingestion failed")
+        return self._posts("truth-refresh-2"), self._manifest()
+
+
+class FakeMarketDataService:
+    def load_sp500_daily(self, start: str, end: str) -> pd.DataFrame:
+        del start, end
+        return pd.DataFrame(
+            [
+                {"trade_date": pd.Timestamp("2025-02-03"), "close": 100.0},
+                {"trade_date": pd.Timestamp("2025-02-04"), "close": 101.0},
+            ],
+        )
+
+    def load_spy_daily(self, start: str, end: str) -> pd.DataFrame:
+        del start, end
+        return pd.DataFrame(
+            [
+                {"trade_date": pd.Timestamp("2025-02-03"), "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 1000},
+                {"trade_date": pd.Timestamp("2025-02-04"), "open": 100.5, "high": 102.0, "low": 100.0, "close": 101.0, "volume": 1100},
+            ],
+        )
+
+    def load_assets_daily(self, symbols: list[str], start: str, end: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+        del start, end
+        rows = []
+        manifest_rows = []
+        for symbol in symbols:
+            rows.extend(
+                [
+                    {"symbol": symbol, "trade_date": pd.Timestamp("2025-02-03"), "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 1000},
+                    {"symbol": symbol, "trade_date": pd.Timestamp("2025-02-04"), "open": 100.5, "high": 102.0, "low": 100.0, "close": 101.0, "volume": 1100},
+                ],
+            )
+            manifest_rows.append(
+                {
+                    "symbol": symbol,
+                    "dataset_kind": "daily",
+                    "row_count": 2,
+                    "status": "ok",
+                    "start_at": pd.Timestamp("2025-02-03"),
+                    "end_at": pd.Timestamp("2025-02-04"),
+                    "detail": "",
+                },
+            )
+        return pd.DataFrame(rows), pd.DataFrame(manifest_rows)
+
+    def load_assets_intraday(self, symbols: list[str], interval: str = "5m", lookback_days: int = 30) -> tuple[pd.DataFrame, pd.DataFrame]:
+        del lookback_days
+        rows = []
+        manifest_rows = []
+        for symbol in symbols:
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "timestamp": pd.Timestamp("2025-02-04 14:30:00", tz="UTC"),
+                    "open": 100.0,
+                    "high": 100.5,
+                    "low": 99.8,
+                    "close": 100.2,
+                    "volume": 100,
+                    "interval": interval,
+                },
+            )
+            manifest_rows.append(
+                {
+                    "symbol": symbol,
+                    "dataset_kind": "intraday",
+                    "row_count": 1,
+                    "status": "ok",
+                    "start_at": pd.Timestamp("2025-02-04 14:30:00", tz="UTC"),
+                    "end_at": pd.Timestamp("2025-02-04 14:30:00", tz="UTC"),
+                    "detail": "",
+                },
+            )
+        return pd.DataFrame(rows), pd.DataFrame(manifest_rows)
+
+
+class FakeFeatureService:
+    def prepare_session_posts(self, posts: pd.DataFrame, market_calendar: pd.DataFrame, tracked_accounts: pd.DataFrame, llm_enabled: bool) -> pd.DataFrame:
+        del market_calendar, tracked_accounts, llm_enabled
+        return posts.assign(session_date=pd.Timestamp("2025-02-03"))
+
+    def build_asset_post_mappings(self, prepared_posts: pd.DataFrame, asset_universe: pd.DataFrame, llm_enabled: bool) -> pd.DataFrame:
+        del llm_enabled
+        symbols = asset_universe["symbol"].astype(str).tolist() if not asset_universe.empty else ["SPY"]
+        return pd.DataFrame(
+            [
+                {
+                    "asset_symbol": symbols[0],
+                    "post_id": str(prepared_posts.iloc[0]["post_id"]) if not prepared_posts.empty else "post-1",
+                    "session_date": pd.Timestamp("2025-02-03"),
+                    "asset_relevance_score": 1.0,
+                    "mapping_reason": "unit-test",
+                },
+            ],
+        )
+
+    def build_asset_session_dataset(
+        self,
+        asset_post_mappings: pd.DataFrame,
+        asset_market: pd.DataFrame,
+        feature_version: str,
+        llm_enabled: bool,
+        asset_universe: pd.DataFrame,
+    ) -> pd.DataFrame:
+        del asset_post_mappings, asset_market, feature_version, llm_enabled
+        symbols = asset_universe["symbol"].astype(str).tolist() if not asset_universe.empty else ["SPY"]
+        return pd.DataFrame(
+            [
+                {
+                    "asset_symbol": symbol,
+                    "signal_session_date": pd.Timestamp("2025-02-03"),
+                    "next_session_date": pd.Timestamp("2025-02-04"),
+                    "post_count": 1,
+                    "target_next_session_return": 0.01,
+                    "target_available": True,
+                }
+                for symbol in symbols
+            ],
+        )
 
 
 class ApiContractTests(unittest.TestCase):
@@ -718,8 +897,8 @@ class ApiContractTests(unittest.TestCase):
             ),
         )
 
-    def _admin_token(self) -> str:
-        response = self.client.post("/api/admin/session", json={})
+    def _admin_token(self, client: TestClient | None = None) -> str:
+        response = (client or self.client).post("/api/admin/session", json={})
         self.assertEqual(response.status_code, 200)
         return str(response.json()["token"])
 
@@ -915,6 +1094,136 @@ class ApiContractTests(unittest.TestCase):
         self.assertIn("overall_severity", payload["summary"])
         self.assertIsInstance(payload["latest"], list)
         self.assertGreaterEqual(len(payload["registry"]), 1)
+
+    def test_dataset_admin_returns_safe_empty_state_payload(self) -> None:
+        response = self.client.get("/api/datasets/admin")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["admin"]["mode"], "private")
+        self.assertIn("status", payload)
+        self.assertGreaterEqual(payload["status"]["missing_core_dataset_count"], 1)
+        self.assertIn("normalized_posts", payload["status"]["missing_core_datasets"])
+        self.assertIn("overall_severity", payload["summary"])
+        self.assertEqual(payload["watchlist_symbols"], [])
+        self.assertEqual(payload["refresh_jobs"], [])
+
+    def test_dataset_watchlist_endpoint_requires_admin_and_persists_symbols(self) -> None:
+        rejected = self.client.post("/api/datasets/watchlist", json={"symbols": ["NVDA"], "reset": False})
+        token = self._admin_token()
+
+        saved = self.client.post(
+            "/api/datasets/watchlist",
+            json={"symbols": ["nvda", "TSLA"], "reset": False},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        reset = self.client.post(
+            "/api/datasets/watchlist",
+            json={"symbols": [], "reset": True},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        self.assertEqual(rejected.status_code, 401)
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.json()["watchlist_symbols"], ["NVDA", "TSLA"])
+        self.assertIn("SPY", {row["symbol"] for row in saved.json()["asset_universe"]})
+        self.assertIn("NVDA", {row["symbol"] for row in saved.json()["asset_universe"]})
+        self.assertEqual(reset.status_code, 200)
+        self.assertEqual(reset.json()["watchlist_symbols"], [])
+
+    def test_dataset_refresh_rejects_overlapping_lock(self) -> None:
+        token = self._admin_token()
+        lock_fd = acquire_refresh_lock(self.settings)
+        self.assertIsNotNone(lock_fd)
+        try:
+            response = self.client.post(
+                "/api/datasets/refresh",
+                data={"refresh_mode": "full", "remote_url": ""},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        finally:
+            release_refresh_lock(self.settings, lock_fd)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("already running", str(response.json()["detail"]))
+
+    def test_dataset_refresh_job_persists_success_health_and_history(self) -> None:
+        client = TestClient(
+            create_app(
+                settings=self.settings,
+                store=self.store,
+                ingestion_service=FakeIngestionService(),
+                market_service=FakeMarketDataService(),
+                feature_service=FakeFeatureService(),
+                run_refresh_jobs_inline=True,
+            ),
+        )
+        token = self._admin_token(client)
+
+        response = client.post(
+            "/api/datasets/refresh",
+            data={"refresh_mode": "full", "remote_url": ""},
+            files=[("files", ("mentions.csv", b"author,text\nmacro,hello\n", "text/csv"))],
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["job_id"].startswith("dataset-refresh-"))
+        jobs = self.store.read_frame("dataset_refresh_jobs")
+        self.assertFalse(jobs.empty)
+        self.assertEqual(str(jobs.iloc[-1]["status"]), "success")
+        self.assertEqual(int(jobs.iloc[-1]["uploaded_file_count"]), 1)
+        self.assertFalse(self.store.read_frame("normalized_posts").empty)
+        self.assertFalse(self.store.read_frame("refresh_history").empty)
+        self.assertFalse(self.store.read_frame("data_health_latest").empty)
+        self.assertFalse(self.store.read_frame("data_health_history").empty)
+
+    def test_dataset_refresh_job_persists_error_without_overwriting_prior_health(self) -> None:
+        prior_health = pd.DataFrame(
+            [
+                {
+                    "snapshot_id": "prior",
+                    "generated_at": pd.Timestamp("2025-02-01", tz="UTC"),
+                    "refresh_id": "prior-refresh",
+                    "scope_kind": "dataset",
+                    "scope_key": "normalized_posts",
+                    "check_name": "prior_check",
+                    "severity": "ok",
+                    "observed_value": 1.0,
+                    "baseline_value": 1.0,
+                    "detail": "prior snapshot",
+                },
+            ],
+            columns=HEALTH_CHECK_COLUMNS,
+        )
+        self.store.save_frame("data_health_latest", prior_health)
+        client = TestClient(
+            create_app(
+                settings=self.settings,
+                store=self.store,
+                ingestion_service=FakeIngestionService(fail=True),
+                market_service=FakeMarketDataService(),
+                feature_service=FakeFeatureService(),
+                run_refresh_jobs_inline=True,
+            ),
+        )
+        token = self._admin_token(client)
+
+        response = client.post(
+            "/api/datasets/refresh",
+            data={"refresh_mode": "bootstrap", "remote_url": ""},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        jobs = self.store.read_frame("dataset_refresh_jobs")
+        self.assertEqual(str(jobs.iloc[-1]["status"]), "error")
+        self.assertIn("fake ingestion failed", str(jobs.iloc[-1]["error_message"]))
+        refresh_history = self.store.read_frame("refresh_history")
+        self.assertEqual(str(refresh_history.iloc[-1]["status"]), "error")
+        latest = self.store.read_frame("data_health_latest")
+        self.assertEqual(str(latest.iloc[0]["check_name"]), "prior_check")
 
     def test_runs_and_live_current_handle_empty_live_config(self) -> None:
         self._save_run_record()

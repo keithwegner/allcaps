@@ -55,6 +55,67 @@ const healthPayload = {
   ],
 };
 
+const datasetAdminPayload = {
+  ...healthPayload,
+  admin: {
+    mode: "public",
+    write_requires_unlock: true,
+  },
+  status: {
+    operating_mode: "Truth Social-only",
+    source_mode: statusPayload.source_mode,
+    state_root: statusPayload.state_root,
+    db_path: statusPayload.db_path,
+    scheduler_enabled: false,
+    missing_core_datasets: [],
+    missing_core_dataset_count: 0,
+    last_refresh: {
+      refresh_mode: "incremental",
+      status: "success",
+      completed_at: "2026-04-20T12:00:00Z",
+    },
+    active_job_id: "",
+  },
+  watchlist_symbols: ["NVDA", "TSLA"],
+  asset_universe: [
+    {
+      symbol: "SPY",
+      display_name: "SPDR S&P 500 ETF Trust",
+      asset_type: "etf",
+      source: "core_etf",
+    },
+    {
+      symbol: "NVDA",
+      display_name: "NVDA",
+      asset_type: "equity",
+      source: "watchlist",
+    },
+  ],
+  source_manifests: [
+    {
+      source: "truth_archive",
+      status: "ok",
+      post_count: 42,
+    },
+  ],
+  asset_market_manifest: [
+    {
+      symbol: "SPY",
+      dataset_kind: "daily",
+      status: "ok",
+      row_count: 300,
+    },
+  ],
+  refresh_jobs: [
+    {
+      job_id: "dataset-refresh-1",
+      refresh_mode: "incremental",
+      status: "success",
+      normalized_post_count: 42,
+    },
+  ],
+};
+
 const runsPayload = {
   count: 2,
   runs: [
@@ -618,6 +679,36 @@ async function fulfillJson(page: Page, path: string, payload: unknown) {
 async function mockApi(page: Page) {
   await fulfillJson(page, "/api/status", statusPayload);
   await fulfillJson(page, "/api/datasets/health", healthPayload);
+  await fulfillJson(page, "/api/datasets/admin", datasetAdminPayload);
+  await fulfillJson(page, "/api/datasets/watchlist", datasetAdminPayload);
+  await fulfillJson(page, "/api/datasets/refresh", {
+    ...datasetAdminPayload,
+    job_id: "dataset-refresh-2",
+    status: {
+      ...datasetAdminPayload.status,
+      active_job_id: "dataset-refresh-2",
+    },
+    refresh_jobs: [
+      ...datasetAdminPayload.refresh_jobs,
+      {
+        job_id: "dataset-refresh-2",
+        refresh_mode: "full",
+        status: "success",
+        uploaded_file_count: 1,
+        normalized_post_count: 43,
+      },
+    ],
+  });
+  await fulfillJson(page, "/api/datasets/jobs/dataset-refresh-2", {
+    job_id: "dataset-refresh-2",
+    found: true,
+    job: {
+      job_id: "dataset-refresh-2",
+      refresh_mode: "full",
+      status: "success",
+    },
+    recent_jobs: datasetAdminPayload.refresh_jobs,
+  });
   await fulfillJson(page, "/api/runs", runsPayload);
   await fulfillJson(page, "/api/runs/run-portfolio-1**", runDetailPayload);
   await fulfillJson(page, "/api/runs/compare**", runComparisonPayload);
@@ -647,14 +738,31 @@ test("renders the overview shell from API-backed data", async ({ page }) => {
   await expect(page.getByText("Portfolio Alpha")).toBeVisible();
 });
 
-test("shows data health warnings and registry rows", async ({ page }) => {
+test("shows data admin controls, health rows, and refresh jobs", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: /Data Health/ }).click();
+  await page.getByRole("button", { name: /Data Admin/ }).click();
 
-  await expect(page.getByRole("heading", { name: "Freshness, completeness, and anomalies" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Refresh jobs, watchlist, and data health" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Data Admin Console" })).toBeVisible();
+  await expect(page.getByText("Read-only until unlocked")).toBeVisible();
+  await page.getByPlaceholder("Admin password").fill("secret");
+  await page.getByRole("button", { name: "Unlock admin writes" }).click();
+  await expect(page.getByText("Unlocked for this browser session")).toBeVisible();
+  await page.getByLabel("Watchlist symbols").fill("NVDA, TSLA, XOM");
+  await page.getByRole("button", { name: "Save watchlist" }).click();
+  await page.getByLabel("Remote X / mention CSV URL").fill("https://example.invalid/mentions.csv");
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "mentions.csv",
+    mimeType: "text/csv",
+    buffer: Buffer.from("author,text\nmacro,hello\n"),
+  });
+  await page.getByRole("button", { name: "Start refresh job" }).click();
+  await expect(page.getByRole("cell", { name: "dataset-refresh-2" })).toBeVisible();
   await expect(page.getByText("asset_intraday")).toBeVisible();
   await expect(page.getByText("freshness_hours")).toBeVisible();
   await expect(page.getByText("normalized_posts")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Source manifest" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "truth_archive" })).toBeVisible();
 });
 
 test("shows the migrated research workspace with narratives and export", async ({ page }) => {

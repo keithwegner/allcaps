@@ -6,17 +6,26 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .access import verify_admin_password
 from .config import AppSettings
+from .dataset_admin import (
+    UploadedCsv,
+    build_dataset_admin_payload,
+    ensure_refresh_jobs_frame,
+    save_dataset_watchlist,
+    submit_refresh_job,
+)
 from .discovery import DiscoveryService
 from .discovery_workspace import build_discovery_workspace
 from .enrichment import LLMEnrichmentService
 from .experiments import ExperimentStore
+from .features import FeatureService
 from .health import DataHealthService, build_health_summary, build_health_trend_frame, ensure_refresh_history_frame
+from .ingestion import IngestionService
 from .live_monitor import build_live_portfolio_run_state, validate_live_monitor_config
 from .live_ops import (
     apply_paper_action,
@@ -24,6 +33,7 @@ from .live_ops import (
     build_live_ops_payload,
     run_live_capture,
 )
+from .market import MarketDataService
 from .modeling import ModelService
 from .paper_trading import (
     PaperTradingService,
@@ -65,6 +75,11 @@ class PaperCurrentActionRequest(BaseModel):
     starting_cash: float | None = None
 
 
+class WatchlistSaveRequest(BaseModel):
+    symbols: list[str] = []
+    reset: bool = False
+
+
 def _json_safe(value: Any) -> Any:
     if isinstance(value, pd.Timestamp):
         return None if pd.isna(value) else value.isoformat()
@@ -91,14 +106,26 @@ def _frame_records(frame: pd.DataFrame, limit: int | None = None) -> list[dict[s
     return [_json_safe(record) for record in out.to_dict(orient="records")]
 
 
-def create_app(settings: AppSettings | None = None, store: DuckDBStore | None = None) -> FastAPI:
+def create_app(
+    settings: AppSettings | None = None,
+    store: DuckDBStore | None = None,
+    ingestion_service: IngestionService | None = None,
+    market_service: MarketDataService | None = None,
+    discovery_service: DiscoveryService | None = None,
+    feature_service: FeatureService | None = None,
+    health_service: DataHealthService | None = None,
+    run_refresh_jobs_inline: bool = False,
+) -> FastAPI:
     settings = settings or AppSettings()
     store = store or DuckDBStore(settings)
-    health_service = DataHealthService()
-    discovery_service = DiscoveryService()
+    health_service = health_service or DataHealthService()
+    discovery_service = discovery_service or DiscoveryService()
     experiment_store = ExperimentStore(store)
     model_service = ModelService()
     enrichment_service = LLMEnrichmentService(store)
+    ingestion_service = ingestion_service or IngestionService()
+    market_service = market_service or MarketDataService()
+    feature_service = feature_service or FeatureService(enrichment_service)
     paper_service = PaperTradingService(store)
     performance_service = PerformanceObservatoryService(store)
 
@@ -110,6 +137,7 @@ def create_app(settings: AppSettings | None = None, store: DuckDBStore | None = 
     app.state.settings = settings
     app.state.store = store
     app.state.admin_tokens = {}
+    app.state.run_refresh_jobs_inline = bool(run_refresh_jobs_inline)
 
     if settings.api_cors_origins:
         app.add_middleware(
@@ -279,6 +307,81 @@ def create_app(settings: AppSettings | None = None, store: DuckDBStore | None = 
             "refresh_history": _frame_records(refresh_history.tail(25)),
             "registry": _frame_records(store.dataset_registry()),
         }
+
+    @app.get("/api/datasets/admin")
+    def dataset_admin() -> dict[str, Any]:
+        return _json_safe(
+            build_dataset_admin_payload(
+                settings=settings,
+                store=store,
+                health_service=health_service,
+                public_mode=settings.public_mode,
+            ),
+        )
+
+    @app.post("/api/datasets/watchlist")
+    def save_watchlist_endpoint(
+        request: WatchlistSaveRequest,
+        _admin: None = Depends(require_admin),
+    ) -> dict[str, Any]:
+        save_dataset_watchlist(store, request.symbols, reset=request.reset)
+        return _json_safe(
+            build_dataset_admin_payload(
+                settings=settings,
+                store=store,
+                health_service=health_service,
+                public_mode=settings.public_mode,
+            ),
+        )
+
+    @app.post("/api/datasets/refresh")
+    async def start_dataset_refresh(
+        refresh_mode: str = Form("incremental"),
+        remote_url: str = Form(""),
+        files: list[UploadFile] | None = File(default=None),
+        _admin: None = Depends(require_admin),
+    ) -> dict[str, Any]:
+        uploaded_files: list[UploadedCsv] = []
+        for upload in files or []:
+            uploaded_files.append(UploadedCsv(name=upload.filename or "uploaded.csv", raw_bytes=await upload.read()))
+        job_id, errors = submit_refresh_job(
+            settings=settings,
+            store=store,
+            refresh_mode=refresh_mode,
+            remote_url=remote_url,
+            uploaded_files=uploaded_files,
+            ingestion_service=ingestion_service,
+            market_service=market_service,
+            discovery_service=discovery_service,
+            feature_service=feature_service,
+            health_service=health_service,
+            run_inline=bool(app.state.run_refresh_jobs_inline),
+        )
+        if errors:
+            status_code = 409 if any("already running" in error for error in errors) else 400
+            raise HTTPException(status_code=status_code, detail=errors)
+        payload = build_dataset_admin_payload(
+            settings=settings,
+            store=store,
+            health_service=health_service,
+            public_mode=settings.public_mode,
+            active_job_id=job_id,
+        )
+        payload["job_id"] = job_id
+        return _json_safe(payload)
+
+    @app.get("/api/datasets/jobs/{job_id}")
+    def dataset_refresh_job(job_id: str) -> dict[str, Any]:
+        jobs = ensure_refresh_jobs_frame(store.read_frame("dataset_refresh_jobs"))
+        current = jobs.loc[jobs["job_id"].astype(str) == str(job_id)].copy()
+        return _json_safe(
+            {
+                "job_id": job_id,
+                "found": not current.empty,
+                "job": _frame_records(current.tail(1))[0] if not current.empty else None,
+                "recent_jobs": _frame_records(jobs.tail(10)),
+            },
+        )
 
     @app.get("/api/runs")
     def runs() -> dict[str, Any]:
