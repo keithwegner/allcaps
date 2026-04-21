@@ -188,6 +188,53 @@ export type RunComparisonPayload = {
   };
 };
 
+export type ReplayRunOption = {
+  run_id: string;
+  run_name: string;
+  target_asset: string;
+  run_type: string;
+  allocator_mode: string;
+  created_at?: string | null;
+  robust_score?: number;
+  total_return?: number;
+};
+
+export type ReplaySessionOption = {
+  value: string;
+  label: string;
+  signal_session_date: string;
+  post_count: number;
+  history_rows_available: number;
+};
+
+export type ReplayPayload = {
+  ready: boolean;
+  message: string;
+  selected_run_id: string;
+  selected_session_date: string;
+  min_history_rows: number;
+  run_options: ReplayRunOption[];
+  sessions: ReplaySessionOption[];
+  summary: RecordRow;
+};
+
+export type ReplaySessionPayload = {
+  ready: boolean;
+  message: string;
+  run_id: string;
+  run_name?: string;
+  target_asset?: string;
+  signal_session_date: string;
+  metrics: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  prediction: RecordRow[];
+  comparison_rows: RecordRow[];
+  feature_importance: RecordRow[];
+  feature_contributions: RecordRow[];
+  post_attribution: RecordRow[];
+  account_attribution: RecordRow[];
+};
+
 export type LivePayload = {
   configured: boolean;
   errors: string[];
@@ -456,6 +503,18 @@ export const api = {
     }
     const query = params.toString();
     return getJson<RunComparisonPayload>(`/api/runs/compare${query ? `?${query}` : ""}`);
+  },
+  replay: (runId?: string) => {
+    const params = new URLSearchParams();
+    if (runId) {
+      params.set("run_id", runId);
+    }
+    const query = params.toString();
+    return getJson<ReplayPayload>(`/api/replay${query ? `?${query}` : ""}`);
+  },
+  replaySession: (runId: string, signalSessionDate: string) => {
+    const params = new URLSearchParams({ run_id: runId, signal_session_date: signalSessionDate });
+    return getJson<ReplaySessionPayload>(`/api/replay/session?${params.toString()}`);
   },
   research: (filters?: ResearchFilters) => getJson<ResearchPayload>(`/api/research${researchQuery(filters)}`),
   researchExportUrl: (filters?: ResearchFilters) => `${API_BASE_URL}/api/research/export${researchQuery(filters)}`,

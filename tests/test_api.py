@@ -414,6 +414,87 @@ class FakeBacktestService:
         }
 
 
+class FakeReplayFeatureService(FakeFeatureService):
+    def __init__(self) -> None:
+        self.session_dates = pd.bdate_range("2025-01-01", periods=30)
+
+    def prepare_session_posts(self, posts: pd.DataFrame, market_calendar: pd.DataFrame, tracked_accounts: pd.DataFrame, llm_enabled: bool) -> pd.DataFrame:
+        del market_calendar, tracked_accounts, llm_enabled
+        out = posts.copy()
+        out["session_date"] = pd.to_datetime(out["post_timestamp"], errors="coerce", utc=True).dt.tz_convert(None).dt.normalize()
+        return out
+
+    def build_session_dataset(
+        self,
+        posts: pd.DataFrame,
+        spy_market: pd.DataFrame,
+        tracked_accounts: pd.DataFrame,
+        feature_version: str,
+        llm_enabled: bool,
+        prepared_posts: pd.DataFrame | None = None,
+    ) -> pd.DataFrame:
+        del posts, spy_market, tracked_accounts, feature_version, llm_enabled, prepared_posts
+        return pd.DataFrame(
+            {
+                "signal_session_date": self.session_dates,
+                "next_session_date": self.session_dates + pd.offsets.BDay(1),
+                "post_count": [(idx % 4) + 1 for idx in range(len(self.session_dates))],
+                "sentiment_mean": [0.1 for _ in range(len(self.session_dates))],
+                "target_next_session_return": [0.002 for _ in range(len(self.session_dates))],
+                "target_available": [True for _ in range(len(self.session_dates))],
+            },
+        )
+
+
+class FakeReplayBacktestService(FakeBacktestService):
+    def build_historical_replay(
+        self,
+        run_config,
+        feature_rows: pd.DataFrame,
+        replay_session_date: pd.Timestamp,
+        deployment_params: dict[str, Any],
+    ) -> dict[str, Any]:
+        replay_date = pd.Timestamp(replay_session_date).normalize()
+        history = feature_rows.loc[pd.to_datetime(feature_rows["signal_session_date"]).dt.normalize() < replay_date].copy()
+        prediction = feature_rows.loc[
+            pd.to_datetime(feature_rows["signal_session_date"]).dt.normalize() == replay_date
+        ].head(1).copy()
+        prediction["expected_return_score"] = 0.015
+        prediction["prediction_confidence"] = 0.72
+        prediction["deployment_threshold"] = float(deployment_params.get("threshold", 0.001))
+        prediction["deployment_min_post_count"] = int(deployment_params.get("min_post_count", 1))
+        prediction["deployment_account_weight"] = float(deployment_params.get("account_weight", 1.0))
+        prediction["historical_replay"] = True
+        prediction["training_rows_used"] = int(len(history))
+        prediction["history_start"] = history["signal_session_date"].min()
+        prediction["history_end"] = history["signal_session_date"].max()
+        prediction["suggested_stance"] = f"LONG {run_config.target_asset.upper()} NEXT SESSION"
+        prediction["future_training_leakage"] = False
+        return {
+            "artifact": None,
+            "importance": pd.DataFrame({"feature_name": ["post_count"], "coefficient": [0.4], "abs_coefficient": [0.4]}),
+            "prediction": prediction.reset_index(drop=True),
+            "feature_contributions": pd.DataFrame(
+                {
+                    "signal_session_date": [replay_date],
+                    "feature_name": ["post_count"],
+                    "feature_family": ["activity"],
+                    "contribution": [0.01],
+                    "contribution_share": [1.0],
+                },
+            ),
+            "training_rows_used": int(len(history)),
+            "history_start": history["signal_session_date"].min(),
+            "history_end": history["signal_session_date"].max(),
+            "replay_session_date": replay_date,
+            "deployment_params": {
+                "threshold": float(deployment_params.get("threshold", 0.001)),
+                "min_post_count": int(deployment_params.get("min_post_count", 1)),
+                "account_weight": float(deployment_params.get("account_weight", 1.0)),
+            },
+        }
+
+
 class ApiContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -694,6 +775,125 @@ class ApiContractTests(unittest.TestCase):
                 "importance_path": "",
                 "model_path": "",
             },
+        )
+
+    def _save_replay_frames(self) -> None:
+        dates = pd.bdate_range("2025-01-01", periods=30)
+        self.store.save_frame(
+            "normalized_posts",
+            pd.DataFrame(
+                [
+                    {
+                        "source_platform": "Truth Social",
+                        "source_type": "truth_archive",
+                        "author_account_id": "truth-account",
+                        "author_handle": "realDonaldTrump",
+                        "author_display_name": "Donald Trump",
+                        "author_is_trump": True,
+                        "post_id": f"truth-replay-{idx}",
+                        "post_url": f"https://truthsocial.com/@realDonaldTrump/posts/replay-{idx}",
+                        "post_timestamp": pd.Timestamp(date, tz="UTC") + pd.Timedelta(hours=14),
+                        "raw_text": "Replay market post",
+                        "cleaned_text": "Replay market post",
+                        "is_reshare": False,
+                        "has_media": False,
+                        "replies_count": 0,
+                        "reblogs_count": 0,
+                        "favourites_count": 0,
+                        "mentions_trump": False,
+                        "source_provenance": "unit-test",
+                        "engagement_score": 10.0,
+                        "sentiment_score": 0.3,
+                        "sentiment_label": "positive",
+                    }
+                    for idx, date in enumerate(dates)
+                ],
+            ),
+        )
+        self.store.save_frame(
+            "spy_daily",
+            pd.DataFrame(
+                [
+                    {
+                        "trade_date": pd.Timestamp(date),
+                        "open": 100.0 + idx,
+                        "high": 101.0 + idx,
+                        "low": 99.0 + idx,
+                        "close": 100.5 + idx,
+                        "volume": 1000 + idx,
+                    }
+                    for idx, date in enumerate(dates)
+                ],
+            ),
+        )
+
+    def _save_replay_asset_run_artifacts(self, run_id: str = "replay-asset-run") -> None:
+        dates = pd.bdate_range("2025-01-01", periods=30)
+        self.experiments.save_run(
+            run=BacktestRun(
+                run_id=run_id,
+                run_name="Replay SPY model",
+                target_asset="SPY",
+                config_hash="replay-asset-hash",
+                train_window=20,
+                validation_window=5,
+                test_window=5,
+                metrics={"total_return": 0.05, "robust_score": 1.3, "max_drawdown": -0.02},
+                selected_params={"threshold": 0.001, "min_post_count": 1, "account_weight": 1.0},
+            ),
+            config={
+                "run_name": "Replay SPY model",
+                "target_asset": "SPY",
+                "feature_version": "v1",
+                "llm_enabled": False,
+                "train_window": 20,
+                "validation_window": 5,
+                "test_window": 5,
+                "threshold_grid": [0.0, 0.001],
+                "minimum_signal_grid": [1],
+                "account_weight_grid": [1.0],
+                "transaction_cost_bps": 2.0,
+            },
+            trades=pd.DataFrame(
+                {
+                    "signal_session_date": dates,
+                    "next_session_date": dates + pd.offsets.BDay(1),
+                    "trade_taken": [True] * len(dates),
+                    "net_return": [0.002] * len(dates),
+                    "equity_curve": [1.0 + idx * 0.002 for idx in range(len(dates))],
+                },
+            ),
+            predictions=pd.DataFrame(
+                {
+                    "signal_session_date": dates,
+                    "next_session_date": dates + pd.offsets.BDay(1),
+                    "expected_return_score": [0.02] * len(dates),
+                    "prediction_confidence": [0.8] * len(dates),
+                    "post_count": [2] * len(dates),
+                    "target_next_session_return": [0.002] * len(dates),
+                    "suggested_stance": ["LONG SPY NEXT SESSION"] * len(dates),
+                },
+            ),
+            windows=pd.DataFrame({"window_id": [1], "train_start": [dates[0]]}),
+            importance=pd.DataFrame({"feature_name": ["post_count"], "coefficient": [0.4], "abs_coefficient": [0.4]}),
+            model_artifact={
+                "model_version": "replay-model",
+                "feature_names": ["post_count"],
+                "intercept": 0.0,
+                "coefficients": [0.4],
+                "means": [1.0],
+                "stds": [1.0],
+                "residual_std": 0.01,
+                "train_rows": 30,
+                "metadata": {"run_type": "asset_model", "target_asset": "SPY"},
+            },
+            feature_contributions=pd.DataFrame(),
+            post_attribution=pd.DataFrame(),
+            account_attribution=pd.DataFrame(),
+            benchmarks=pd.DataFrame({"benchmark_name": ["strategy"], "total_return": [0.05]}),
+            diagnostics=pd.DataFrame({"expected_return_score": [0.02], "actual_next_session_return": [0.002]}),
+            benchmark_curves=pd.DataFrame({"next_session_date": [dates[-1]], "strategy": [1.05]}),
+            leakage_audit={"overall_pass": True},
         )
 
     def _save_asset_run_artifacts(self, run_id: str = "asset-run-1") -> None:
@@ -1816,6 +2016,116 @@ class ApiContractTests(unittest.TestCase):
         self.assertGreaterEqual(len(payload["feature_diffs"]), 2)
         self.assertGreaterEqual(len(payload["benchmark_deltas"]), 1)
         self.assertTrue(any("portfolio-run-1" in note for note in payload["change_notes"]))
+
+    def test_replay_endpoint_returns_empty_and_portfolio_only_states(self) -> None:
+        empty = self.client.get("/api/replay")
+        self._save_portfolio_run_artifacts()
+        portfolio_only = self.client.get("/api/replay")
+
+        self.assertEqual(empty.status_code, 200)
+        self.assertFalse(empty.json()["ready"])
+        self.assertIn("Save at least one asset-model run", empty.json()["message"])
+        self.assertEqual(portfolio_only.status_code, 200)
+        self.assertFalse(portfolio_only.json()["ready"])
+        self.assertIn("asset-model runs only", portfolio_only.json()["message"])
+
+    def test_replay_endpoint_requires_datasets_after_asset_run_exists(self) -> None:
+        self._save_replay_asset_run_artifacts()
+        client = TestClient(
+            create_app(
+                settings=self.settings,
+                store=self.store,
+                feature_service=FakeReplayFeatureService(),
+                backtest_service=FakeReplayBacktestService(),
+            ),
+        )
+
+        response = client.get("/api/replay")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["ready"])
+        self.assertIn("Refresh datasets first", response.json()["message"])
+
+    def test_replay_endpoint_returns_asset_model_sessions(self) -> None:
+        self._save_replay_frames()
+        self._save_replay_asset_run_artifacts()
+        client = TestClient(
+            create_app(
+                settings=self.settings,
+                store=self.store,
+                feature_service=FakeReplayFeatureService(),
+                backtest_service=FakeReplayBacktestService(),
+            ),
+        )
+
+        response = client.get("/api/replay")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ready"])
+        self.assertEqual(payload["selected_run_id"], "replay-asset-run")
+        self.assertEqual(payload["summary"]["asset_model_run_count"], 1)
+        self.assertGreaterEqual(payload["summary"]["eligible_session_count"], 1)
+        self.assertIn("prior train rows", payload["sessions"][0]["label"])
+
+    def test_replay_session_endpoint_returns_replay_audit_payload(self) -> None:
+        self._save_replay_frames()
+        self._save_replay_asset_run_artifacts()
+        client = TestClient(
+            create_app(
+                settings=self.settings,
+                store=self.store,
+                feature_service=FakeReplayFeatureService(),
+                backtest_service=FakeReplayBacktestService(),
+            ),
+        )
+        selected_session = client.get("/api/replay").json()["selected_session_date"]
+
+        response = client.get(
+            "/api/replay/session",
+            params={"run_id": "replay-asset-run", "signal_session_date": selected_session},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ready"])
+        self.assertEqual(payload["target_asset"], "SPY")
+        self.assertEqual(payload["metrics"]["replay_score"], 0.015)
+        self.assertFalse(payload["metadata"]["future_training_leakage"])
+        self.assertTrue(payload["metadata"]["full_history_comparison_available"])
+        self.assertIn("Replay vs full-history drift", {row["metric"] for row in payload["comparison_rows"]})
+        self.assertEqual(payload["feature_importance"][0]["feature_name"], "post_count")
+        self.assertEqual(payload["feature_contributions"][0]["feature_name"], "post_count")
+        self.assertEqual(payload["post_attribution"][0]["author_handle"], "realDonaldTrump")
+        self.assertEqual(payload["account_attribution"][0]["author_handle"], "realDonaldTrump")
+
+    def test_replay_session_endpoint_rejects_invalid_and_ineligible_sessions(self) -> None:
+        self._save_replay_frames()
+        self._save_replay_asset_run_artifacts()
+        client = TestClient(
+            create_app(
+                settings=self.settings,
+                store=self.store,
+                feature_service=FakeReplayFeatureService(),
+                backtest_service=FakeReplayBacktestService(),
+            ),
+        )
+
+        invalid = client.get(
+            "/api/replay/session",
+            params={"run_id": "missing-run", "signal_session_date": "2025-01-31"},
+        )
+        ineligible = client.get(
+            "/api/replay/session",
+            params={"run_id": "replay-asset-run", "signal_session_date": "2025-01-02"},
+        )
+
+        self.assertEqual(invalid.status_code, 200)
+        self.assertFalse(invalid.json()["ready"])
+        self.assertIn("unavailable", invalid.json()["message"])
+        self.assertEqual(ineligible.status_code, 200)
+        self.assertFalse(ineligible.json()["ready"])
+        self.assertIn("not eligible", ineligible.json()["message"])
 
     def test_paper_and_performance_endpoints_return_portfolio_slices(self) -> None:
         self._save_paper_frames()

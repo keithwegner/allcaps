@@ -26,6 +26,7 @@ from .enrichment import LLMEnrichmentService
 from .experiments import ExperimentStore
 from .features import FeatureService
 from .health import DataHealthService, build_health_summary, build_health_trend_frame, ensure_refresh_history_frame
+from .historical_replay import build_historical_replay_payload, build_historical_replay_session_payload
 from .ingestion import IngestionService
 from .live_monitor import build_live_portfolio_run_state, validate_live_monitor_config
 from .live_ops import (
@@ -517,6 +518,30 @@ def create_app(
             run_id,
             variant_name=variant_name,
             session_date=session_date,
+        )
+
+    @app.get("/api/replay")
+    def replay(run_id: str | None = None) -> dict[str, Any]:
+        return _json_safe(
+            build_historical_replay_payload(
+                store=store,
+                experiment_store=experiment_store,
+                feature_service=feature_service,
+                run_id=run_id,
+            ),
+        )
+
+    @app.get("/api/replay/session")
+    def replay_session(run_id: str, signal_session_date: str) -> dict[str, Any]:
+        return _json_safe(
+            build_historical_replay_session_payload(
+                store=store,
+                experiment_store=experiment_store,
+                feature_service=feature_service,
+                backtest_service=backtest_service,
+                run_id=run_id,
+                signal_session_date=signal_session_date,
+            ),
         )
 
     @app.get("/api/live/current")

@@ -363,6 +363,95 @@ const runComparisonPayload = {
   },
 };
 
+const replayPayload = {
+  ready: true,
+  message: "",
+  selected_run_id: "run-asset-1",
+  selected_session_date: "2025-03-03",
+  min_history_rows: 20,
+  run_options: [
+    {
+      run_id: "run-asset-1",
+      run_name: "SPY Baseline",
+      target_asset: "SPY",
+      run_type: "asset_model",
+      allocator_mode: "",
+      robust_score: 1.2,
+      total_return: 0.08,
+    },
+  ],
+  sessions: [
+    {
+      value: "2025-03-03",
+      label: "2025-03-03 | posts 3 | prior train rows 20",
+      signal_session_date: "2025-03-03T00:00:00",
+      post_count: 3,
+      history_rows_available: 20,
+    },
+    {
+      value: "2025-03-04",
+      label: "2025-03-04 | posts 2 | prior train rows 21",
+      signal_session_date: "2025-03-04T00:00:00",
+      post_count: 2,
+      history_rows_available: 21,
+    },
+  ],
+  summary: {
+    saved_run_count: 2,
+    asset_model_run_count: 1,
+    eligible_session_count: 2,
+  },
+};
+
+const replaySessionPayload = {
+  ready: true,
+  message: "",
+  run_id: "run-asset-1",
+  run_name: "SPY Baseline",
+  target_asset: "SPY",
+  signal_session_date: "2025-03-03T00:00:00",
+  metrics: {
+    target_asset: "SPY",
+    replay_session: "2025-03-03T00:00:00",
+    replay_score: 0.015,
+    replay_confidence: 0.72,
+    suggested_stance: "LONG SPY NEXT SESSION",
+    training_rows_used: 20,
+    history_start: "2025-01-01T00:00:00",
+    history_end: "2025-02-28T00:00:00",
+    actual_next_session_return: 0.004,
+    full_history_score: 0.02,
+    replay_vs_full_history_drift: -0.005,
+  },
+  metadata: {
+    template_run_id: "run-asset-1",
+    future_training_leakage: false,
+    full_history_comparison_available: true,
+    deployment_params: {
+      threshold: 0.001,
+      min_post_count: 1,
+      account_weight: 1,
+    },
+  },
+  prediction: [
+    {
+      signal_session_date: "2025-03-03",
+      expected_return_score: 0.015,
+      prediction_confidence: 0.72,
+      suggested_stance: "LONG SPY NEXT SESSION",
+      future_training_leakage: false,
+    },
+  ],
+  comparison_rows: [
+    { metric: "Replay score", value: 0.015 },
+    { metric: "Replay vs full-history drift", value: -0.005 },
+  ],
+  feature_importance: [{ feature_name: "post_count", coefficient: 0.4, abs_coefficient: 0.4 }],
+  feature_contributions: [{ feature_name: "post_count", feature_family: "activity", contribution: 0.01 }],
+  post_attribution: [{ author_handle: "realDonaldTrump", post_preview: "Replay market post", post_signal_score: 0.4 }],
+  account_attribution: [{ author_handle: "realDonaldTrump", post_count: 1, net_post_signal: 0.4 }],
+};
+
 const researchPayload = {
   ready: true,
   message: "",
@@ -814,6 +903,8 @@ async function mockApi(page: Page) {
   });
   await fulfillJson(page, "/api/runs/run-portfolio-1**", runDetailPayload);
   await fulfillJson(page, "/api/runs/compare**", runComparisonPayload);
+  await fulfillJson(page, "/api/replay**", replayPayload);
+  await fulfillJson(page, "/api/replay/session**", replaySessionPayload);
   await fulfillJson(page, "/api/research**", researchPayload);
   await fulfillJson(page, "/api/discovery", discoveryPayload);
   await fulfillJson(page, "/api/live/current", livePayload);
@@ -922,6 +1013,27 @@ test("shows the migrated run explorer with detail and comparison tables", async 
   await expect(page.getByRole("heading", { name: "Compare saved runs" })).toBeVisible();
   await expect(page.getByRole("cell", { name: "SPY Baseline" })).toBeVisible();
   await expect(page.getByText("run-asset-1: robust score")).toBeVisible();
+});
+
+test("shows historical replay metrics and attribution tables", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: /Replay/ }).click();
+
+  await expect(page.getByRole("heading", { name: "Historical signal reconstruction" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Historical Replay Workspace" })).toBeVisible();
+  await expect(page.getByLabel("Replay template run")).toHaveValue("run-asset-1");
+  await expect(page.getByLabel("Historical signal session")).toHaveValue("2025-03-03");
+  await expect(page.getByText("LONG SPY NEXT SESSION").first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Full-history comparison" })).toBeVisible();
+  await expect(page.getByText("Drift context only")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Replay summary" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "Replay vs full-history drift" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Replay feature importance" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "post_count" }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Feature contributions" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Post attribution" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "realDonaldTrump" }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Account attribution" })).toBeVisible();
 });
 
 test("shows model training forms and submits an admin job", async ({ page }) => {

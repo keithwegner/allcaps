@@ -13,6 +13,7 @@ import {
   type ModelTrainingWorkflow,
   type PlotlyFigure,
   type RecordRow,
+  type ReplaySessionPayload,
   type ResearchFilters,
 } from "./api";
 
@@ -22,13 +23,14 @@ const createPlotlyComponent = (
 ) as PlotComponentFactory;
 const Plot = createPlotlyComponent(Plotly);
 
-type PageKey = "overview" | "research" | "discovery" | "runs" | "models" | "data" | "live" | "paper";
+type PageKey = "overview" | "research" | "discovery" | "runs" | "replay" | "models" | "data" | "live" | "paper";
 
 const pages: Array<{ key: PageKey; label: string; deck: string }> = [
   { key: "overview", label: "Overview", deck: "API status and migration posture" },
   { key: "research", label: "Research", deck: "Sentiment, narratives, and export pack" },
   { key: "discovery", label: "Discovery", deck: "Tracked account ranking workspace" },
   { key: "runs", label: "Run Explorer", deck: "Saved model results and comparisons" },
+  { key: "replay", label: "Replay", deck: "Historical signal reconstruction" },
   { key: "models", label: "Model Training", deck: "Train and save model runs" },
   { key: "data", label: "Data Admin", deck: "Refresh jobs, watchlist, and data health" },
   { key: "live", label: "Live Ops", deck: "Operate deployed portfolio" },
@@ -910,6 +912,207 @@ function OverviewPage() {
         </div>
         <DataTable rows={runs.data?.runs ?? []} />
       </article>
+    </section>
+  );
+}
+
+function recordValue(value: unknown): string | number | boolean | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  return JSON.stringify(value);
+}
+
+function deploymentParamRows(payload?: ReplaySessionPayload): RecordRow[] {
+  const params = payload?.metadata?.deployment_params;
+  if (!params || typeof params !== "object") {
+    return [];
+  }
+  return Object.entries(params as Record<string, unknown>).map(([parameter, value]) => ({
+    parameter,
+    value: recordValue(value),
+  }));
+}
+
+function ReplayPage() {
+  const [selectedRunId, setSelectedRunId] = useState("");
+  const [selectedSessionDate, setSelectedSessionDate] = useState("");
+  const [sessionRunId, setSessionRunId] = useState("");
+  const replay = useQuery({
+    queryKey: ["replay", selectedRunId],
+    queryFn: () => api.replay(selectedRunId || undefined),
+  });
+  const payload = replay.data;
+  const activeRunId = selectedRunId || payload?.selected_run_id || "";
+  const activeSessionDate = selectedSessionDate || payload?.selected_session_date || "";
+  const session = useQuery({
+    queryKey: ["replay-session", activeRunId, activeSessionDate],
+    queryFn: () => api.replaySession(activeRunId, activeSessionDate),
+    enabled: Boolean(payload?.ready && activeRunId && activeSessionDate),
+  });
+
+  useEffect(() => {
+    if (!selectedRunId && payload?.selected_run_id) {
+      setSelectedRunId(payload.selected_run_id);
+    }
+  }, [payload?.selected_run_id, selectedRunId]);
+
+  useEffect(() => {
+    if (!payload?.selected_session_date || !activeRunId) {
+      return;
+    }
+    if (sessionRunId !== activeRunId) {
+      setSelectedSessionDate(payload.selected_session_date);
+      setSessionRunId(activeRunId);
+    }
+  }, [activeRunId, payload?.selected_session_date, sessionRunId]);
+
+  if (replay.isLoading) {
+    return <LoadingBlock label="Loading historical replay workspace..." />;
+  }
+  if (replay.error) {
+    return <ErrorBlock error={replay.error} />;
+  }
+
+  const sessionPayload = session.data;
+  const replaySessionPayload =
+    sessionPayload?.ready && sessionPayload.metrics && sessionPayload.metadata ? sessionPayload : undefined;
+  const deploymentRows = deploymentParamRows(replaySessionPayload);
+  return (
+    <section className="page-grid">
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <div>
+            <h2>Historical Replay Workspace</h2>
+            <p>
+              Rebuild a historical signal using only earlier target-available rows, then compare it with the saved
+              full-history prediction for drift/debug context.
+            </p>
+          </div>
+          <StatusPill label={payload?.ready ? "Ready" : "Needs data"} tone={payload?.ready ? "ok" : "warn"} />
+        </div>
+        <div className="metric-grid">
+          <MetricCard label="Asset-model runs" value={payload?.summary.asset_model_run_count ?? 0} />
+          <MetricCard label="Eligible sessions" value={payload?.summary.eligible_session_count ?? 0} />
+          <MetricCard label="Minimum history rows" value={payload?.min_history_rows ?? 20} />
+          <MetricCard label="Selected run" value={activeRunId || "n/a"} />
+        </div>
+        {!payload?.ready ? <div className="empty-state">{payload?.message || "Historical replay is not ready yet."}</div> : null}
+        <div className="filter-grid filter-grid--compact">
+          <label>
+            Replay template run
+            <select
+              value={activeRunId}
+              disabled={!payload?.run_options.length}
+              onChange={(event) => {
+                setSelectedRunId(event.target.value);
+                setSelectedSessionDate("");
+                setSessionRunId("");
+              }}
+            >
+              {(payload?.run_options ?? []).map((row) => (
+                <option key={row.run_id} value={row.run_id}>
+                  {row.run_name || row.run_id} ({row.target_asset})
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Historical signal session
+            <select
+              value={activeSessionDate}
+              disabled={!payload?.sessions.length}
+              onChange={(event) => setSelectedSessionDate(event.target.value)}
+            >
+              {(payload?.sessions ?? []).map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </article>
+
+      {session.isLoading ? <LoadingBlock label="Rebuilding historical signal..." /> : null}
+      {session.error ? <ErrorBlock error={session.error} /> : null}
+      {sessionPayload && !sessionPayload.ready ? <div className="empty-state">{sessionPayload.message}</div> : null}
+      {sessionPayload?.ready && !replaySessionPayload ? (
+        <div className="empty-state">Historical replay returned an incomplete session payload.</div>
+      ) : null}
+      {replaySessionPayload ? (
+        <>
+          <div className="metric-grid">
+            <MetricCard label="Target asset" value={replaySessionPayload.metrics.target_asset} />
+            <MetricCard label="Replay session" value={replaySessionPayload.metrics.replay_session} />
+            <MetricCard label="Replay score" value={replaySessionPayload.metrics.replay_score} />
+            <MetricCard label="Confidence" value={replaySessionPayload.metrics.replay_confidence} />
+            <MetricCard label="Suggested stance" value={replaySessionPayload.metrics.suggested_stance} />
+            <MetricCard label="Training rows" value={replaySessionPayload.metrics.training_rows_used} />
+          </div>
+
+          {replaySessionPayload.metadata.full_history_comparison_available ? (
+            <article className="panel panel--wide">
+              <div className="panel-heading">
+                <h2>Full-history comparison</h2>
+                <StatusPill label="Drift context only" tone="warn" />
+              </div>
+              <p>
+                The full-history comparison uses a saved model view that may include future data relative to the replay
+                date. Use it only to inspect score drift, not as the historical decision.
+              </p>
+              <div className="metric-grid metric-grid--small">
+                <MetricCard label="Full-history score" value={replaySessionPayload.metrics.full_history_score} />
+                <MetricCard label="Replay drift" value={replaySessionPayload.metrics.replay_vs_full_history_drift} />
+                <MetricCard label="Actual next return" value={replaySessionPayload.metrics.actual_next_session_return} />
+              </div>
+            </article>
+          ) : null}
+
+          <article className="panel panel--wide chart-grid">
+            <div>
+              <h2>Replay summary</h2>
+              <DataTable rows={replaySessionPayload.comparison_rows} />
+            </div>
+            <div>
+              <h2>Deployment parameters</h2>
+              <DataTable rows={deploymentRows} emptyLabel="No deployment parameters were available." />
+            </div>
+          </article>
+
+          <article className="panel panel--wide chart-grid">
+            <div>
+              <h2>Replay prediction</h2>
+              <DataTable rows={replaySessionPayload.prediction} />
+            </div>
+            <div>
+              <h2>Replay feature importance</h2>
+              <DataTable rows={replaySessionPayload.feature_importance} />
+            </div>
+          </article>
+
+          <article className="panel panel--wide chart-grid">
+            <div>
+              <h2>Feature contributions</h2>
+              <DataTable rows={replaySessionPayload.feature_contributions} />
+            </div>
+            <div>
+              <h2>Post attribution</h2>
+              <DataTable rows={replaySessionPayload.post_attribution} />
+            </div>
+          </article>
+
+          <article className="panel panel--wide">
+            <div className="panel-heading">
+              <h2>Account attribution</h2>
+            </div>
+            <DataTable rows={replaySessionPayload.account_attribution} />
+          </article>
+        </>
+      ) : null}
     </section>
   );
 }
@@ -1975,6 +2178,7 @@ export function App() {
       {activePage === "research" ? <ResearchPage /> : null}
       {activePage === "discovery" ? <DiscoveryPage /> : null}
       {activePage === "runs" ? <RunExplorerPage /> : null}
+      {activePage === "replay" ? <ReplayPage /> : null}
       {activePage === "models" ? <ModelTrainingPage onNavigate={setActivePage} /> : null}
       {activePage === "data" ? <DataAdminPage /> : null}
       {activePage === "live" ? <LiveDecisionPage /> : null}
