@@ -37,6 +37,12 @@ from .health import (
     ensure_refresh_history_frame,
     make_refresh_history_frame,
 )
+from .historical_replay import (
+    _build_replay_comparison_frame,
+    _bundle_to_run_config,
+    _eligible_replay_sessions,
+    _replay_option_label,
+)
 from .ingestion import IngestionService, TruthSocialArchiveAdapter, XCsvAdapter
 from .market import MarketDataService, build_asset_universe, build_watchlist_frame, normalize_symbols
 from .modeling import (
@@ -2506,70 +2512,6 @@ def _summarize_run_changes(base_run_id: str, run_bundles: dict[str, dict[str, An
             parts.append(f"{len(omitted_vs_base)} removed features ({', '.join(omitted_vs_base[:3])})")
         notes.append(f"`{run_id}`: " + "; ".join(parts) + ".")
     return notes
-
-
-def _bundle_to_run_config(run_bundle: dict[str, Any]) -> ModelRunConfig:
-    config = run_bundle.get("config", {}) or {}
-    run_meta = run_bundle.get("run", {}) or {}
-    return ModelRunConfig(
-        run_name=str(config.get("run_name") or run_meta.get("run_name") or "historical-replay"),
-        target_asset=str(config.get("target_asset") or run_meta.get("target_asset") or "SPY"),
-        feature_version=str(config.get("feature_version", "v1")),
-        llm_enabled=bool(config.get("llm_enabled", False)),
-        train_window=int(config.get("train_window", 90) or 90),
-        validation_window=int(config.get("validation_window", 30) or 30),
-        test_window=int(config.get("test_window", 30) or 30),
-        step_size=int(config.get("step_size", 30) or 30),
-        threshold_grid=tuple(float(value) for value in config.get("threshold_grid", [0.0, 0.001, 0.0025, 0.005])),
-        minimum_signal_grid=tuple(int(value) for value in config.get("minimum_signal_grid", [1, 2, 3])),
-        account_weight_grid=tuple(float(value) for value in config.get("account_weight_grid", [0.5, 1.0, 1.5])),
-        ridge_alpha=float(config.get("ridge_alpha", 1.0) or 1.0),
-        transaction_cost_bps=float(config.get("transaction_cost_bps", 2.0) or 2.0),
-        start_date=config.get("start_date"),
-        end_date=config.get("end_date"),
-        notes=str(config.get("notes", "")),
-    )
-
-
-def _eligible_replay_sessions(feature_rows: pd.DataFrame, min_history_rows: int = 20) -> pd.DataFrame:
-    if feature_rows.empty:
-        return pd.DataFrame()
-    eligible = feature_rows.sort_values("signal_session_date").reset_index(drop=True).copy()
-    eligible["history_rows_available"] = eligible["target_available"].fillna(False).astype(int).cumsum().shift(fill_value=0)
-    eligible = eligible.loc[eligible["history_rows_available"] >= min_history_rows].copy()
-    return eligible.reset_index(drop=True)
-
-
-def _replay_option_label(row: pd.Series) -> str:
-    session_date = pd.Timestamp(row["signal_session_date"])
-    return (
-        f"{session_date:%Y-%m-%d} | posts {int(row.get('post_count', 0))} | "
-        f"prior train rows {int(row.get('history_rows_available', 0))}"
-    )
-
-
-def _build_replay_comparison_frame(replay_row: pd.Series, full_history_row: pd.Series | None) -> pd.DataFrame:
-    rows = [
-        {"metric": "Replay score", "value": float(replay_row.get("expected_return_score", 0.0))},
-        {"metric": "Replay confidence", "value": float(replay_row.get("prediction_confidence", 0.0))},
-        {"metric": "Replay threshold", "value": float(replay_row.get("deployment_threshold", 0.0))},
-        {"metric": "Replay min post count", "value": int(replay_row.get("deployment_min_post_count", 1))},
-        {"metric": "Training rows used", "value": int(replay_row.get("training_rows_used", 0))},
-    ]
-    actual = replay_row.get("target_next_session_return")
-    if pd.notna(actual):
-        rows.append({"metric": "Actual next-session return", "value": float(actual)})
-    if full_history_row is not None:
-        full_score = float(full_history_row.get("expected_return_score", 0.0) or 0.0)
-        replay_score = float(replay_row.get("expected_return_score", 0.0) or 0.0)
-        rows.extend(
-            [
-                {"metric": "Full-history score", "value": full_score},
-                {"metric": "Replay vs full-history drift", "value": replay_score - full_score},
-                {"metric": "Full-history confidence", "value": float(full_history_row.get("prediction_confidence", 0.0) or 0.0)},
-            ],
-        )
-    return pd.DataFrame(rows)
 
 
 def render_models_view(
