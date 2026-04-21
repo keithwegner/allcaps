@@ -33,7 +33,8 @@ body {
 
 button,
 select,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -295,13 +296,19 @@ select {
   background: rgba(255, 255, 255, 0.68);
 }
 
-input {
+input,
+textarea {
   width: 100%;
   padding: 14px 16px;
   color: var(--ink);
   border: 1px solid var(--line);
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.68);
+}
+
+textarea {
+  min-height: 112px;
+  resize: vertical;
 }
 
 select[multiple] {
@@ -338,6 +345,10 @@ select[multiple] {
   border: 1px solid var(--line);
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.42);
+}
+
+.filter-grid__wide {
+  grid-column: span 2;
 }
 
 .checkbox-field input {
@@ -449,6 +460,10 @@ select[multiple] {
   .filter-grid,
   .chart-grid {
     grid-template-columns: 1fr;
+  }
+
+  .filter-grid__wide {
+    grid-column: auto;
   }
 
   .page-tabs {

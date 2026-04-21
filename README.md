@@ -87,12 +87,13 @@ bash scripts/ci.sh
 
 ## Web-First Migration Preview
 
-The Streamlit app remains the primary user interface while the web-first migration is built in slices. The first migration surface adds:
+The Streamlit app remains available while the web-first migration is built in slices. The current web surface adds:
 
-- a read-only FastAPI backend in `trump_workbench/api.py`
+- a FastAPI backend in `trump_workbench/api.py`
 - a React + TypeScript + Vite frontend in `frontend/`
-- API-backed views for status, research, data health, saved runs, live decisions, paper portfolios, and performance diagnostics
+- API-backed views for status, research, Discovery, saved runs, live decisions, paper portfolios, performance diagnostics, and dataset administration
 - a migrated read-only Research workspace with sentiment filters, interactive Plotly charts, Narrative Lab outputs, and research ZIP export
+- admin-gated React controls for Live Ops and Data Admin workflows, including pinned portfolio-run configuration, paper controls, watchlist edits, CSV inputs, and dataset refresh jobs
 
 Run the API locally:
 
@@ -118,7 +119,7 @@ Optional frontend env var:
 
 - `VITE_ALLCAPS_API_BASE_URL=http://127.0.0.1:8000`
 
-The FastAPI surface is intentionally read-only in this slice. Admin mutations, model training, and refresh workflows still live in Streamlit until they are moved behind explicit job APIs.
+The React app is now mixed read/write. Public users can browse research and status pages, while mutating Data Admin and Live Ops actions require an admin token from `/api/admin/session`. Model training and Discovery override writes still live in Streamlit until those workflows are migrated behind explicit job APIs.
 
 Run browser UI tests for the React shell:
 
@@ -243,8 +244,8 @@ The hosted deployment uses these env vars:
 
 If you are new to the app, follow this order:
 
-1. Open `Datasets`.
-2. Click `Refresh full datasets`.
+1. Open React `Data Admin` or Streamlit `Datasets`.
+2. Run `Bootstrap`, `Full`, or `Refresh full datasets`.
 3. If you have X data, upload CSVs or point the app at a remote CSV URL.
 4. Open `Discovery` and review the tracked-account universe if you loaded X/mention data.
 5. Open `Research View` to inspect mapped posts and market context.
@@ -278,6 +279,8 @@ Use it to:
 - set a remote CSV URL
 - inspect the local dataset registry and source manifest
 - preview the normalized post table the rest of the app uses
+
+The React `Data Admin` tab covers day-to-day dataset operations through FastAPI: operating mode, scheduler status, watchlist save/reset, CSV URL/upload inputs, `bootstrap`/`full`/`incremental` refresh jobs, refresh-job history, data health, registry, and manifests. These writes require an admin unlock in public mode.
 
 Buttons:
 
@@ -490,7 +493,7 @@ The code is organized as a modular monolith under `trump_workbench/`:
 - `experiments.py` for saved runs and artifacts
 - `research.py` for descriptive visualization helpers
 - `ui.py` for the Streamlit app shell
-- `api.py` for the read-only FastAPI migration surface
+- `api.py` for the FastAPI migration surface
 - `frontend/` for the React + TypeScript web shell
 
 ## Testing

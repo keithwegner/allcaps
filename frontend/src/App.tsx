@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import createPlotlyComponentModule from "react-plotly.js/factory";
 import Plotly from "plotly.js-dist-min";
 import type { Data, Frame, Layout } from "plotly.js";
-import { api, type LiveOpsPayload, type PlotlyFigure, type RecordRow, type ResearchFilters } from "./api";
+import { api, type DatasetAdminPayload, type LiveOpsPayload, type PlotlyFigure, type RecordRow, type ResearchFilters } from "./api";
 
 type PlotComponentFactory = (plotly: unknown) => ComponentType<Record<string, unknown>>;
 const createPlotlyComponent = (
@@ -19,7 +19,7 @@ const pages: Array<{ key: PageKey; label: string; deck: string }> = [
   { key: "research", label: "Research", deck: "Sentiment, narratives, and export pack" },
   { key: "discovery", label: "Discovery", deck: "Tracked account ranking workspace" },
   { key: "runs", label: "Run Explorer", deck: "Saved model results and comparisons" },
-  { key: "data", label: "Data Health", deck: "Freshness, completeness, and anomalies" },
+  { key: "data", label: "Data Admin", deck: "Refresh jobs, watchlist, and data health" },
   { key: "live", label: "Live Ops", deck: "Operate deployed portfolio" },
   { key: "paper", label: "Paper + Performance", deck: "Portfolio audit and drift" },
 ];
@@ -123,6 +123,13 @@ function DataTable({ rows, emptyLabel = "No rows returned yet." }: { rows: Recor
       </table>
     </div>
   );
+}
+
+function parseSymbolList(value: string): string[] {
+  return value
+    .split(/[\s,]+/)
+    .map((item) => item.trim().toUpperCase())
+    .filter(Boolean);
 }
 
 function ResearchPage() {
@@ -896,39 +903,270 @@ function OverviewPage() {
   );
 }
 
-function DataHealthPage() {
-  const health = useQuery({ queryKey: ["health"], queryFn: api.health });
-  if (health.isLoading) {
-    return <LoadingBlock label="Loading data health..." />;
+function DataAdminPage() {
+  const queryClient = useQueryClient();
+  const admin = useQuery({ queryKey: ["dataset-admin"], queryFn: api.datasetAdmin, refetchInterval: 10_000 });
+  const [adminToken, setAdminToken] = useState(() =>
+    typeof window === "undefined" ? "" : window.sessionStorage.getItem("allcaps_admin_token") ?? "",
+  );
+  const [password, setPassword] = useState("");
+  const [watchlistText, setWatchlistText] = useState("");
+  const [refreshMode, setRefreshMode] = useState<"bootstrap" | "full" | "incremental">("incremental");
+  const [remoteUrl, setRemoteUrl] = useState("");
+  const [uploadFiles, setUploadFiles] = useState<FileList | null>(null);
+
+  const applyDatasetPayload = (payload: DatasetAdminPayload) => {
+    queryClient.setQueryData(["dataset-admin"], payload);
+  };
+  const unlock = useMutation({
+    mutationFn: () => api.adminSession(password),
+    onSuccess: (payload) => {
+      setAdminToken(payload.token);
+      if (typeof window !== "undefined") {
+        window.sessionStorage.setItem("allcaps_admin_token", payload.token);
+      }
+      setPassword("");
+    },
+  });
+  const saveWatchlist = useMutation({
+    mutationFn: () => api.saveWatchlist(parseSymbolList(watchlistText), false, adminToken),
+    onSuccess: applyDatasetPayload,
+  });
+  const resetWatchlist = useMutation({
+    mutationFn: () => api.saveWatchlist([], true, adminToken),
+    onSuccess: (payload) => {
+      setWatchlistText("");
+      applyDatasetPayload(payload);
+    },
+  });
+  const startRefresh = useMutation({
+    mutationFn: () => api.startDatasetRefresh({ refresh_mode: refreshMode, remote_url: remoteUrl, files: uploadFiles ?? undefined }, adminToken),
+    onSuccess: applyDatasetPayload,
+  });
+
+  useEffect(() => {
+    const symbols = admin.data?.watchlist_symbols ?? [];
+    if (!watchlistText && symbols.length) {
+      setWatchlistText(symbols.join(", "));
+    }
+  }, [admin.data?.watchlist_symbols, watchlistText]);
+
+  if (admin.isLoading) {
+    return <LoadingBlock label="Loading data admin..." />;
   }
-  if (health.error) {
-    return <ErrorBlock error={health.error} />;
+  if (admin.error) {
+    return <ErrorBlock error={admin.error} />;
   }
 
-  const summary = health.data?.summary ?? {};
+  const payload = admin.data;
+  const summary = payload?.summary ?? {};
+  const status = payload?.status;
+  const isUnlocked = Boolean(adminToken);
+  const mutationError = unlock.error ?? saveWatchlist.error ?? resetWatchlist.error ?? startRefresh.error;
+  const latestProblems = (payload?.latest ?? []).filter((row) => row.severity === "warn" || row.severity === "severe");
+  const refreshJobs = payload?.refresh_jobs ?? [];
+  const activeJob = refreshJobs.find((row) => row.job_id === status?.active_job_id) ?? refreshJobs[refreshJobs.length - 1];
+
   return (
     <section className="page-grid">
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <div>
+            <h2>Data Admin Console</h2>
+            <p>
+              Manage stored datasets, watchlist symbols, CSV inputs, refresh jobs, and warn-only data health from the web UI.
+              Refresh jobs reuse the same lock as the scheduler and Streamlit controls.
+            </p>
+          </div>
+          <StatusPill label={status?.operating_mode ?? "Unknown mode"} tone={summary.overall_severity === "severe" ? "severe" : summary.overall_severity === "warn" ? "warn" : "ok"} />
+        </div>
+        <div className="filter-grid filter-grid--compact">
+          <label>
+            Admin unlock
+            <input
+              type="password"
+              placeholder={payload?.admin.mode === "private" ? "Private mode: password optional" : "Admin password"}
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+            />
+          </label>
+          <label>
+            Session status
+            <button
+              className="action-button"
+              type="button"
+              aria-label={isUnlocked ? "Refresh admin token" : "Unlock admin writes"}
+              onClick={() => unlock.mutate()}
+              disabled={unlock.isPending}
+            >
+              {isUnlocked ? "Refresh admin token" : "Unlock admin writes"}
+            </button>
+          </label>
+          <label>
+            Write state
+            <span className="form-readout">{isUnlocked ? "Unlocked for this browser session" : "Read-only until unlocked"}</span>
+          </label>
+          <label>
+            Scheduler
+            <span className="form-readout">{status?.scheduler_enabled ? "Enabled" : "Disabled"}</span>
+          </label>
+        </div>
+        {mutationError ? <ErrorBlock error={mutationError} /> : null}
+      </article>
+
       <div className="metric-grid">
-        <MetricCard label="Overall" value={summary.overall_severity} />
-        <MetricCard label="Severe checks" value={summary.severe_count} />
-        <MetricCard label="Warn checks" value={summary.warn_count} />
-        <MetricCard label="Last refresh" value={summary.last_refresh_status} />
+        <MetricCard label="Overall health" value={summary.overall_severity} />
+        <MetricCard label="Missing core datasets" value={status?.missing_core_dataset_count ?? 0} />
+        <MetricCard label="Last refresh" value={summary.last_refresh_status} caption={String(summary.last_refresh_mode ?? "")} />
+        <MetricCard label="Active/latest job" value={activeJob?.status ?? "n/a"} caption={String(activeJob?.refresh_mode ?? "")} />
       </div>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <h2>Runtime status</h2>
+          <StatusPill label={payload?.admin.mode ?? "private"} />
+        </div>
+        <dl className="detail-list">
+          <div>
+            <dt>State root</dt>
+            <dd>{status?.state_root ?? "n/a"}</dd>
+          </div>
+          <div>
+            <dt>Database</dt>
+            <dd>{status?.db_path ?? "n/a"}</dd>
+          </div>
+          <div>
+            <dt>Source mode</dt>
+            <dd>
+              {status?.source_mode.mode ?? "unknown"} ({status?.source_mode.truth_post_count ?? 0} Truth,{" "}
+              {status?.source_mode.x_post_count ?? 0} X)
+            </dd>
+          </div>
+        </dl>
+        {status?.missing_core_datasets.length ? (
+          <div className="empty-state">Missing core datasets: {status.missing_core_datasets.join(", ")}</div>
+        ) : null}
+      </article>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <h2>Watchlist controls</h2>
+          <StatusPill label={`${payload?.watchlist_symbols.length ?? 0} symbols`} />
+        </div>
+        <div className="filter-grid filter-grid--compact">
+          <label className="filter-grid__wide">
+            Watchlist symbols
+            <textarea
+              value={watchlistText}
+              onChange={(event) => setWatchlistText(event.target.value)}
+              placeholder="NVDA, TSLA, XOM"
+              disabled={!isUnlocked}
+            />
+          </label>
+          <label>
+            Save
+            <button
+              className="action-button"
+              type="button"
+              aria-label="Save watchlist"
+              disabled={!isUnlocked || saveWatchlist.isPending}
+              onClick={() => saveWatchlist.mutate()}
+            >
+              Save watchlist
+            </button>
+          </label>
+          <label>
+            Reset
+            <button
+              className="action-button action-button--danger"
+              type="button"
+              aria-label="Reset watchlist"
+              disabled={!isUnlocked || resetWatchlist.isPending}
+              onClick={() => resetWatchlist.mutate()}
+            >
+              Reset watchlist
+            </button>
+          </label>
+        </div>
+        <DataTable rows={payload?.asset_universe ?? []} emptyLabel="No asset universe rows yet." />
+      </article>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <h2>Refresh controls</h2>
+          <StatusPill label="Background job" />
+        </div>
+        <p>
+          Refreshes run against stored state and are single-instance. A manual refresh here does not bypass the scheduler lock.
+        </p>
+        <div className="filter-grid filter-grid--compact">
+          <label>
+            Refresh mode
+            <select value={refreshMode} onChange={(event) => setRefreshMode(event.target.value as "bootstrap" | "full" | "incremental")} disabled={!isUnlocked}>
+              <option value="bootstrap">Bootstrap</option>
+              <option value="full">Full</option>
+              <option value="incremental">Incremental</option>
+            </select>
+          </label>
+          <label className="filter-grid__wide">
+            Remote X / mention CSV URL
+            <input value={remoteUrl} onChange={(event) => setRemoteUrl(event.target.value)} placeholder="https://..." disabled={!isUnlocked} />
+          </label>
+          <label>
+            CSV upload
+            <input type="file" accept=".csv,text/csv" multiple disabled={!isUnlocked} onChange={(event) => setUploadFiles(event.target.files)} />
+          </label>
+          <label>
+            Start
+            <button
+              className="action-button"
+              type="button"
+              aria-label="Start refresh job"
+              disabled={!isUnlocked || startRefresh.isPending}
+              onClick={() => startRefresh.mutate()}
+            >
+              Start refresh job
+            </button>
+          </label>
+        </div>
+      </article>
+
+      <article className="panel panel--wide chart-grid">
+        <div>
+          <h2>Recent refresh jobs</h2>
+          <DataTable rows={payload?.refresh_jobs ?? []} emptyLabel="No React-submitted refresh jobs yet." />
+        </div>
+        <div>
+          <h2>Refresh history</h2>
+          <DataTable rows={payload?.refresh_history ?? []} emptyLabel="No refresh history yet." />
+        </div>
+      </article>
+
       <article className="panel panel--wide">
         <div className="panel-heading">
           <h2>Latest warn/severe diagnostics</h2>
-          <StatusPill label={`${health.data?.latest.length ?? 0} checks`} />
+          <StatusPill label={`${latestProblems.length} current issue(s)`} tone={latestProblems.some((row) => row.severity === "severe") ? "severe" : latestProblems.length ? "warn" : "ok"} />
         </div>
-        <DataTable
-          rows={(health.data?.latest ?? []).filter((row) => row.severity === "warn" || row.severity === "severe")}
-          emptyLabel="No warn or severe health rows."
-        />
+        <DataTable rows={latestProblems} emptyLabel="No warn or severe health rows." />
       </article>
+
       <article className="panel panel--wide">
         <div className="panel-heading">
           <h2>Dataset registry</h2>
+          <StatusPill label={`${payload?.registry.length ?? 0} datasets`} />
         </div>
-        <DataTable rows={health.data?.registry ?? []} />
+        <DataTable rows={payload?.registry ?? []} />
+      </article>
+
+      <article className="panel panel--wide chart-grid">
+        <div>
+          <h2>Source manifest</h2>
+          <DataTable rows={payload?.source_manifests ?? []} emptyLabel="No source manifest rows yet." />
+        </div>
+        <div>
+          <h2>Asset market manifest</h2>
+          <DataTable rows={payload?.asset_market_manifest ?? []} emptyLabel="No asset market manifest rows yet." />
+        </div>
       </article>
     </section>
   );
@@ -1310,7 +1548,7 @@ export function App() {
       {activePage === "research" ? <ResearchPage /> : null}
       {activePage === "discovery" ? <DiscoveryPage /> : null}
       {activePage === "runs" ? <RunExplorerPage /> : null}
-      {activePage === "data" ? <DataHealthPage /> : null}
+      {activePage === "data" ? <DataAdminPage /> : null}
       {activePage === "live" ? <LiveDecisionPage /> : null}
       {activePage === "paper" ? <PaperPerformancePage /> : null}
     </main>
