@@ -441,6 +441,11 @@ export type DiscoveryPayload = {
   message: string;
   source_mode: StatusPayload["source_mode"];
   latest_ranked_at: string | null;
+  admin: {
+    mode: "public" | "private";
+    writes_enabled: boolean;
+    write_disabled_reason: string;
+  };
   summary: RecordRow;
   charts: {
     top_discovered_accounts?: PlotlyFigure;
@@ -448,8 +453,28 @@ export type DiscoveryPayload = {
   };
   active_accounts: RecordRow[];
   latest_rankings: RecordRow[];
+  override_account_options: Array<{
+    account_id: string;
+    handle: string;
+    display_name: string;
+    source_platform: string;
+    status: string;
+    source: string;
+    label: string;
+  }>;
   override_history: RecordRow[];
   recent_ranking_history: RecordRow[];
+};
+
+export type DiscoveryOverrideRequest = {
+  account_id: string;
+  handle?: string;
+  display_name?: string;
+  source_platform?: string;
+  action: "pin" | "suppress";
+  effective_from: string;
+  effective_to?: string;
+  note?: string;
 };
 
 function researchQuery(filters: ResearchFilters = {}): string {
@@ -488,6 +513,28 @@ async function postJson<T>(path: string, payload: unknown = {}, token?: string):
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    let detail = `${response.status} ${response.statusText}`;
+    try {
+      const body = (await response.json()) as { detail?: unknown };
+      if (body.detail) {
+        detail = Array.isArray(body.detail) ? body.detail.join("; ") : String(body.detail);
+      }
+    } catch {
+      // Keep the HTTP status fallback when the response is not JSON.
+    }
+    throw new Error(`API request failed: ${detail}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function deleteJson<T>(path: string, token?: string): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: "DELETE",
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
   });
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
@@ -584,6 +631,10 @@ export const api = {
   researchAssets: (filters?: ResearchAssetFilters) => getJson<ResearchAssetPayload>(`/api/research/assets${researchQuery(filters)}`),
   researchExportUrl: (filters?: ResearchFilters) => `${API_BASE_URL}/api/research/export${researchQuery(filters)}`,
   discovery: () => getJson<DiscoveryPayload>("/api/discovery"),
+  createDiscoveryOverride: (request: DiscoveryOverrideRequest, token: string) =>
+    postJson<DiscoveryPayload>("/api/discovery/overrides", request, token),
+  deleteDiscoveryOverride: (overrideId: string, token: string) =>
+    deleteJson<DiscoveryPayload>(`/api/discovery/overrides/${encodeURIComponent(overrideId)}`, token),
   live: () => getJson<LivePayload>("/api/live/current"),
   liveOps: () => getJson<LiveOpsPayload>("/api/live/ops"),
   saveLiveConfig: (request: LiveConfigSaveRequest, token: string) => postJson<LiveOpsPayload>("/api/live/config", request, token),

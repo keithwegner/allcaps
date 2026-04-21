@@ -1648,6 +1648,8 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(payload["source_mode"]["mode"], "unknown")
         self.assertEqual(payload["active_accounts"], [])
         self.assertEqual(payload["latest_rankings"], [])
+        self.assertFalse(payload["admin"]["writes_enabled"])
+        self.assertEqual(payload["override_account_options"], [])
         self.assertIn("top_discovered_accounts", payload["charts"])
 
     def test_discovery_endpoint_explains_truth_only_mode(self) -> None:
@@ -1661,6 +1663,8 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(payload["source_mode"]["mode"], "truth_only")
         self.assertIn("Discovery ranks non-Trump X accounts", payload["message"])
         self.assertEqual(payload["summary"]["x_candidate_post_count"], 0)
+        self.assertFalse(payload["admin"]["writes_enabled"])
+        self.assertIn("Truth Social-only", payload["admin"]["write_disabled_reason"])
 
     def test_discovery_endpoint_returns_rankings_active_accounts_and_overrides(self) -> None:
         self._save_discovery_frames()
@@ -1680,8 +1684,141 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(payload["latest_rankings"][0]["discovery_score"], 12.0)
         self.assertEqual({row["handle"] for row in payload["active_accounts"]}, {"macroalpha", "policywatch"})
         self.assertEqual({row["action"] for row in payload["override_history"]}, {"pin", "suppress"})
+        self.assertTrue(payload["admin"]["writes_enabled"])
+        self.assertEqual(
+            {row["account_id"] for row in payload["override_account_options"]},
+            {"acct-macro", "acct-policy", "acct-muted"},
+        )
         self.assertGreaterEqual(len(payload["recent_ranking_history"]), 1)
         self.assertIsNotNone(payload["latest_ranked_at"])
+
+    def test_discovery_override_create_requires_admin_and_valid_payload(self) -> None:
+        self._save_research_frames(include_x=True)
+
+        unauthorized = self.client.post(
+            "/api/discovery/overrides",
+            json={
+                "account_id": "acct-macro",
+                "handle": "macroalpha",
+                "display_name": "Macro Alpha",
+                "source_platform": "X",
+                "action": "pin",
+                "effective_from": "2025-02-03",
+            },
+        )
+        self.assertEqual(unauthorized.status_code, 401)
+
+        token = self._admin_token()
+        invalid = self.client.post(
+            "/api/discovery/overrides",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "account_id": "",
+                "action": "mute",
+                "effective_from": "not-a-date",
+                "effective_to": "2025-02-01",
+            },
+        )
+        self.assertEqual(invalid.status_code, 400)
+
+    def test_discovery_override_pin_persists_and_recomputes_discovery(self) -> None:
+        self._save_research_frames(include_x=True)
+        token = self._admin_token()
+
+        response = self.client.post(
+            "/api/discovery/overrides",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "account_id": "acct-macro",
+                "handle": "macroalpha",
+                "display_name": "Macro Alpha",
+                "source_platform": "X",
+                "action": "pin",
+                "effective_from": "2025-02-03",
+                "note": "Important account",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["summary"]["pin_override_count"], 1)
+        self.assertEqual(payload["active_accounts"][0]["status"], "pinned")
+        self.assertEqual(payload["latest_rankings"][0]["selected_status"], "pinned")
+        self.assertFalse(self.store.read_frame("manual_account_overrides").empty)
+        self.assertFalse(self.store.read_frame("tracked_accounts").empty)
+        self.assertFalse(self.store.read_frame("account_rankings").empty)
+
+    def test_discovery_override_suppress_removes_account_from_active_accounts(self) -> None:
+        self._save_research_frames(include_x=True)
+        token = self._admin_token()
+
+        response = self.client.post(
+            "/api/discovery/overrides",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "account_id": "acct-macro",
+                "handle": "macroalpha",
+                "display_name": "Macro Alpha",
+                "source_platform": "X",
+                "action": "suppress",
+                "effective_from": "2025-02-03",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["summary"]["suppress_override_count"], 1)
+        self.assertEqual(payload["active_accounts"], [])
+        self.assertTrue(payload["latest_rankings"][0]["suppressed_by_override"])
+        self.assertEqual(payload["latest_rankings"][0]["selected_status"], "excluded")
+
+    def test_discovery_override_delete_recomputes_derived_frames(self) -> None:
+        self._save_discovery_frames()
+        token = self._admin_token()
+        payload = self.client.get("/api/discovery").json()
+        pin_override_id = next(row["override_id"] for row in payload["override_history"] if row["action"] == "pin")
+
+        unauthorized = self.client.delete(f"/api/discovery/overrides/{pin_override_id}")
+        self.assertEqual(unauthorized.status_code, 401)
+
+        response = self.client.delete(
+            f"/api/discovery/overrides/{pin_override_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        updated = response.json()
+        self.assertEqual(updated["summary"]["pin_override_count"], 0)
+        self.assertNotIn("acct-policy", {row["account_id"] for row in updated["active_accounts"]})
+        self.assertNotIn(pin_override_id, set(self.store.read_frame("manual_account_overrides")["override_id"].astype(str)))
+
+    def test_discovery_override_write_rejects_empty_and_truth_only_data(self) -> None:
+        token = self._admin_token()
+        request = {
+            "account_id": "acct-macro",
+            "handle": "macroalpha",
+            "display_name": "Macro Alpha",
+            "source_platform": "X",
+            "action": "pin",
+            "effective_from": "2025-02-03",
+        }
+
+        empty_response = self.client.post(
+            "/api/discovery/overrides",
+            headers={"Authorization": f"Bearer {token}"},
+            json=request,
+        )
+        self.assertEqual(empty_response.status_code, 400)
+        self.assertIn("Refresh datasets", empty_response.json()["detail"])
+
+        self._save_truth_posts()
+        truth_response = self.client.post(
+            "/api/discovery/overrides",
+            headers={"Authorization": f"Bearer {token}"},
+            json=request,
+        )
+        self.assertEqual(truth_response.status_code, 400)
+        self.assertIn("non-Trump X mention data", truth_response.json()["detail"])
 
     def test_discovery_endpoint_handles_schema_less_ranking_history(self) -> None:
         self._save_research_frames(include_x=True)

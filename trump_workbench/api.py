@@ -21,6 +21,12 @@ from .dataset_admin import (
     submit_refresh_job,
 )
 from .discovery import DiscoveryService
+from .discovery_admin import (
+    DiscoveryAdminError,
+    DiscoveryOverrideMutation,
+    create_discovery_override,
+    delete_discovery_override,
+)
 from .discovery_workspace import build_discovery_workspace
 from .enrichment import LLMEnrichmentService
 from .experiments import ExperimentStore
@@ -72,6 +78,29 @@ ADMIN_TOKEN_TTL_SECONDS = 12 * 60 * 60
 
 class AdminSessionRequest(BaseModel):
     password: str = ""
+
+
+class DiscoveryOverrideRequest(BaseModel):
+    account_id: str
+    handle: str = ""
+    display_name: str = ""
+    source_platform: str = "X"
+    action: str
+    effective_from: str
+    effective_to: str | None = None
+    note: str = ""
+
+    def to_mutation(self) -> DiscoveryOverrideMutation:
+        return DiscoveryOverrideMutation(
+            account_id=self.account_id,
+            handle=self.handle,
+            display_name=self.display_name,
+            source_platform=self.source_platform,
+            action=self.action,
+            effective_from=self.effective_from,
+            effective_to=self.effective_to,
+            note=self.note,
+        )
 
 
 class LiveConfigSaveRequest(BaseModel):
@@ -204,7 +233,7 @@ def create_app(
             CORSMiddleware,
             allow_origins=list(settings.api_cors_origins),
             allow_credentials=False,
-            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
             allow_headers=["Authorization", "Content-Type"],
         )
 
@@ -390,7 +419,39 @@ def create_app(
 
     @app.get("/api/discovery")
     def discovery() -> dict[str, Any]:
-        return _json_safe(build_discovery_workspace(store, discovery_service=discovery_service))
+        return _json_safe(build_discovery_workspace(store, discovery_service=discovery_service, settings=settings))
+
+    @app.post("/api/discovery/overrides")
+    def create_discovery_override_endpoint(
+        request: DiscoveryOverrideRequest,
+        _: None = Depends(require_admin),
+    ) -> dict[str, Any]:
+        try:
+            create_discovery_override(
+                settings=settings,
+                store=store,
+                discovery_service=discovery_service,
+                request=request.to_mutation(),
+            )
+        except DiscoveryAdminError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _json_safe(build_discovery_workspace(store, discovery_service=discovery_service, settings=settings))
+
+    @app.delete("/api/discovery/overrides/{override_id}")
+    def delete_discovery_override_endpoint(
+        override_id: str,
+        _: None = Depends(require_admin),
+    ) -> dict[str, Any]:
+        try:
+            delete_discovery_override(
+                settings=settings,
+                store=store,
+                discovery_service=discovery_service,
+                override_id=override_id,
+            )
+        except DiscoveryAdminError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _json_safe(build_discovery_workspace(store, discovery_service=discovery_service, settings=settings))
 
     @app.get("/api/datasets/health")
     def dataset_health() -> dict[str, Any]:

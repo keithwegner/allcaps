@@ -673,6 +673,11 @@ const discoveryPayload = {
     x_post_count: 12,
   },
   latest_ranked_at: "2026-04-17T00:00:00",
+  admin: {
+    mode: "public",
+    writes_enabled: true,
+    write_disabled_reason: "",
+  },
   summary: {
     post_count: 54,
     x_candidate_post_count: 12,
@@ -739,15 +744,50 @@ const discoveryPayload = {
       suppressed_by_override: true,
     },
   ],
+  override_account_options: [
+    {
+      account_id: "acct-macro",
+      handle: "macroalpha",
+      display_name: "Macro Alpha",
+      source_platform: "X",
+      status: "active",
+      source: "latest_ranking",
+      label: "@macroalpha - Macro Alpha",
+    },
+    {
+      account_id: "acct-policy",
+      handle: "policywatch",
+      display_name: "Policy Watch",
+      source_platform: "X",
+      status: "pinned",
+      source: "latest_ranking",
+      label: "@policywatch - Policy Watch",
+    },
+    {
+      account_id: "acct-muted",
+      handle: "muted",
+      display_name: "Muted Account",
+      source_platform: "X",
+      status: "excluded",
+      source: "latest_ranking",
+      label: "@muted - Muted Account",
+    },
+  ],
   override_history: [
     {
+      override_id: "override-pin",
+      account_id: "acct-policy",
       handle: "policywatch",
       action: "pin",
+      effective_from: "2026-04-01T00:00:00",
       note: "Always inspect",
     },
     {
+      override_id: "override-suppress",
+      account_id: "acct-muted",
       handle: "muted",
       action: "suppress",
+      effective_from: "2026-04-10T00:00:00",
       note: "Low quality",
     },
   ],
@@ -983,6 +1023,16 @@ async function mockApi(page: Page) {
   await fulfillJson(page, "/api/research**", researchPayload);
   await fulfillJson(page, "/api/research/assets**", researchAssetPayload);
   await fulfillJson(page, "/api/discovery", discoveryPayload);
+  await fulfillJson(page, "/api/discovery/overrides", discoveryPayload);
+  await fulfillJson(page, "/api/discovery/overrides/**", {
+    ...discoveryPayload,
+    summary: {
+      ...discoveryPayload.summary,
+      override_count: 1,
+      suppress_override_count: 0,
+    },
+    override_history: discoveryPayload.override_history.slice(0, 1),
+  });
   await fulfillJson(page, "/api/live/current", livePayload);
   await fulfillJson(page, "/api/live/ops", liveOpsPayload);
   await fulfillJson(page, "/api/admin/session", { token: "admin-token", token_type: "bearer", expires_at: "2026-04-20T20:00:00Z", expires_in_seconds: 43200, mode: "public" });
@@ -1068,8 +1118,19 @@ test("shows the migrated discovery workspace with rankings and overrides", async
 
   await expect(page.getByRole("heading", { name: "Tracked account ranking workspace" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Discovery workspace" })).toBeVisible();
-  await expect(page.getByText("Manual pin/suppress override writes remain in Streamlit")).toBeVisible();
-  await expect(page.getByText("Discovery ranks non-Trump X accounts that mention Trump.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Discovery admin overrides" })).toBeVisible();
+  await expect(page.getByText("Admins can now pin or suppress accounts from this")).toBeVisible();
+  await expect(page.getByText("Read-only until unlocked")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Save discovery override" })).toBeDisabled();
+  await page.getByPlaceholder("Admin password").fill("secret");
+  await page.getByRole("button", { name: "Unlock admin writes" }).click();
+  await expect(page.getByText("Unlocked for this browser session")).toBeVisible();
+  await page.getByLabel("Override account").selectOption("acct-muted");
+  await page.getByLabel("Override action").selectOption("suppress");
+  await page.getByPlaceholder("Optional rationale").fill("Noisy duplicate account");
+  await page.getByRole("button", { name: "Save discovery override" }).click();
+  await page.getByLabel("Override to delete").selectOption("override-suppress");
+  await page.getByRole("button", { name: "Delete selected override" }).click();
   await expect(page.getByText("X candidate posts")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Top discovered accounts" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Active tracked accounts" })).toBeVisible();
@@ -1078,7 +1139,7 @@ test("shows the migrated discovery workspace with rankings and overrides", async
   await expect(page.getByRole("heading", { name: "Latest ranking snapshot" })).toBeVisible();
   await expect(page.getByRole("columnheader", { name: "suppressed by override" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Override history" })).toBeVisible();
-  await expect(page.getByRole("cell", { name: "suppress" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "pin", exact: true })).toBeVisible();
 });
 
 test("shows the migrated run explorer with detail and comparison tables", async ({ page }) => {
