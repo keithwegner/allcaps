@@ -32,6 +32,7 @@ from .performance import (
     build_winner_distribution_frame,
 )
 from .runtime import missing_core_datasets
+from .research_asset_lab import build_research_asset_lab
 from .research_workspace import build_research_workspace, detect_source_mode
 from .run_explorer import build_run_comparison_payload, build_run_detail_payload
 from .storage import DuckDBStore
@@ -192,6 +193,48 @@ def create_app(settings: AppSettings | None = None, store: DuckDBStore | None = 
             content=result.export_bundle,
             media_type="application/zip",
             headers={"Content-Disposition": f'attachment; filename="{result.export_filename}"'},
+        )
+
+    @app.get("/api/research/assets")
+    def research_assets(
+        date_start: str | None = None,
+        date_end: str | None = None,
+        platforms: list[str] | None = Query(default=None),
+        include_reshares: bool | None = None,
+        tracked_only: bool | None = None,
+        trump_authored_only: bool | None = None,
+        keyword: str | None = None,
+        selected_asset: str | None = None,
+        comparison_mode: str | None = None,
+        benchmark_symbol: str | None = None,
+        pre_sessions: int | None = None,
+        post_sessions: int | None = None,
+        intraday_session_date: str | None = None,
+        intraday_anchor_post_id: str | None = None,
+        before_minutes: int | None = None,
+        after_minutes: int | None = None,
+    ) -> dict[str, Any]:
+        return _json_safe(
+            build_research_asset_lab(
+                settings=settings,
+                store=store,
+                date_start=date_start,
+                date_end=date_end,
+                platforms=platforms,
+                include_reshares=include_reshares,
+                tracked_only=tracked_only,
+                trump_authored_only=trump_authored_only,
+                keyword=keyword,
+                selected_asset=selected_asset,
+                comparison_mode=comparison_mode,
+                benchmark_symbol=benchmark_symbol,
+                pre_sessions=pre_sessions,
+                post_sessions=post_sessions,
+                intraday_session_date=intraday_session_date,
+                intraday_anchor_post_id=intraday_anchor_post_id,
+                before_minutes=before_minutes,
+                after_minutes=after_minutes,
+            ),
         )
 
     @app.get("/api/datasets/health")
