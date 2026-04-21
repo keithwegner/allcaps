@@ -12,11 +12,12 @@ const createPlotlyComponent = (
 ) as PlotComponentFactory;
 const Plot = createPlotlyComponent(Plotly);
 
-type PageKey = "overview" | "research" | "runs" | "data" | "live" | "paper";
+type PageKey = "overview" | "research" | "discovery" | "runs" | "data" | "live" | "paper";
 
 const pages: Array<{ key: PageKey; label: string; deck: string }> = [
   { key: "overview", label: "Overview", deck: "API status and migration posture" },
   { key: "research", label: "Research", deck: "Sentiment, narratives, and export pack" },
+  { key: "discovery", label: "Discovery", deck: "Tracked account ranking workspace" },
   { key: "runs", label: "Run Explorer", deck: "Saved model results and comparisons" },
   { key: "data", label: "Data Health", deck: "Freshness, completeness, and anomalies" },
   { key: "live", label: "Live Decision", deck: "Current portfolio board" },
@@ -405,6 +406,83 @@ function ResearchPage() {
           <h2>Provider and cache indicators</h2>
         </div>
         <DataTable rows={payload?.provider_summary ?? []} />
+      </article>
+    </section>
+  );
+}
+
+function DiscoveryPage() {
+  const discovery = useQuery({ queryKey: ["discovery"], queryFn: api.discovery });
+
+  if (discovery.isLoading) {
+    return <LoadingBlock label="Loading discovery workspace..." />;
+  }
+  if (discovery.error) {
+    return <ErrorBlock error={discovery.error} />;
+  }
+
+  const payload = discovery.data;
+  const summary = payload?.summary ?? {};
+  return (
+    <section className="page-grid">
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Read-only migration slice</p>
+            <h2>Discovery workspace</h2>
+          </div>
+          <StatusPill label={payload?.ready ? "Rankings available" : "Guidance"} tone={payload?.ready ? "ok" : "warn"} />
+        </div>
+        <p>
+          Discovery ranks non-Trump X accounts that mention Trump. Manual pin/suppress override writes remain in Streamlit
+          for this migration slice.
+        </p>
+        {payload?.message ? <div className="empty-state">{payload.message}</div> : null}
+      </article>
+
+      <div className="metric-grid">
+        <MetricCard label="X candidate posts" value={summary.x_candidate_post_count ?? 0} />
+        <MetricCard label="Active accounts" value={summary.active_account_count ?? 0} />
+        <MetricCard label="Latest rankings" value={summary.latest_ranking_count ?? 0} />
+        <MetricCard label="Overrides" value={summary.override_count ?? 0} />
+      </div>
+
+      <article className="panel panel--wide chart-grid">
+        <div>
+          <h2>Top discovered accounts</h2>
+          <PlotlyChart figure={payload?.charts.top_discovered_accounts} title="Top discovered accounts" />
+        </div>
+        <div>
+          <h2>Ranking history</h2>
+          <PlotlyChart figure={payload?.charts.ranking_history} title="Discovery ranking history" />
+        </div>
+      </article>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <h2>Active tracked accounts</h2>
+          <StatusPill label={`${summary.active_account_count ?? 0} active`} />
+        </div>
+        <DataTable rows={payload?.active_accounts ?? []} />
+      </article>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <h2>Latest ranking snapshot</h2>
+          <StatusPill label={payload?.latest_ranked_at ? `Ranked ${payload.latest_ranked_at}` : "No snapshot"} />
+        </div>
+        <DataTable rows={payload?.latest_rankings ?? []} />
+      </article>
+
+      <article className="panel panel--wide chart-grid">
+        <div>
+          <h2>Override history</h2>
+          <DataTable rows={payload?.override_history ?? []} />
+        </div>
+        <div>
+          <h2>Recent ranking history</h2>
+          <DataTable rows={payload?.recent_ranking_history ?? []} />
+        </div>
       </article>
     </section>
   );
@@ -1006,6 +1084,7 @@ export function App() {
 
       {activePage === "overview" ? <OverviewPage /> : null}
       {activePage === "research" ? <ResearchPage /> : null}
+      {activePage === "discovery" ? <DiscoveryPage /> : null}
       {activePage === "runs" ? <RunExplorerPage /> : null}
       {activePage === "data" ? <DataHealthPage /> : null}
       {activePage === "live" ? <LiveDecisionPage /> : null}

@@ -181,6 +181,22 @@ export type ResearchPayload = {
   export_filename: string;
 };
 
+export type DiscoveryPayload = {
+  ready: boolean;
+  message: string;
+  source_mode: StatusPayload["source_mode"];
+  latest_ranked_at: string | null;
+  summary: RecordRow;
+  charts: {
+    top_discovered_accounts?: PlotlyFigure;
+    ranking_history?: PlotlyFigure;
+  };
+  active_accounts: RecordRow[];
+  latest_rankings: RecordRow[];
+  override_history: RecordRow[];
+  recent_ranking_history: RecordRow[];
+};
+
 function researchQuery(filters: ResearchFilters = {}): string {
   const params = new URLSearchParams();
   Object.entries(filters).forEach(([key, value]) => {
@@ -236,6 +252,7 @@ export const api = {
   },
   research: (filters?: ResearchFilters) => getJson<ResearchPayload>(`/api/research${researchQuery(filters)}`),
   researchExportUrl: (filters?: ResearchFilters) => `${API_BASE_URL}/api/research/export${researchQuery(filters)}`,
+  discovery: () => getJson<DiscoveryPayload>("/api/discovery"),
   live: () => getJson<LivePayload>("/api/live/current"),
   paperPortfolios: () => getJson<PaperPortfoliosPayload>("/api/paper/portfolios"),
   performance: (paperPortfolioId: string) => getJson<PerformancePayload>(`/api/performance/${paperPortfolioId}`),

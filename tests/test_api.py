@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from trump_workbench.api import create_app
 from trump_workbench.config import AppSettings
-from trump_workbench.contracts import BacktestRun
+from trump_workbench.contracts import BacktestRun, MANUAL_OVERRIDE_COLUMNS, RANKING_HISTORY_COLUMNS, TRACKED_ACCOUNT_COLUMNS
 from trump_workbench.experiments import ExperimentStore
 from trump_workbench.paper_trading import (
     PAPER_BENCHMARK_CURVE_COLUMNS,
@@ -122,6 +122,157 @@ class ApiContractTests(unittest.TestCase):
                     {"symbol": "QQQ", "display_name": "Invesco QQQ Trust", "asset_type": "etf", "source": "core_etf"},
                     {"symbol": "NVDA", "display_name": "NVIDIA", "asset_type": "equity", "source": "watchlist"},
                 ],
+            ),
+        )
+
+    def _save_discovery_frames(self) -> None:
+        self._save_research_frames(include_x=True)
+        self.store.save_frame(
+            "tracked_accounts",
+            pd.DataFrame(
+                [
+                    {
+                        "version_id": "acct-macro-v1",
+                        "account_id": "acct-macro",
+                        "handle": "macroalpha",
+                        "display_name": "Macro Alpha",
+                        "source_platform": "X",
+                        "discovery_score": 12.0,
+                        "status": "active",
+                        "first_seen_at": pd.Timestamp("2025-02-03 10:00:00", tz="America/New_York"),
+                        "last_seen_at": pd.Timestamp("2025-02-03 10:00:00", tz="America/New_York"),
+                        "effective_from": pd.Timestamp("2025-02-03"),
+                        "effective_to": pd.NaT,
+                        "auto_included": True,
+                        "provenance": "discovery_auto_include",
+                        "mention_count": 3,
+                        "engagement_mean": 45.0,
+                        "active_days": 1,
+                    },
+                    {
+                        "version_id": "acct-policy-v1",
+                        "account_id": "acct-policy",
+                        "handle": "policywatch",
+                        "display_name": "Policy Watch",
+                        "source_platform": "X",
+                        "discovery_score": 9.0,
+                        "status": "pinned",
+                        "first_seen_at": pd.Timestamp("2025-02-01 10:00:00", tz="America/New_York"),
+                        "last_seen_at": pd.Timestamp("2025-02-03 10:00:00", tz="America/New_York"),
+                        "effective_from": pd.Timestamp("2025-02-01"),
+                        "effective_to": pd.NaT,
+                        "auto_included": False,
+                        "provenance": "manual_override:pin",
+                        "mention_count": 1,
+                        "engagement_mean": 10.0,
+                        "active_days": 1,
+                    },
+                ],
+                columns=TRACKED_ACCOUNT_COLUMNS,
+            ),
+        )
+        self.store.save_frame(
+            "account_rankings",
+            pd.DataFrame(
+                [
+                    {
+                        "author_account_id": "acct-macro",
+                        "author_handle": "macroalpha",
+                        "author_display_name": "Macro Alpha",
+                        "source_platform": "X",
+                        "discovery_score": 10.0,
+                        "mention_count": 2,
+                        "engagement_mean": 30.0,
+                        "active_days": 1,
+                        "ranked_at": pd.Timestamp("2025-02-02"),
+                        "discovery_rank": 2,
+                        "final_selected": True,
+                        "selected_status": "active",
+                        "suppressed_by_override": False,
+                        "pinned_by_override": False,
+                    },
+                    {
+                        "author_account_id": "acct-macro",
+                        "author_handle": "macroalpha",
+                        "author_display_name": "Macro Alpha",
+                        "source_platform": "X",
+                        "discovery_score": 12.0,
+                        "mention_count": 3,
+                        "engagement_mean": 45.0,
+                        "active_days": 1,
+                        "ranked_at": pd.Timestamp("2025-02-03"),
+                        "discovery_rank": 1,
+                        "final_selected": True,
+                        "selected_status": "active",
+                        "suppressed_by_override": False,
+                        "pinned_by_override": False,
+                    },
+                    {
+                        "author_account_id": "acct-policy",
+                        "author_handle": "policywatch",
+                        "author_display_name": "Policy Watch",
+                        "source_platform": "X",
+                        "discovery_score": 9.0,
+                        "mention_count": 1,
+                        "engagement_mean": 10.0,
+                        "active_days": 1,
+                        "ranked_at": pd.Timestamp("2025-02-03"),
+                        "discovery_rank": 2,
+                        "final_selected": True,
+                        "selected_status": "pinned",
+                        "suppressed_by_override": False,
+                        "pinned_by_override": True,
+                    },
+                    {
+                        "author_account_id": "acct-muted",
+                        "author_handle": "muted",
+                        "author_display_name": "Muted Account",
+                        "source_platform": "X",
+                        "discovery_score": 3.0,
+                        "mention_count": 1,
+                        "engagement_mean": 1.0,
+                        "active_days": 1,
+                        "ranked_at": pd.Timestamp("2025-02-03"),
+                        "discovery_rank": 3,
+                        "final_selected": False,
+                        "selected_status": "excluded",
+                        "suppressed_by_override": True,
+                        "pinned_by_override": False,
+                    },
+                ],
+                columns=RANKING_HISTORY_COLUMNS,
+            ),
+        )
+        self.store.save_frame(
+            "manual_account_overrides",
+            pd.DataFrame(
+                [
+                    {
+                        "override_id": "",
+                        "account_id": "acct-policy",
+                        "handle": "policywatch",
+                        "display_name": "Policy Watch",
+                        "source_platform": "X",
+                        "action": "PIN",
+                        "effective_from": pd.Timestamp("2025-02-01"),
+                        "effective_to": pd.NaT,
+                        "note": "Always inspect",
+                        "created_at": pd.Timestamp("2025-02-01 12:00:00", tz="UTC"),
+                    },
+                    {
+                        "override_id": "",
+                        "account_id": "acct-muted",
+                        "handle": "muted",
+                        "display_name": "Muted Account",
+                        "source_platform": "X",
+                        "action": "suppress",
+                        "effective_from": pd.Timestamp("2025-02-03"),
+                        "effective_to": pd.NaT,
+                        "note": "Low quality",
+                        "created_at": pd.Timestamp("2025-02-03 12:00:00", tz="UTC"),
+                    },
+                ],
+                columns=MANUAL_OVERRIDE_COLUMNS,
             ),
         )
 
@@ -624,6 +775,63 @@ class ApiContractTests(unittest.TestCase):
             self.assertEqual(manifest["source_mode"]["mode"], "truth_only")
             self.assertTrue(manifest["filters"]["trump_authored_only"])
             self.assertEqual(manifest["headline_metrics"]["posts_in_view"], 1)
+
+    def test_discovery_endpoint_returns_empty_state_without_posts(self) -> None:
+        response = self.client.get("/api/discovery")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["ready"])
+        self.assertIn("Refresh datasets", payload["message"])
+        self.assertEqual(payload["source_mode"]["mode"], "unknown")
+        self.assertEqual(payload["active_accounts"], [])
+        self.assertEqual(payload["latest_rankings"], [])
+        self.assertIn("top_discovered_accounts", payload["charts"])
+
+    def test_discovery_endpoint_explains_truth_only_mode(self) -> None:
+        self._save_truth_posts()
+
+        response = self.client.get("/api/discovery")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["ready"])
+        self.assertEqual(payload["source_mode"]["mode"], "truth_only")
+        self.assertIn("Discovery ranks non-Trump X accounts", payload["message"])
+        self.assertEqual(payload["summary"]["x_candidate_post_count"], 0)
+
+    def test_discovery_endpoint_returns_rankings_active_accounts_and_overrides(self) -> None:
+        self._save_discovery_frames()
+
+        response = self.client.get("/api/discovery")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ready"])
+        self.assertEqual(payload["message"], "")
+        self.assertEqual(payload["summary"]["x_candidate_post_count"], 1)
+        self.assertEqual(payload["summary"]["active_account_count"], 2)
+        self.assertEqual(payload["summary"]["latest_ranking_count"], 3)
+        self.assertEqual(payload["summary"]["pin_override_count"], 1)
+        self.assertEqual(payload["summary"]["suppress_override_count"], 1)
+        self.assertEqual(payload["latest_rankings"][0]["author_account_id"], "acct-macro")
+        self.assertEqual(payload["latest_rankings"][0]["discovery_score"], 12.0)
+        self.assertEqual({row["handle"] for row in payload["active_accounts"]}, {"macroalpha", "policywatch"})
+        self.assertEqual({row["action"] for row in payload["override_history"]}, {"pin", "suppress"})
+        self.assertGreaterEqual(len(payload["recent_ranking_history"]), 1)
+        self.assertIsNotNone(payload["latest_ranked_at"])
+
+    def test_discovery_endpoint_handles_schema_less_ranking_history(self) -> None:
+        self._save_research_frames(include_x=True)
+        self.store.save_frame("account_rankings", pd.DataFrame({"other": [1]}))
+
+        response = self.client.get("/api/discovery")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["ready"])
+        self.assertIn("rankings have not been built", payload["message"])
+        self.assertEqual(payload["latest_rankings"], [])
 
     def test_dataset_health_returns_summary_rows_and_registry(self) -> None:
         self._save_truth_posts()

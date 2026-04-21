@@ -8,6 +8,8 @@ from fastapi import FastAPI, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import AppSettings
+from .discovery import DiscoveryService
+from .discovery_workspace import build_discovery_workspace
 from .enrichment import LLMEnrichmentService
 from .experiments import ExperimentStore
 from .health import DataHealthService, build_health_summary, build_health_trend_frame, ensure_refresh_history_frame
@@ -67,6 +69,7 @@ def create_app(settings: AppSettings | None = None, store: DuckDBStore | None = 
     settings = settings or AppSettings()
     store = store or DuckDBStore(settings)
     health_service = DataHealthService()
+    discovery_service = DiscoveryService()
     experiment_store = ExperimentStore(store)
     model_service = ModelService()
     enrichment_service = LLMEnrichmentService(store)
@@ -193,6 +196,10 @@ def create_app(settings: AppSettings | None = None, store: DuckDBStore | None = 
             media_type="application/zip",
             headers={"Content-Disposition": f'attachment; filename="{result.export_filename}"'},
         )
+
+    @app.get("/api/discovery")
+    def discovery() -> dict[str, Any]:
+        return _json_safe(build_discovery_workspace(store, discovery_service=discovery_service))
 
     @app.get("/api/datasets/health")
     def dataset_health() -> dict[str, Any]:
