@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 from fastapi.testclient import TestClient
@@ -163,6 +164,37 @@ class FakeFeatureService:
         del market_calendar, tracked_accounts, llm_enabled
         return posts.assign(session_date=pd.Timestamp("2025-02-03"))
 
+    def build_session_dataset(
+        self,
+        posts: pd.DataFrame,
+        spy_market: pd.DataFrame,
+        tracked_accounts: pd.DataFrame,
+        feature_version: str,
+        llm_enabled: bool,
+        prepared_posts: pd.DataFrame | None = None,
+    ) -> pd.DataFrame:
+        del posts, spy_market, tracked_accounts, feature_version, llm_enabled, prepared_posts
+        return pd.DataFrame(
+            [
+                {
+                    "signal_session_date": pd.Timestamp("2025-02-03"),
+                    "next_session_date": pd.Timestamp("2025-02-04"),
+                    "post_count": 2,
+                    "sentiment_mean": 0.25,
+                    "target_next_session_return": 0.01,
+                    "target_available": True,
+                },
+                {
+                    "signal_session_date": pd.Timestamp("2025-02-04"),
+                    "next_session_date": pd.Timestamp("2025-02-05"),
+                    "post_count": 1,
+                    "sentiment_mean": -0.1,
+                    "target_next_session_return": -0.002,
+                    "target_available": True,
+                },
+            ],
+        )
+
     def build_asset_post_mappings(self, prepared_posts: pd.DataFrame, asset_universe: pd.DataFrame, llm_enabled: bool) -> pd.DataFrame:
         del llm_enabled
         symbols = asset_universe["symbol"].astype(str).tolist() if not asset_universe.empty else ["SPY"]
@@ -201,6 +233,185 @@ class FakeFeatureService:
                 for symbol in symbols
             ],
         )
+
+
+class FakeBacktestService:
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+
+    def run_walk_forward(self, run_config, feature_rows: pd.DataFrame) -> tuple[BacktestRun, dict[str, Any]]:
+        if self.fail:
+            raise RuntimeError("fake model training failed")
+        run = BacktestRun(
+            run_id="trained-asset-run",
+            run_name=run_config.run_name,
+            target_asset=run_config.target_asset,
+            config_hash="trained-asset-hash",
+            train_window=int(run_config.train_window),
+            validation_window=int(run_config.validation_window),
+            test_window=int(run_config.test_window),
+            metrics={"total_return": 0.04, "robust_score": 1.1, "max_drawdown": -0.01},
+            selected_params={"threshold": 0.001, "min_post_count": 1, "account_weight": 1.0},
+        )
+        predictions = feature_rows.copy()
+        predictions["expected_return_score"] = [0.01 + idx * 0.001 for idx in range(len(predictions))]
+        predictions["prediction_confidence"] = 0.7
+        predictions["suggested_stance"] = "LONG"
+        artifacts = {
+            "config": run_config.to_dict(),
+            "trades": pd.DataFrame(
+                {
+                    "signal_session_date": predictions["signal_session_date"],
+                    "next_session_date": predictions["next_session_date"],
+                    "trade_taken": True,
+                    "net_return": [0.01 for _ in range(len(predictions))],
+                    "equity_curve": [1.01 for _ in range(len(predictions))],
+                },
+            ),
+            "predictions": predictions,
+            "windows": pd.DataFrame({"window_id": [1], "train_start": [pd.Timestamp("2025-01-01")]}),
+            "importance": pd.DataFrame({"feature_name": ["post_count"], "coefficient": [0.2], "abs_coefficient": [0.2]}),
+            "model_artifact": {
+                "model_version": "fake-asset-model",
+                "feature_names": ["post_count"],
+                "intercept": 0.0,
+                "coefficients": [0.2],
+                "means": [1.0],
+                "stds": [1.0],
+                "residual_std": 0.01,
+                "train_rows": int(len(feature_rows)),
+                "metadata": {"run_type": "asset_model", "target_asset": run_config.target_asset},
+            },
+            "feature_contributions": pd.DataFrame(),
+            "benchmarks": pd.DataFrame({"benchmark_name": ["strategy"], "total_return": [0.04]}),
+            "diagnostics": pd.DataFrame({"expected_return_score": [0.01], "actual_next_session_return": [0.01]}),
+            "benchmark_curves": pd.DataFrame({"next_session_date": [pd.Timestamp("2025-02-04")], "strategy": [1.01]}),
+            "leakage_audit": {"overall_pass": True},
+        }
+        return run, artifacts
+
+    def run_saved_run_allocator(self, run_config, component_bundles: dict[str, dict[str, Any]]) -> tuple[BacktestRun, dict[str, Any]]:
+        if self.fail:
+            raise RuntimeError("fake saved-run allocation failed")
+        run = BacktestRun(
+            run_id="trained-saved-portfolio-run",
+            run_name=run_config.run_name,
+            target_asset="PORTFOLIO",
+            config_hash="trained-saved-portfolio-hash",
+            train_window=0,
+            validation_window=0,
+            test_window=0,
+            metrics={"total_return": 0.05, "robust_score": 1.2, "max_drawdown": -0.02},
+            selected_params={"fallback_mode": run_config.fallback_mode, "component_run_ids": list(component_bundles.keys())},
+            run_type="portfolio_allocator",
+            allocator_mode="saved_runs",
+            fallback_mode=run_config.fallback_mode,
+            component_run_ids=list(component_bundles.keys()),
+            universe_symbols=list(run_config.universe_symbols),
+        )
+        artifacts = self._portfolio_artifacts(run_config, variant_name="")
+        artifacts["config"] = run_config.to_dict()
+        return run, artifacts
+
+    def run_joint_model_allocator(self, run_config, feature_rows: pd.DataFrame) -> tuple[BacktestRun, dict[str, Any]]:
+        if self.fail:
+            raise RuntimeError("fake joint model training failed")
+        del feature_rows
+        run = BacktestRun(
+            run_id="trained-joint-portfolio-run",
+            run_name=run_config.run_name,
+            target_asset="PORTFOLIO",
+            config_hash="trained-joint-portfolio-hash",
+            train_window=int(run_config.train_window),
+            validation_window=int(run_config.validation_window),
+            test_window=int(run_config.test_window),
+            metrics={"total_return": 0.07, "robust_score": 1.4, "max_drawdown": -0.015},
+            selected_params={
+                "fallback_mode": run_config.fallback_mode,
+                "selected_symbols": list(run_config.selected_symbols),
+                "deployment_variant": "per_asset_baseline",
+            },
+            run_type="portfolio_allocator",
+            allocator_mode="joint_model",
+            fallback_mode=run_config.fallback_mode,
+            deployment_variant="per_asset_baseline",
+            selected_symbols=list(run_config.selected_symbols),
+            topology_variants=list(run_config.topology_variants),
+            model_families=list(run_config.model_families),
+            narrative_feature_modes=list(run_config.narrative_feature_modes),
+        )
+        artifacts = self._portfolio_artifacts(run_config, variant_name="per_asset_baseline")
+        artifacts["config"] = run_config.to_dict()
+        artifacts["variant_summary"] = pd.DataFrame(
+            {
+                "variant_name": ["per_asset_baseline"],
+                "topology": ["per_asset"],
+                "narrative_feature_mode": ["baseline"],
+                "model_family": ["ridge"],
+                "validation_robust_score": [1.4],
+                "test_total_return": [0.07],
+                "deployment_winner": [True],
+            },
+        )
+        artifacts["portfolio_model_bundle"] = {
+            "deployment_variant": "per_asset_baseline",
+            "selected_symbols": list(run_config.selected_symbols),
+            "variants": {"per_asset_baseline": {"variant_name": "per_asset_baseline", "model_family": "ridge"}},
+        }
+        artifacts["importance"] = pd.DataFrame({"variant_name": ["per_asset_baseline"], "feature_name": ["post_count"], "importance": [1.0]})
+        return run, artifacts
+
+    def _portfolio_artifacts(self, run_config, variant_name: str) -> dict[str, Any]:
+        variant_values = [variant_name, variant_name] if variant_name else ["", ""]
+        return {
+            "trades": pd.DataFrame(
+                {
+                    "variant_name": variant_values,
+                    "signal_session_date": [pd.Timestamp("2025-02-03"), pd.Timestamp("2025-02-04")],
+                    "next_session_date": [pd.Timestamp("2025-02-04"), pd.Timestamp("2025-02-05")],
+                    "selected_asset": ["SPY", "SPY"],
+                    "trade_taken": [True, True],
+                    "net_return": [0.01, 0.002],
+                    "equity_curve": [1.01, 1.01202],
+                },
+            ),
+            "predictions": pd.DataFrame(
+                {
+                    "variant_name": variant_values,
+                    "signal_session_date": [pd.Timestamp("2025-02-03"), pd.Timestamp("2025-02-04")],
+                    "next_session_date": [pd.Timestamp("2025-02-04"), pd.Timestamp("2025-02-05")],
+                    "winning_asset": ["SPY", "SPY"],
+                    "decision_source": ["eligible", "eligible"],
+                    "fallback_mode": [run_config.fallback_mode, run_config.fallback_mode],
+                    "stance": ["LONG SPY NEXT SESSION", "LONG SPY NEXT SESSION"],
+                    "eligible_asset_count": [1, 1],
+                    "winner_score": [0.01, 0.008],
+                    "runner_up_asset": ["", ""],
+                    "runner_up_score": [0.0, 0.0],
+                },
+            ),
+            "candidate_predictions": pd.DataFrame(
+                {
+                    "variant_name": variant_values,
+                    "signal_session_date": [pd.Timestamp("2025-02-03"), pd.Timestamp("2025-02-04")],
+                    "next_session_date": [pd.Timestamp("2025-02-04"), pd.Timestamp("2025-02-05")],
+                    "asset_symbol": ["SPY", "SPY"],
+                    "expected_return_score": [0.01, 0.008],
+                    "confidence": [0.7, 0.6],
+                    "threshold": [0.001, 0.001],
+                    "min_post_count": [1, 1],
+                    "post_count": [2, 1],
+                    "tradeable": [True, True],
+                    "qualifies": [True, True],
+                },
+            ),
+            "windows": pd.DataFrame({"component_run_id": list(getattr(run_config, "component_run_ids", [])) or ["joint"]}),
+            "importance": pd.DataFrame(),
+            "benchmarks": pd.DataFrame({"variant_name": [variant_name], "benchmark_name": ["strategy"], "total_return": [0.05]}),
+            "diagnostics": pd.DataFrame({"variant_name": [variant_name], "winner_score": [0.01]}),
+            "benchmark_curves": pd.DataFrame({"variant_name": [variant_name], "next_session_date": [pd.Timestamp("2025-02-04")], "strategy": [1.01]}),
+            "leakage_audit": {"overall_pass": True},
+        }
 
 
 class ApiContractTests(unittest.TestCase):
@@ -290,6 +501,16 @@ class ApiContractTests(unittest.TestCase):
                     {"trade_date": pd.Timestamp("2025-02-03"), "close": 100.0},
                     {"trade_date": pd.Timestamp("2025-02-04"), "close": 101.0},
                     {"trade_date": pd.Timestamp("2025-02-05"), "close": 99.0},
+                ],
+            ),
+        )
+        self.store.save_frame(
+            "spy_daily",
+            pd.DataFrame(
+                [
+                    {"trade_date": pd.Timestamp("2025-02-03"), "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 1000},
+                    {"trade_date": pd.Timestamp("2025-02-04"), "open": 100.5, "high": 102.0, "low": 100.0, "close": 101.0, "volume": 1100},
+                    {"trade_date": pd.Timestamp("2025-02-05"), "open": 101.0, "high": 102.0, "low": 100.0, "close": 100.0, "volume": 1200},
                 ],
             ),
         )
@@ -1224,6 +1445,198 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(str(refresh_history.iloc[-1]["status"]), "error")
         latest = self.store.read_frame("data_health_latest")
         self.assertEqual(str(latest.iloc[0]["check_name"]), "prior_check")
+
+    def test_model_training_payload_and_post_requires_admin(self) -> None:
+        response = self.client.get("/api/models/training")
+        rejected = self.client.post(
+            "/api/models/jobs",
+            json={"workflow_mode": "single_asset", "run_name": "Unauthorized"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("asset_options", payload)
+        self.assertIn("recent_jobs", payload)
+        self.assertGreaterEqual(len(payload["status"]["readiness_errors"]), 1)
+        self.assertEqual(rejected.status_code, 401)
+
+    def test_single_asset_model_training_job_persists_run_and_job(self) -> None:
+        self._save_research_frames(include_x=False)
+        client = TestClient(
+            create_app(
+                settings=self.settings,
+                store=self.store,
+                feature_service=FakeFeatureService(),
+                backtest_service=FakeBacktestService(),
+                run_model_training_jobs_inline=True,
+            ),
+        )
+        token = self._admin_token(client)
+
+        response = client.post(
+            "/api/models/jobs",
+            json={
+                "workflow_mode": "single_asset",
+                "run_name": "SPY Console Test",
+                "target_asset": "SPY",
+                "feature_version": "feature-v1",
+                "threshold_grid": [0.001],
+                "minimum_signal_grid": [1],
+                "account_weight_grid": [1.0],
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        jobs = self.store.read_frame("model_training_jobs")
+        self.assertFalse(jobs.empty)
+        self.assertEqual(str(jobs.iloc[-1]["status"]), "success")
+        self.assertEqual(str(jobs.iloc[-1]["workflow_mode"]), "single_asset")
+        self.assertEqual(str(jobs.iloc[-1]["run_id"]), "trained-asset-run")
+        self.assertEqual(str(jobs.iloc[-1]["target_asset"]), "SPY")
+        self.assertFalse(self.store.read_frame("session_features_latest").empty)
+        self.assertIsNotNone(self.experiments.load_run("trained-asset-run"))
+
+    def test_saved_run_portfolio_training_job_persists_allocator_run(self) -> None:
+        self._save_asset_run_artifacts()
+        client = TestClient(
+            create_app(
+                settings=self.settings,
+                store=self.store,
+                backtest_service=FakeBacktestService(),
+                run_model_training_jobs_inline=True,
+            ),
+        )
+        token = self._admin_token(client)
+
+        response = client.post(
+            "/api/models/jobs",
+            json={
+                "workflow_mode": "saved_run_portfolio",
+                "run_name": "Saved Portfolio Console Test",
+                "component_run_ids": ["asset-run-1"],
+                "fallback_mode": "SPY",
+                "transaction_cost_bps": 2.0,
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        jobs = self.store.read_frame("model_training_jobs")
+        self.assertEqual(str(jobs.iloc[-1]["status"]), "success")
+        self.assertEqual(str(jobs.iloc[-1]["workflow_mode"]), "saved_run_portfolio")
+        self.assertEqual(str(jobs.iloc[-1]["run_id"]), "trained-saved-portfolio-run")
+        saved_run = self.experiments.load_run("trained-saved-portfolio-run")
+        self.assertIsNotNone(saved_run)
+        self.assertEqual(saved_run["run"]["allocator_mode"], "saved_runs")
+
+    def test_joint_portfolio_training_job_persists_variant_metadata(self) -> None:
+        self.store.save_frame(
+            "asset_session_features",
+            pd.DataFrame(
+                [
+                    {
+                        "asset_symbol": "SPY",
+                        "signal_session_date": pd.Timestamp("2025-02-03"),
+                        "next_session_date": pd.Timestamp("2025-02-04"),
+                        "post_count": 2,
+                        "target_available": True,
+                        "target_next_session_return": 0.01,
+                    },
+                    {
+                        "asset_symbol": "QQQ",
+                        "signal_session_date": pd.Timestamp("2025-02-03"),
+                        "next_session_date": pd.Timestamp("2025-02-04"),
+                        "post_count": 1,
+                        "target_available": True,
+                        "target_next_session_return": 0.02,
+                    },
+                ],
+            ),
+        )
+        client = TestClient(
+            create_app(
+                settings=self.settings,
+                store=self.store,
+                backtest_service=FakeBacktestService(),
+                run_model_training_jobs_inline=True,
+            ),
+        )
+        token = self._admin_token(client)
+
+        response = client.post(
+            "/api/models/jobs",
+            json={
+                "workflow_mode": "joint_portfolio",
+                "run_name": "Joint Console Test",
+                "selected_symbols": ["SPY", "QQQ"],
+                "feature_version": "asset-v1",
+                "fallback_mode": "SPY",
+                "topology_variants": ["per_asset"],
+                "model_families": ["ridge"],
+                "narrative_feature_modes": ["baseline"],
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        jobs = self.store.read_frame("model_training_jobs")
+        self.assertEqual(str(jobs.iloc[-1]["status"]), "success")
+        self.assertEqual(str(jobs.iloc[-1]["workflow_mode"]), "joint_portfolio")
+        self.assertEqual(str(jobs.iloc[-1]["run_id"]), "trained-joint-portfolio-run")
+        self.assertIn("QQQ", str(jobs.iloc[-1]["selected_symbols"]))
+        saved_run = self.experiments.load_run("trained-joint-portfolio-run")
+        self.assertIsNotNone(saved_run)
+        self.assertEqual(saved_run["run"]["deployment_variant"], "per_asset_baseline")
+        self.assertFalse(saved_run["variant_summary"].empty)
+
+    def test_model_training_rejects_overlapping_lock(self) -> None:
+        token = self._admin_token()
+        lock_fd = acquire_refresh_lock(self.settings)
+        self.assertIsNotNone(lock_fd)
+        try:
+            response = self.client.post(
+                "/api/models/jobs",
+                json={"workflow_mode": "single_asset", "run_name": "Blocked"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        finally:
+            release_refresh_lock(self.settings, lock_fd)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("already running", str(response.json()["detail"]))
+
+    def test_model_training_failed_job_persists_error_status(self) -> None:
+        self._save_research_frames(include_x=False)
+        client = TestClient(
+            create_app(
+                settings=self.settings,
+                store=self.store,
+                feature_service=FakeFeatureService(),
+                backtest_service=FakeBacktestService(fail=True),
+                run_model_training_jobs_inline=True,
+            ),
+        )
+        token = self._admin_token(client)
+
+        response = client.post(
+            "/api/models/jobs",
+            json={
+                "workflow_mode": "single_asset",
+                "run_name": "Failing Console Test",
+                "target_asset": "SPY",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        job_id = response.json()["job_id"]
+        status = client.get(f"/api/models/jobs/{job_id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(status.json()["job"]["status"], "error")
+        self.assertIn("fake model training failed", status.json()["job"]["error_message"])
+        jobs = self.store.read_frame("model_training_jobs")
+        self.assertEqual(str(jobs.iloc[-1]["status"]), "error")
 
     def test_runs_and_live_current_handle_empty_live_config(self) -> None:
         self._save_run_record()

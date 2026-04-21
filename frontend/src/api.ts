@@ -66,6 +66,64 @@ export type DatasetRefreshRequest = {
   files?: FileList | File[];
 };
 
+export type ModelTrainingWorkflow = "single_asset" | "saved_run_portfolio" | "joint_portfolio";
+
+export type ModelTrainingPayload = {
+  admin: {
+    write_requires_unlock: boolean;
+  };
+  status: {
+    ready: boolean;
+    active_job_id: string;
+    readiness_errors: Record<string, string[]>;
+  };
+  defaults: {
+    single_asset: Record<string, unknown>;
+    saved_run_portfolio: Record<string, unknown>;
+    joint_portfolio: Record<string, unknown>;
+  };
+  asset_options: Array<{ symbol: string; label: string }>;
+  feature_versions: string[];
+  asset_session_symbols: string[];
+  narrative_feature_modes: string[];
+  model_families: string[];
+  topology_variants: string[];
+  run_options: RecordRow[];
+  asset_model_runs: RecordRow[];
+  recent_jobs: RecordRow[];
+  job_id?: string;
+};
+
+export type ModelTrainingJobPayload = {
+  job_id: string;
+  found: boolean;
+  job: RecordRow | null;
+  recent_jobs: RecordRow[];
+};
+
+export type ModelTrainingJobRequest = {
+  workflow_mode: ModelTrainingWorkflow;
+  run_name?: string;
+  target_asset?: string;
+  feature_version?: string;
+  llm_enabled?: boolean;
+  train_window?: number;
+  validation_window?: number;
+  test_window?: number;
+  step_size?: number;
+  transaction_cost_bps?: number;
+  ridge_alpha?: number;
+  threshold_grid?: string;
+  minimum_signal_grid?: string;
+  account_weight_grid?: string;
+  fallback_mode?: "SPY" | "FLAT";
+  component_run_ids?: string[];
+  selected_symbols?: string[];
+  topology_variants?: string[];
+  model_families?: string[];
+  narrative_feature_modes?: string[];
+};
+
 export type RunsPayload = {
   count: number;
   runs: RecordRow[];
@@ -374,6 +432,10 @@ export const api = {
     return postForm<DatasetAdminPayload>("/api/datasets/refresh", formData, token);
   },
   datasetRefreshJob: (jobId: string) => getJson<DatasetRefreshJobPayload>(`/api/datasets/jobs/${encodeURIComponent(jobId)}`),
+  modelTraining: () => getJson<ModelTrainingPayload>("/api/models/training"),
+  startModelTrainingJob: (request: ModelTrainingJobRequest, token: string) =>
+    postJson<ModelTrainingPayload>("/api/models/jobs", request, token),
+  modelTrainingJob: (jobId: string) => getJson<ModelTrainingJobPayload>(`/api/models/jobs/${encodeURIComponent(jobId)}`),
   runs: () => getJson<RunsPayload>("/api/runs"),
   runDetail: (runId: string, options: { variantName?: string; sessionDate?: string } = {}) => {
     const params = new URLSearchParams();

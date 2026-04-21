@@ -4,7 +4,17 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import createPlotlyComponentModule from "react-plotly.js/factory";
 import Plotly from "plotly.js-dist-min";
 import type { Data, Frame, Layout } from "plotly.js";
-import { api, type DatasetAdminPayload, type LiveOpsPayload, type PlotlyFigure, type RecordRow, type ResearchFilters } from "./api";
+import {
+  api,
+  type DatasetAdminPayload,
+  type LiveOpsPayload,
+  type ModelTrainingJobRequest,
+  type ModelTrainingPayload,
+  type ModelTrainingWorkflow,
+  type PlotlyFigure,
+  type RecordRow,
+  type ResearchFilters,
+} from "./api";
 
 type PlotComponentFactory = (plotly: unknown) => ComponentType<Record<string, unknown>>;
 const createPlotlyComponent = (
@@ -12,13 +22,14 @@ const createPlotlyComponent = (
 ) as PlotComponentFactory;
 const Plot = createPlotlyComponent(Plotly);
 
-type PageKey = "overview" | "research" | "discovery" | "runs" | "data" | "live" | "paper";
+type PageKey = "overview" | "research" | "discovery" | "runs" | "models" | "data" | "live" | "paper";
 
 const pages: Array<{ key: PageKey; label: string; deck: string }> = [
   { key: "overview", label: "Overview", deck: "API status and migration posture" },
   { key: "research", label: "Research", deck: "Sentiment, narratives, and export pack" },
   { key: "discovery", label: "Discovery", deck: "Tracked account ranking workspace" },
   { key: "runs", label: "Run Explorer", deck: "Saved model results and comparisons" },
+  { key: "models", label: "Model Training", deck: "Train and save model runs" },
   { key: "data", label: "Data Admin", deck: "Refresh jobs, watchlist, and data health" },
   { key: "live", label: "Live Ops", deck: "Operate deployed portfolio" },
   { key: "paper", label: "Paper + Performance", deck: "Portfolio audit and drift" },
@@ -903,6 +914,422 @@ function OverviewPage() {
   );
 }
 
+function modelRunLabel(row: RecordRow): string {
+  const runName = String(row.run_name ?? row.run_id ?? "");
+  const asset = String(row.target_asset ?? "");
+  const score = row.robust_score !== undefined && row.robust_score !== null ? ` | robust ${formatValue(row.robust_score)}` : "";
+  return `${asset} | ${runName}${score}`;
+}
+
+function modelWorkflowLabel(mode: ModelTrainingWorkflow): string {
+  if (mode === "single_asset") {
+    return "Single Asset";
+  }
+  if (mode === "saved_run_portfolio") {
+    return "Saved-Run Portfolio";
+  }
+  return "Joint Portfolio";
+}
+
+function parseModelJobSummary(job: RecordRow | undefined): Record<string, unknown> {
+  const summary = job?.summary;
+  if (!summary) {
+    return {};
+  }
+  if (typeof summary === "object") {
+    return summary as Record<string, unknown>;
+  }
+  try {
+    return JSON.parse(String(summary)) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function ModelTrainingPage({ onNavigate }: { onNavigate: (page: PageKey) => void }) {
+  const queryClient = useQueryClient();
+  const training = useQuery({ queryKey: ["model-training"], queryFn: api.modelTraining, refetchInterval: 10_000 });
+  const [adminToken, setAdminToken] = useState(() =>
+    typeof window === "undefined" ? "" : window.sessionStorage.getItem("allcaps_admin_token") ?? "",
+  );
+  const [password, setPassword] = useState("");
+  const [workflowMode, setWorkflowMode] = useState<ModelTrainingWorkflow>("joint_portfolio");
+  const [runName, setRunName] = useState("joint-portfolio-run");
+  const [targetAsset, setTargetAsset] = useState("SPY");
+  const [featureVersion, setFeatureVersion] = useState("asset-v1");
+  const [llmEnabled, setLlmEnabled] = useState(false);
+  const [trainWindow, setTrainWindow] = useState(90);
+  const [validationWindow, setValidationWindow] = useState(30);
+  const [testWindow, setTestWindow] = useState(30);
+  const [stepSize, setStepSize] = useState(30);
+  const [transactionCostBps, setTransactionCostBps] = useState(2);
+  const [ridgeAlpha, setRidgeAlpha] = useState(1);
+  const [thresholdGrid, setThresholdGrid] = useState("0,0.001,0.0025,0.005");
+  const [minimumSignalGrid, setMinimumSignalGrid] = useState("1,2,3");
+  const [accountWeightGrid, setAccountWeightGrid] = useState("0.5,1.0,1.5");
+  const [fallbackMode, setFallbackMode] = useState<"SPY" | "FLAT">("SPY");
+  const [componentRunIds, setComponentRunIds] = useState<string[]>([]);
+  const [selectedSymbolsText, setSelectedSymbolsText] = useState("SPY, QQQ, NVDA");
+  const [topologyVariants, setTopologyVariants] = useState<string[]>(["per_asset", "pooled"]);
+  const [modelFamilies, setModelFamilies] = useState<string[]>(["ridge", "elastic_net", "hist_gradient_boosting_regressor"]);
+  const [narrativeFeatureModes, setNarrativeFeatureModes] = useState<string[]>(["baseline"]);
+
+  const applyTrainingPayload = (payload: ModelTrainingPayload) => {
+    queryClient.setQueryData(["model-training"], payload);
+    queryClient.invalidateQueries({ queryKey: ["runs"] });
+  };
+  const unlock = useMutation({
+    mutationFn: () => api.adminSession(password),
+    onSuccess: (payload) => {
+      setAdminToken(payload.token);
+      if (typeof window !== "undefined") {
+        window.sessionStorage.setItem("allcaps_admin_token", payload.token);
+      }
+      setPassword("");
+    },
+  });
+  const startTraining = useMutation({
+    mutationFn: (request: ModelTrainingJobRequest) => api.startModelTrainingJob(request, adminToken),
+    onSuccess: applyTrainingPayload,
+  });
+
+  useEffect(() => {
+    const payload = training.data;
+    if (!payload) {
+      return;
+    }
+    const jointDefaults = payload.defaults.joint_portfolio;
+    if (!featureVersion && typeof jointDefaults.feature_version === "string") {
+      setFeatureVersion(jointDefaults.feature_version);
+    }
+    const defaultSymbols = Array.isArray(jointDefaults.selected_symbols) ? jointDefaults.selected_symbols.map(String) : [];
+    if (defaultSymbols.length && selectedSymbolsText === "SPY, QQQ, NVDA") {
+      setSelectedSymbolsText(defaultSymbols.join(", "));
+    }
+    const defaultComponents = payload.asset_model_runs
+      .filter((row) => row.target_asset === "SPY")
+      .slice(0, 1)
+      .map((row) => String(row.run_id ?? ""))
+      .filter(Boolean);
+    if (!componentRunIds.length && defaultComponents.length) {
+      setComponentRunIds(defaultComponents);
+    }
+  }, [training.data, featureVersion, selectedSymbolsText, componentRunIds.length]);
+
+  if (training.isLoading) {
+    return <LoadingBlock label="Loading model training console..." />;
+  }
+  if (training.error) {
+    return <ErrorBlock error={training.error} />;
+  }
+
+  const payload = training.data;
+  const isUnlocked = Boolean(adminToken);
+  const mutationError = unlock.error ?? startTraining.error;
+  const readiness = payload?.status.readiness_errors?.[workflowMode] ?? [];
+  const recentJobs = payload?.recent_jobs ?? [];
+  const activeJob = recentJobs.find((row) => row.job_id === payload?.status.active_job_id) ?? recentJobs[recentJobs.length - 1];
+  const latestSuccessfulJob = recentJobs.find((row) => row.status === "success" && row.run_id);
+  const latestSummary = parseModelJobSummary(latestSuccessfulJob);
+  const latestMetrics = (latestSummary.metrics && typeof latestSummary.metrics === "object" ? latestSummary.metrics : {}) as Record<string, unknown>;
+  const assetModelRuns = payload?.asset_model_runs ?? [];
+  const selectedSymbols = parseSymbolList(selectedSymbolsText);
+
+  const submit = () => {
+    const common = {
+      workflow_mode: workflowMode,
+      run_name: runName,
+      target_asset: targetAsset,
+      feature_version: featureVersion,
+      llm_enabled: llmEnabled,
+      train_window: trainWindow,
+      validation_window: validationWindow,
+      test_window: testWindow,
+      step_size: stepSize,
+      transaction_cost_bps: transactionCostBps,
+      ridge_alpha: ridgeAlpha,
+      threshold_grid: thresholdGrid,
+      minimum_signal_grid: minimumSignalGrid,
+      account_weight_grid: accountWeightGrid,
+      fallback_mode: fallbackMode,
+    } satisfies ModelTrainingJobRequest;
+    if (workflowMode === "saved_run_portfolio") {
+      startTraining.mutate({ ...common, component_run_ids: componentRunIds });
+      return;
+    }
+    if (workflowMode === "joint_portfolio") {
+      startTraining.mutate({
+        ...common,
+        selected_symbols: selectedSymbols,
+        topology_variants: topologyVariants,
+        model_families: modelFamilies,
+        narrative_feature_modes: llmEnabled ? narrativeFeatureModes : ["baseline"],
+      });
+      return;
+    }
+    startTraining.mutate(common);
+  };
+
+  return (
+    <section className="page-grid">
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <div>
+            <h2>Model Training Job Console</h2>
+            <p>
+              Start single-asset, saved-run portfolio, and joint portfolio model jobs from React. Jobs reuse existing
+              artifact formats and the shared scheduler/refresh lock.
+            </p>
+          </div>
+          <StatusPill label={activeJob?.status ? String(activeJob.status) : "No active job"} tone={activeJob?.status === "error" ? "severe" : activeJob?.status ? "ok" : "neutral"} />
+        </div>
+        <div className="filter-grid filter-grid--compact">
+          <label>
+            Admin unlock
+            <input
+              type="password"
+              placeholder="Admin password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+            />
+          </label>
+          <label>
+            Session status
+            <button className="action-button" type="button" aria-label={isUnlocked ? "Refresh admin token" : "Unlock admin writes"} onClick={() => unlock.mutate()} disabled={unlock.isPending}>
+              {isUnlocked ? "Refresh admin token" : "Unlock admin writes"}
+            </button>
+          </label>
+          <label>
+            Write state
+            <span className="form-readout">{isUnlocked ? "Unlocked for this browser session" : "Read-only until unlocked"}</span>
+          </label>
+          <label>
+            Active/latest job
+            <span className="form-readout">{activeJob?.job_id ? `${activeJob.job_id} (${activeJob.status})` : "none"}</span>
+          </label>
+        </div>
+        {mutationError ? <ErrorBlock error={mutationError} /> : null}
+      </article>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <h2>Training workflow</h2>
+          <StatusPill label={modelWorkflowLabel(workflowMode)} />
+        </div>
+        <div className="filter-grid filter-grid--compact">
+          {(["single_asset", "saved_run_portfolio", "joint_portfolio"] as ModelTrainingWorkflow[]).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              className="action-button"
+              aria-label={`Use ${modelWorkflowLabel(mode)} workflow`}
+              onClick={() => {
+                setWorkflowMode(mode);
+                if (mode === "single_asset") {
+                  setRunName("baseline-research-run");
+                  setFeatureVersion("v1");
+                } else if (mode === "saved_run_portfolio") {
+                  setRunName("portfolio-allocator-run");
+                } else {
+                  setRunName("joint-portfolio-run");
+                  setFeatureVersion(payload?.feature_versions[0] ?? "asset-v1");
+                }
+              }}
+            >
+              {modelWorkflowLabel(mode)}
+            </button>
+          ))}
+        </div>
+        {readiness.length ? <div className="empty-state">{readiness.join(" ")}</div> : null}
+      </article>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <h2>{modelWorkflowLabel(workflowMode)} configuration</h2>
+          <StatusPill label="Admin-only write" tone={isUnlocked ? "ok" : "warn"} />
+        </div>
+        <div className="filter-grid filter-grid--compact">
+          <label>
+            Run name
+            <input value={runName} onChange={(event) => setRunName(event.target.value)} disabled={!isUnlocked} />
+          </label>
+          {workflowMode === "single_asset" ? (
+            <label>
+              Target asset
+              <select value={targetAsset} onChange={(event) => setTargetAsset(event.target.value)} disabled={!isUnlocked}>
+                {(payload?.asset_options ?? []).map((asset) => (
+                  <option key={asset.symbol} value={asset.symbol}>{asset.label}</option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          {workflowMode !== "saved_run_portfolio" ? (
+            <label>
+              Feature version
+              <select value={featureVersion} onChange={(event) => setFeatureVersion(event.target.value)} disabled={!isUnlocked}>
+                {(workflowMode === "single_asset" ? ["v1", ...(payload?.feature_versions ?? [])] : payload?.feature_versions ?? ["asset-v1"]).map((version) => (
+                  <option key={version} value={version}>{version}</option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          <label>
+            Fallback mode
+            <select value={fallbackMode} onChange={(event) => setFallbackMode(event.target.value === "FLAT" ? "FLAT" : "SPY")} disabled={!isUnlocked || workflowMode === "single_asset"}>
+              <option value="SPY">SPY</option>
+              <option value="FLAT">FLAT</option>
+            </select>
+          </label>
+          <label className="checkbox-field">
+            <input type="checkbox" checked={llmEnabled} onChange={(event) => setLlmEnabled(event.target.checked)} disabled={!isUnlocked || workflowMode === "saved_run_portfolio"} />
+            Use semantic rows
+          </label>
+        </div>
+
+        {workflowMode === "saved_run_portfolio" ? (
+          <div className="filter-grid filter-grid--compact">
+            <label className="filter-grid__wide">
+              Component runs
+              <select multiple value={componentRunIds} onChange={(event) => setComponentRunIds(selectedOptions(event.currentTarget.selectedOptions))} disabled={!isUnlocked}>
+                {assetModelRuns.map((row) => (
+                  <option key={String(row.run_id)} value={String(row.run_id)}>{modelRunLabel(row)}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+        ) : null}
+
+        {workflowMode === "joint_portfolio" ? (
+          <div className="filter-grid filter-grid--compact">
+            <label className="filter-grid__wide">
+              Selected symbols
+              <textarea value={selectedSymbolsText} onChange={(event) => setSelectedSymbolsText(event.target.value)} disabled={!isUnlocked} />
+            </label>
+            <label>
+              Topology variants
+              <select multiple value={topologyVariants} onChange={(event) => setTopologyVariants(selectedOptions(event.currentTarget.selectedOptions))} disabled={!isUnlocked}>
+                {(payload?.topology_variants ?? []).map((topology) => <option key={topology} value={topology}>{topology}</option>)}
+              </select>
+            </label>
+            <label>
+              Model families
+              <select multiple value={modelFamilies} onChange={(event) => setModelFamilies(selectedOptions(event.currentTarget.selectedOptions))} disabled={!isUnlocked}>
+                {(payload?.model_families ?? []).map((family) => <option key={family} value={family}>{family}</option>)}
+              </select>
+            </label>
+            <label>
+              Narrative modes
+              <select multiple value={narrativeFeatureModes} onChange={(event) => setNarrativeFeatureModes(selectedOptions(event.currentTarget.selectedOptions))} disabled={!isUnlocked || !llmEnabled}>
+                {(payload?.narrative_feature_modes ?? []).map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+              </select>
+            </label>
+          </div>
+        ) : null}
+
+        {workflowMode !== "saved_run_portfolio" ? (
+          <div className="filter-grid filter-grid--compact">
+            <label>
+              Train window
+              <input type="number" min={20} value={trainWindow} onChange={(event) => setTrainWindow(Number(event.target.value))} disabled={!isUnlocked} />
+            </label>
+            <label>
+              Validation window
+              <input type="number" min={10} value={validationWindow} onChange={(event) => setValidationWindow(Number(event.target.value))} disabled={!isUnlocked} />
+            </label>
+            <label>
+              Test window
+              <input type="number" min={10} value={testWindow} onChange={(event) => setTestWindow(Number(event.target.value))} disabled={!isUnlocked} />
+            </label>
+            <label>
+              Step size
+              <input type="number" min={5} value={stepSize} onChange={(event) => setStepSize(Number(event.target.value))} disabled={!isUnlocked} />
+            </label>
+          </div>
+        ) : null}
+
+        <div className="filter-grid filter-grid--compact">
+          <label>
+            Transaction cost bps
+            <input type="number" min={0} step={0.5} value={transactionCostBps} onChange={(event) => setTransactionCostBps(Number(event.target.value))} disabled={!isUnlocked} />
+          </label>
+          {workflowMode === "single_asset" ? (
+            <label>
+              Ridge alpha
+              <input type="number" min={0} step={0.5} value={ridgeAlpha} onChange={(event) => setRidgeAlpha(Number(event.target.value))} disabled={!isUnlocked} />
+            </label>
+          ) : null}
+          {workflowMode !== "saved_run_portfolio" ? (
+            <>
+              <label>
+                Threshold grid
+                <input value={thresholdGrid} onChange={(event) => setThresholdGrid(event.target.value)} disabled={!isUnlocked} />
+              </label>
+              <label>
+                Min post grid
+                <input value={minimumSignalGrid} onChange={(event) => setMinimumSignalGrid(event.target.value)} disabled={!isUnlocked} />
+              </label>
+              <label>
+                Account weight grid
+                <input value={accountWeightGrid} onChange={(event) => setAccountWeightGrid(event.target.value)} disabled={!isUnlocked} />
+              </label>
+            </>
+          ) : null}
+          <label>
+            Start
+            <button className="action-button" type="button" aria-label="Start model training job" disabled={!isUnlocked || startTraining.isPending || readiness.length > 0} onClick={submit}>
+              Start model training job
+            </button>
+          </label>
+        </div>
+      </article>
+
+      {latestSuccessfulJob ? (
+        <article className="panel panel--wide">
+          <div className="panel-heading">
+            <div>
+              <h2>Latest training result</h2>
+              <p>
+                {formatValue(latestSuccessfulJob.run_name)} created {formatValue(latestSuccessfulJob.run_id)}.
+              </p>
+            </div>
+            <StatusPill label={formatValue(latestSuccessfulJob.workflow_mode)} tone="ok" />
+          </div>
+          <div className="metric-grid">
+            <MetricCard label="Run type" value={latestSuccessfulJob.run_type} />
+            <MetricCard label="Target asset" value={latestSuccessfulJob.target_asset} />
+            <MetricCard label="Total return" value={latestMetrics.total_return} />
+            <MetricCard label="Robust score" value={latestMetrics.robust_score} />
+          </div>
+          <div className="filter-grid filter-grid--compact">
+            <button className="action-button" type="button" onClick={() => onNavigate("runs")}>
+              Inspect in Run Explorer
+            </button>
+            <button
+              className="action-button"
+              type="button"
+              disabled={latestSuccessfulJob.run_type !== "portfolio_allocator"}
+              onClick={() => onNavigate("live")}
+            >
+              Configure in Live Ops
+            </button>
+          </div>
+        </article>
+      ) : null}
+
+      <article className="panel panel--wide chart-grid">
+        <div>
+          <h2>Recent model training jobs</h2>
+          <DataTable rows={recentJobs} emptyLabel="No model training jobs yet." />
+        </div>
+        <div>
+          <h2>Saved asset-model run options</h2>
+          <DataTable rows={assetModelRuns} emptyLabel="No asset-model runs are available yet." />
+        </div>
+      </article>
+    </section>
+  );
+}
+
 function DataAdminPage() {
   const queryClient = useQueryClient();
   const admin = useQuery({ queryKey: ["dataset-admin"], queryFn: api.datasetAdmin, refetchInterval: 10_000 });
@@ -1548,6 +1975,7 @@ export function App() {
       {activePage === "research" ? <ResearchPage /> : null}
       {activePage === "discovery" ? <DiscoveryPage /> : null}
       {activePage === "runs" ? <RunExplorerPage /> : null}
+      {activePage === "models" ? <ModelTrainingPage onNavigate={setActivePage} /> : null}
       {activePage === "data" ? <DataAdminPage /> : null}
       {activePage === "live" ? <LiveDecisionPage /> : null}
       {activePage === "paper" ? <PaperPerformancePage /> : null}
