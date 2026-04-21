@@ -1,10 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ComponentType } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import createPlotlyComponentModule from "react-plotly.js/factory";
 import Plotly from "plotly.js-dist-min";
 import type { Data, Frame, Layout } from "plotly.js";
-import { api, type PlotlyFigure, type RecordRow, type ResearchFilters } from "./api";
+import { api, type LiveOpsPayload, type PlotlyFigure, type RecordRow, type ResearchFilters } from "./api";
 
 type PlotComponentFactory = (plotly: unknown) => ComponentType<Record<string, unknown>>;
 const createPlotlyComponent = (
@@ -20,7 +20,7 @@ const pages: Array<{ key: PageKey; label: string; deck: string }> = [
   { key: "discovery", label: "Discovery", deck: "Tracked account ranking workspace" },
   { key: "runs", label: "Run Explorer", deck: "Saved model results and comparisons" },
   { key: "data", label: "Data Health", deck: "Freshness, completeness, and anomalies" },
-  { key: "live", label: "Live Decision", deck: "Current portfolio board" },
+  { key: "live", label: "Live Ops", deck: "Operate deployed portfolio" },
   { key: "paper", label: "Paper + Performance", deck: "Portfolio audit and drift" },
 ];
 
@@ -935,43 +935,267 @@ function DataHealthPage() {
 }
 
 function LiveDecisionPage() {
-  const live = useQuery({ queryKey: ["live"], queryFn: api.live, refetchInterval: 60_000 });
+  const queryClient = useQueryClient();
+  const live = useQuery({ queryKey: ["live-ops"], queryFn: api.liveOps, refetchInterval: 60_000 });
+  const [adminToken, setAdminToken] = useState(() =>
+    typeof window === "undefined" ? "" : window.sessionStorage.getItem("allcaps_admin_token") ?? "",
+  );
+  const [password, setPassword] = useState("");
+  const [selectedRunId, setSelectedRunId] = useState("");
+  const [fallbackMode, setFallbackMode] = useState<"SPY" | "FLAT">("SPY");
+  const [startingCash, setStartingCash] = useState(100000);
+  const [resetCash, setResetCash] = useState(100000);
+
+  const applyLivePayload = (payload: LiveOpsPayload) => {
+    queryClient.setQueryData(["live-ops"], payload);
+  };
+  const unlock = useMutation({
+    mutationFn: () => api.adminSession(password),
+    onSuccess: (payload) => {
+      setAdminToken(payload.token);
+      if (typeof window !== "undefined") {
+        window.sessionStorage.setItem("allcaps_admin_token", payload.token);
+      }
+      setPassword("");
+    },
+  });
+  const saveConfig = useMutation({
+    mutationFn: () => api.saveLiveConfig({ portfolio_run_id: selectedRunId, fallback_mode: fallbackMode }, adminToken),
+    onSuccess: applyLivePayload,
+  });
+  const capture = useMutation({
+    mutationFn: () => api.captureLive(adminToken),
+    onSuccess: applyLivePayload,
+  });
+  const paperAction = useMutation({
+    mutationFn: (request: { action: "enable" | "disable" | "reset" | "archive"; starting_cash?: number }) =>
+      api.paperCurrentAction(request, adminToken),
+    onSuccess: applyLivePayload,
+  });
+
+  useEffect(() => {
+    const config = live.data?.current_config ?? live.data?.seeded_config;
+    const nextRunId = String(config?.portfolio_run_id ?? live.data?.run_options[0]?.run_id ?? "");
+    const nextFallback = String(config?.fallback_mode ?? "SPY").toUpperCase() === "FLAT" ? "FLAT" : "SPY";
+    if (nextRunId && !selectedRunId) {
+      setSelectedRunId(nextRunId);
+    }
+    setFallbackMode(nextFallback);
+    const activeStartingCash = Number(live.data?.paper.active_config?.starting_cash ?? 100000);
+    if (Number.isFinite(activeStartingCash)) {
+      setResetCash(activeStartingCash);
+    }
+  }, [live.data, selectedRunId]);
+
   if (live.isLoading) {
-    return <LoadingBlock label="Loading live decision..." />;
+    return <LoadingBlock label="Loading live ops..." />;
   }
   if (live.error) {
     return <ErrorBlock error={live.error} />;
   }
 
-  if (!live.data?.configured) {
-    return (
-      <article className="panel panel--wide">
-        <div className="panel-heading">
-          <h2>Live monitor is not configured</h2>
-          <StatusPill label="Setup needed" tone="warn" />
-        </div>
-        {(live.data?.errors ?? []).map((error) => (
-          <p key={error}>{error}</p>
-        ))}
-      </article>
-    );
-  }
-
-  const decision = live.data.decision ?? {};
+  const payload = live.data;
+  const decision = payload?.decision ?? {};
+  const activePaper = payload?.paper.active_config ?? null;
+  const isUnlocked = Boolean(adminToken);
+  const mutationError = unlock.error ?? saveConfig.error ?? capture.error ?? paperAction.error;
   return (
     <section className="page-grid">
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <div>
+            <h2>Live Ops Console</h2>
+            <p>
+              Configure the pinned joint portfolio run, capture stored-data live snapshots, and manage the matching
+              paper portfolio. Dataset refreshes and model training remain in Streamlit for now.
+            </p>
+          </div>
+          <StatusPill label={payload?.admin.capture_scope === "stored_data_only" ? "Stored-data capture only" : "Live ops"} />
+        </div>
+        <div className="filter-grid filter-grid--compact">
+          <label>
+            Admin unlock
+            <input
+              type="password"
+              placeholder={payload?.admin.mode === "private" ? "Private mode: password optional" : "Admin password"}
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+            />
+          </label>
+          <label>
+            Session status
+            <button
+              className="action-button"
+              type="button"
+              aria-label={isUnlocked ? "Refresh admin token" : "Unlock admin writes"}
+              onClick={() => unlock.mutate()}
+              disabled={unlock.isPending}
+            >
+              {isUnlocked ? "Refresh admin token" : "Unlock admin writes"}
+            </button>
+          </label>
+          <label>
+            Write state
+            <span className="form-readout">{isUnlocked ? "Unlocked for this browser session" : "Read-only until unlocked"}</span>
+          </label>
+          <label>
+            App mode
+            <span className="form-readout">{payload?.admin.mode ?? "unknown"}</span>
+          </label>
+        </div>
+        {mutationError ? <ErrorBlock error={mutationError} /> : null}
+      </article>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <h2>Pinned portfolio run</h2>
+          <StatusPill label={payload?.configured ? "Configured" : "Setup needed"} tone={payload?.configured ? "ok" : "warn"} />
+        </div>
+        {(payload?.errors ?? []).map((error) => (
+          <p key={error}>{error}</p>
+        ))}
+        {payload?.run_options.length ? (
+          <div className="filter-grid filter-grid--compact">
+            <label>
+              Pinned joint portfolio run
+              <select value={selectedRunId} onChange={(event) => setSelectedRunId(event.target.value)} disabled={!isUnlocked}>
+                {payload.run_options.map((run) => (
+                  <option key={String(run.run_id)} value={String(run.run_id)}>
+                    {String(run.run_name ?? run.run_id)} | {String(run.deployment_variant ?? "n/a")} |{" "}
+                    {String(run.selected_symbols ?? "n/a")}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Fallback mode
+              <select value={fallbackMode} onChange={(event) => setFallbackMode(event.target.value as "SPY" | "FLAT")} disabled={!isUnlocked}>
+                <option value="SPY">SPY</option>
+                <option value="FLAT">FLAT</option>
+              </select>
+            </label>
+            <label>
+              Config action
+              <button
+                className="action-button"
+                type="button"
+                aria-label="Save pinned portfolio run"
+                disabled={!isUnlocked || !selectedRunId || saveConfig.isPending}
+                onClick={() => saveConfig.mutate()}
+              >
+                Save pinned portfolio run
+              </button>
+            </label>
+            <label>
+              Capture action
+              <button className="action-button" type="button" aria-label="Capture current board" disabled={!isUnlocked || capture.isPending} onClick={() => capture.mutate()}>
+                Capture current board
+              </button>
+            </label>
+          </div>
+        ) : (
+          <div className="empty-state">Save a joint portfolio model run before configuring Live Ops.</div>
+        )}
+        <DataTable rows={payload?.run_options ?? []} emptyLabel="No joint portfolio runs returned." />
+      </article>
+
       <div className="metric-grid">
         <MetricCard label="Winner" value={decision.winning_asset ?? "FLAT"} />
         <MetricCard label="Decision source" value={decision.decision_source} />
         <MetricCard label="Winner score" value={decision.winner_score} />
         <MetricCard label="Eligible assets" value={decision.eligible_asset_count} />
       </div>
+
       <article className="panel panel--wide">
         <div className="panel-heading">
           <h2>Current ranked board</h2>
-          <StatusPill label="Read-only" />
+          <StatusPill label={payload?.warnings.length ? `${payload.warnings.length} warning(s)` : "Current"} />
         </div>
-        <DataTable rows={live.data.board} />
+        {(payload?.warnings ?? []).map((warning) => (
+          <p key={warning}>{warning}</p>
+        ))}
+        <DataTable rows={payload?.board ?? []} />
+      </article>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <h2>Capture status</h2>
+          <StatusPill label="No ingestion refresh" />
+        </div>
+        <div className="metric-grid">
+          <MetricCard label="Asset rows persisted" value={payload?.capture_result.persisted_assets ?? 0} />
+          <MetricCard label="Decision rows persisted" value={payload?.capture_result.persisted_decisions ?? 0} />
+          <MetricCard label="Paper decisions captured" value={payload?.capture_result.captured ?? 0} />
+          <MetricCard label="Paper decisions settled" value={payload?.capture_result.settled ?? 0} />
+        </div>
+      </article>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <h2>Paper portfolio controls</h2>
+          <StatusPill label={activePaper ? (activePaper.enabled ? "Enabled" : "Disabled") : "Not enabled"} tone={activePaper ? "ok" : "warn"} />
+        </div>
+        <div className="metric-grid">
+          <MetricCard label="Paper portfolio" value={activePaper?.paper_portfolio_id ?? "none"} />
+          <MetricCard label="Starting cash" value={activePaper?.starting_cash ?? startingCash} />
+          <MetricCard label="Trade cost bps" value={activePaper?.transaction_cost_bps ?? "n/a"} />
+          <MetricCard label="Archived portfolios" value={(payload?.paper.portfolios ?? []).filter((row) => row.archived_at).length} />
+        </div>
+        <div className="filter-grid filter-grid--compact">
+          <label>
+            Starting cash
+            <input type="number" min={1000} step={1000} value={startingCash} onChange={(event) => setStartingCash(Number(event.target.value))} disabled={!isUnlocked} />
+          </label>
+          <label>
+            Enable
+            <button className="action-button" type="button" aria-label="Enable paper trading" disabled={!isUnlocked || paperAction.isPending} onClick={() => paperAction.mutate({ action: "enable", starting_cash: startingCash })}>
+              Enable paper trading
+            </button>
+          </label>
+          <label>
+            Toggle
+            <button
+              className="action-button"
+              type="button"
+              aria-label={activePaper?.enabled ? "Disable paper trading" : "Enable existing portfolio"}
+              disabled={!isUnlocked || !activePaper || paperAction.isPending}
+              onClick={() => paperAction.mutate({ action: activePaper?.enabled ? "disable" : "enable", starting_cash: Number(activePaper?.starting_cash ?? startingCash) })}
+            >
+              {activePaper?.enabled ? "Disable paper trading" : "Enable existing portfolio"}
+            </button>
+          </label>
+          <label>
+            Archive
+            <button className="action-button action-button--danger" type="button" aria-label="Archive current portfolio" disabled={!isUnlocked || !activePaper || paperAction.isPending} onClick={() => paperAction.mutate({ action: "archive" })}>
+              Archive current portfolio
+            </button>
+          </label>
+          <label>
+            Reset cash
+            <input type="number" min={1000} step={1000} value={resetCash} onChange={(event) => setResetCash(Number(event.target.value))} disabled={!isUnlocked || !activePaper} />
+          </label>
+          <label>
+            Reset
+            <button className="action-button" type="button" aria-label="Reset portfolio" disabled={!isUnlocked || paperAction.isPending} onClick={() => paperAction.mutate({ action: "reset", starting_cash: resetCash })}>
+              Reset portfolio
+            </button>
+          </label>
+        </div>
+        <DataTable rows={payload?.paper.portfolios ?? []} emptyLabel="No paper portfolios have been created yet." />
+      </article>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <h2>Recent live decisions</h2>
+        </div>
+        <DataTable rows={payload?.decision_history ?? []} emptyLabel="No persisted live decision history yet." />
+      </article>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <h2>Recent paper journal</h2>
+        </div>
+        <DataTable rows={payload?.paper.decision_journal ?? []} emptyLabel="No paper decisions captured yet." />
       </article>
     </section>
   );

@@ -101,6 +101,55 @@ export type LivePayload = {
   board: RecordRow[];
 };
 
+export type AdminSessionPayload = {
+  token: string;
+  token_type: string;
+  expires_at: string;
+  expires_in_seconds: number;
+  mode: string;
+};
+
+export type LiveConfigSaveRequest = {
+  portfolio_run_id: string;
+  fallback_mode: "SPY" | "FLAT";
+};
+
+export type LiveCapturePayload = {
+  persisted_assets: number;
+  persisted_decisions: number;
+  captured: number;
+  settled: number;
+  performance_persisted: boolean;
+};
+
+export type PaperCurrentActionRequest = {
+  action: "enable" | "disable" | "reset" | "archive";
+  starting_cash?: number;
+};
+
+export type LiveOpsPayload = LivePayload & {
+  admin: {
+    mode: string;
+    write_requires_unlock: boolean;
+    capture_scope: string;
+  };
+  current_config: RecordRow | null;
+  seeded_config: RecordRow | null;
+  run_options: RecordRow[];
+  asset_history: RecordRow[];
+  decision_history: RecordRow[];
+  paper: {
+    current_config: RecordRow | null;
+    active_config: RecordRow | null;
+    portfolios: RecordRow[];
+    decision_journal: RecordRow[];
+    trade_ledger: RecordRow[];
+    equity_curve: RecordRow[];
+    benchmark_curve: RecordRow[];
+  };
+  capture_result: LiveCapturePayload;
+};
+
 export type PaperPortfoliosPayload = {
   current_config: RecordRow | null;
   portfolios: RecordRow[];
@@ -225,9 +274,34 @@ async function getJson<T>(path: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function postJson<T>(path: string, payload: unknown = {}, token?: string): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    let detail = `${response.status} ${response.statusText}`;
+    try {
+      const body = (await response.json()) as { detail?: unknown };
+      if (body.detail) {
+        detail = Array.isArray(body.detail) ? body.detail.join("; ") : String(body.detail);
+      }
+    } catch {
+      // Keep the HTTP status fallback when the response is not JSON.
+    }
+    throw new Error(`API request failed: ${detail}`);
+  }
+  return response.json() as Promise<T>;
+}
+
 export const api = {
   baseUrl: API_BASE_URL,
   status: () => getJson<StatusPayload>("/api/status"),
+  adminSession: (password = "") => postJson<AdminSessionPayload>("/api/admin/session", { password }),
   health: () => getJson<HealthPayload>("/api/datasets/health"),
   runs: () => getJson<RunsPayload>("/api/runs"),
   runDetail: (runId: string, options: { variantName?: string; sessionDate?: string } = {}) => {
@@ -254,6 +328,10 @@ export const api = {
   researchExportUrl: (filters?: ResearchFilters) => `${API_BASE_URL}/api/research/export${researchQuery(filters)}`,
   discovery: () => getJson<DiscoveryPayload>("/api/discovery"),
   live: () => getJson<LivePayload>("/api/live/current"),
+  liveOps: () => getJson<LiveOpsPayload>("/api/live/ops"),
+  saveLiveConfig: (request: LiveConfigSaveRequest, token: string) => postJson<LiveOpsPayload>("/api/live/config", request, token),
+  captureLive: (token: string) => postJson<LiveOpsPayload>("/api/live/capture", {}, token),
+  paperCurrentAction: (request: PaperCurrentActionRequest, token: string) => postJson<LiveOpsPayload>("/api/paper/current", request, token),
   paperPortfolios: () => getJson<PaperPortfoliosPayload>("/api/paper/portfolios"),
   performance: (paperPortfolioId: string) => getJson<PerformancePayload>(`/api/performance/${paperPortfolioId}`),
 };

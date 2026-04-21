@@ -571,10 +571,29 @@ class ApiContractTests(unittest.TestCase):
                         "variant_name": "per_asset_hybrid",
                         "topology": "per_asset",
                         "narrative_feature_mode": "hybrid",
+                        "selected_symbols": ["SPY", "QQQ"],
+                        "threshold": 0.001,
+                        "min_post_count": 1,
                         "model_family": "ridge",
                         "models": {
-                            "SPY": {"feature_names": ["post_count", "semantic_relevance_avg"]},
-                            "QQQ": {"feature_names": ["post_count", "policy_trade_count"]},
+                            "SPY": {
+                                "model_version": "spy-live-test",
+                                "feature_names": ["post_count", "semantic_relevance_avg"],
+                                "intercept": 0.0,
+                                "coefficients": [0.004, 0.0],
+                                "means": [0.0, 0.0],
+                                "stds": [1.0, 1.0],
+                                "residual_std": 0.05,
+                            },
+                            "QQQ": {
+                                "model_version": "qqq-live-test",
+                                "feature_names": ["post_count", "policy_trade_count"],
+                                "intercept": 0.0,
+                                "coefficients": [0.006, 0.0],
+                                "means": [0.0, 0.0],
+                                "stds": [1.0, 1.0],
+                                "residual_std": 0.05,
+                            },
                         },
                     },
                 },
@@ -698,6 +717,59 @@ class ApiContractTests(unittest.TestCase):
                 columns=PAPER_BENCHMARK_CURVE_COLUMNS,
             ),
         )
+
+    def _admin_token(self) -> str:
+        response = self.client.post("/api/admin/session", json={})
+        self.assertEqual(response.status_code, 200)
+        return str(response.json()["token"])
+
+    def _save_live_ops_fixture(self) -> None:
+        self._save_portfolio_run_artifacts()
+        signal_date = pd.Timestamp("2025-02-04")
+        next_date = pd.Timestamp("2025-02-05")
+        self.store.save_frame(
+            "asset_session_features",
+            pd.DataFrame(
+                [
+                    {
+                        "asset_symbol": "SPY",
+                        "signal_session_date": signal_date,
+                        "next_session_date": next_date,
+                        "post_count": 3,
+                        "semantic_relevance_avg": 0.5,
+                        "policy_trade_count": 0.0,
+                        "target_available": True,
+                        "tradeable": True,
+                        "next_session_open": 100.0,
+                        "next_session_close": 101.0,
+                        "next_session_open_ts": pd.Timestamp("2025-02-05 14:30:00", tz="UTC"),
+                    },
+                    {
+                        "asset_symbol": "QQQ",
+                        "signal_session_date": signal_date,
+                        "next_session_date": next_date,
+                        "post_count": 2,
+                        "semantic_relevance_avg": 0.1,
+                        "policy_trade_count": 1.0,
+                        "target_available": True,
+                        "tradeable": True,
+                        "next_session_open": 200.0,
+                        "next_session_close": 204.0,
+                        "next_session_open_ts": pd.Timestamp("2025-02-05 14:30:00", tz="UTC"),
+                    },
+                ],
+            ),
+        )
+        self.store.save_frame(
+            "asset_daily",
+            pd.DataFrame(
+                [
+                    {"symbol": "SPY", "trade_date": next_date, "open": 100.0, "close": 101.0},
+                    {"symbol": "QQQ", "trade_date": next_date, "open": 200.0, "close": 204.0},
+                ],
+            ),
+        )
+        self.store.save_frame("asset_post_mappings", pd.DataFrame())
 
     def test_status_reports_source_mode_and_state_paths(self) -> None:
         self._save_truth_posts()
@@ -855,6 +927,105 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(live_response.status_code, 200)
         self.assertFalse(live_response.json()["configured"])
         self.assertIn("No live monitor config", live_response.json()["errors"][0])
+
+    def test_admin_session_auth_modes_and_protected_writes(self) -> None:
+        private_response = self.client.post("/api/admin/session", json={})
+        self.assertEqual(private_response.status_code, 200)
+        self.assertIn("token", private_response.json())
+        protected_response = self.client.post("/api/live/config", json={"portfolio_run_id": "missing", "fallback_mode": "SPY"})
+        self.assertEqual(protected_response.status_code, 401)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            public_settings = AppSettings(base_dir=Path(temp_dir), public_mode=True, admin_password="secret")
+            public_client = TestClient(create_app(settings=public_settings, store=DuckDBStore(public_settings)))
+            bad = public_client.post("/api/admin/session", json={"password": "wrong"})
+            good = public_client.post("/api/admin/session", json={"password": "secret"})
+            self.assertEqual(bad.status_code, 401)
+            self.assertEqual(good.status_code, 200)
+
+    def test_live_ops_config_save_validates_and_returns_payload(self) -> None:
+        self._save_portfolio_run_artifacts()
+        token = self._admin_token()
+
+        bad = self.client.post(
+            "/api/live/config",
+            json={"portfolio_run_id": "missing", "fallback_mode": "SPY"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        good = self.client.post(
+            "/api/live/config",
+            json={"portfolio_run_id": "portfolio-run-1", "fallback_mode": "FLAT"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        ops = self.client.get("/api/live/ops")
+
+        self.assertEqual(bad.status_code, 400)
+        self.assertEqual(good.status_code, 200)
+        self.assertEqual(good.json()["current_config"]["portfolio_run_id"], "portfolio-run-1")
+        self.assertEqual(good.json()["current_config"]["fallback_mode"], "FLAT")
+        self.assertEqual(ops.status_code, 200)
+        self.assertEqual(ops.json()["run_options"][0]["run_id"], "portfolio-run-1")
+
+    def test_live_ops_capture_persists_snapshots_without_refresh(self) -> None:
+        self._save_live_ops_fixture()
+        token = self._admin_token()
+        self.client.post(
+            "/api/live/config",
+            json={"portfolio_run_id": "portfolio-run-1", "fallback_mode": "SPY"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        response = self.client.post("/api/live/capture", json={}, headers={"Authorization": f"Bearer {token}"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["capture_result"]["persisted_assets"], 2)
+        self.assertEqual(payload["capture_result"]["persisted_decisions"], 1)
+        self.assertFalse(self.store.read_frame("live_asset_snapshots").empty)
+        self.assertFalse(self.store.read_frame("live_decision_snapshots").empty)
+        self.assertTrue(self.store.read_frame("refresh_history").empty)
+
+    def test_paper_current_actions_manage_active_portfolio(self) -> None:
+        self._save_live_ops_fixture()
+        token = self._admin_token()
+        self.client.post(
+            "/api/live/config",
+            json={"portfolio_run_id": "portfolio-run-1", "fallback_mode": "SPY"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        enabled = self.client.post(
+            "/api/paper/current",
+            json={"action": "enable", "starting_cash": 123000},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        disabled = self.client.post(
+            "/api/paper/current",
+            json={"action": "disable"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        reset = self.client.post(
+            "/api/paper/current",
+            json={"action": "reset", "starting_cash": 125000},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        archived = self.client.post(
+            "/api/paper/current",
+            json={"action": "archive"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        self.assertEqual(enabled.status_code, 200)
+        self.assertEqual(enabled.json()["paper"]["active_config"]["starting_cash"], 123000.0)
+        self.assertEqual(disabled.status_code, 200)
+        self.assertFalse(disabled.json()["paper"]["active_config"]["enabled"])
+        self.assertEqual(reset.status_code, 200)
+        self.assertEqual(reset.json()["paper"]["active_config"]["starting_cash"], 125000.0)
+        self.assertEqual(archived.status_code, 200)
+        self.assertIsNone(archived.json()["paper"]["active_config"])
+        registry = self.store.read_frame("paper_portfolio_registry")
+        self.assertGreaterEqual(len(registry), 2)
+        self.assertTrue(registry["archived_at"].notna().any())
 
     def test_run_compare_endpoint_handles_empty_store(self) -> None:
         response = self.client.get("/api/runs/compare")
