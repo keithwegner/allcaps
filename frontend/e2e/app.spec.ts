@@ -56,7 +56,7 @@ const healthPayload = {
 };
 
 const runsPayload = {
-  count: 1,
+  count: 2,
   runs: [
     {
       run_id: "run-portfolio-1",
@@ -65,7 +65,147 @@ const runsPayload = {
       allocator_mode: "joint_model",
       target_asset: "PORTFOLIO",
     },
+    {
+      run_id: "run-asset-1",
+      run_name: "SPY Baseline",
+      run_type: "asset_model",
+      allocator_mode: "",
+      target_asset: "SPY",
+    },
   ],
+};
+
+const runDetailPayload = {
+  found: true,
+  run_id: "run-portfolio-1",
+  errors: [],
+  run: {
+    run_id: "run-portfolio-1",
+    run_name: "Portfolio Alpha",
+    target_asset: "PORTFOLIO",
+  },
+  settings: {
+    run_type: "portfolio_allocator",
+    allocator_mode: "joint_model",
+    target_asset: "PORTFOLIO",
+    deployment_variant: "per_asset_hybrid",
+    deployment_narrative_feature_mode: "hybrid",
+  },
+  metrics: {
+    total_return: 0.12,
+    robust_score: 2.1,
+    max_drawdown: -0.025,
+    trade_count: 8,
+  },
+  selected_params: {
+    deployment_variant: "per_asset_hybrid",
+  },
+  model_artifact: {
+    feature_count: 12,
+    model_version: "portfolio-bundle",
+  },
+  charts: {
+    equity: {
+      data: [{ type: "scatter", mode: "lines", x: ["2026-04-17"], y: [1.12], name: "Strategy equity" }],
+      layout: { title: { text: "Walk-forward out-of-sample equity curve" } },
+    },
+    benchmarks: {
+      data: [{ type: "scatter", mode: "lines", x: ["2026-04-17"], y: [1.08], name: "always_long_spy" }],
+      layout: { title: { text: "Strategy vs. benchmark equity curves" } },
+    },
+    diagnostics: {
+      data: [{ type: "scatter", mode: "lines+markers", x: ["2026-04-17"], y: [0.024], name: "Winner score" }],
+      layout: { title: { text: "Portfolio allocator diagnostics" } },
+    },
+  },
+  tables: {
+    benchmarks: [
+      { benchmark_name: "strategy", total_return: 0.12 },
+      { benchmark_name: "always_long_spy", total_return: 0.08 },
+    ],
+    variant_summary: [
+      {
+        variant_name: "per_asset_baseline",
+        topology: "per_asset",
+        narrative_feature_mode: "baseline",
+        validation_robust_score: 1.1,
+        deployment_winner: false,
+      },
+      {
+        variant_name: "per_asset_hybrid",
+        topology: "per_asset",
+        narrative_feature_mode: "hybrid",
+        validation_robust_score: 1.6,
+        deployment_winner: true,
+      },
+    ],
+    narrative_lift: [
+      {
+        variant_name: "per_asset_hybrid",
+        topology: "per_asset",
+        narrative_feature_mode: "hybrid",
+        validation_robust_lift: 0.5,
+      },
+    ],
+    feature_family_summary: [
+      {
+        feature_family: "semantic",
+        feature_count: 4,
+        total_importance: 0.72,
+      },
+      {
+        feature_family: "policy",
+        feature_count: 2,
+        total_importance: 0.22,
+      },
+    ],
+    windows: [{ variant_name: "per_asset_hybrid", window_id: 1, model_family: "ridge" }],
+    feature_importance: [{ feature_name: "semantic_relevance_avg", importance: 0.72 }],
+    diagnostics: [{ signal_session_date: "2026-04-17", winner_score: 0.024 }],
+    trades: [{ next_session_date: "2026-04-20", selected_asset: "QQQ", net_return: 0.014 }],
+    candidate_predictions: [{ asset_symbol: "QQQ", expected_return_score: 0.024 }],
+  },
+  row_counts: {
+    trades: 8,
+    predictions: 8,
+    candidate_predictions: 16,
+  },
+  session_options: [{ value: "2026-04-17", label: "2026-04-17 | winner QQQ | score +2.400% | runner-up SPY" }],
+  selected_session: {
+    session_date: "2026-04-17",
+    decision: [{ signal_session_date: "2026-04-17", winning_asset: "QQQ", winner_score: 0.024 }],
+    candidates: [
+      { asset_symbol: "QQQ", expected_return_score: 0.024, is_winner: true },
+      { asset_symbol: "SPY", expected_return_score: 0.012, is_winner: false },
+    ],
+    feature_contributions: [],
+    post_attribution: [],
+    account_attribution: [],
+  },
+  leakage_audit: {
+    overall_pass: true,
+  },
+};
+
+const runComparisonPayload = {
+  ready: true,
+  base_run_id: "run-portfolio-1",
+  run_ids: ["run-portfolio-1", "run-asset-1"],
+  missing_run_ids: [],
+  scorecard: [
+    { run_id: "run-portfolio-1", run_name: "Portfolio Alpha", robust_score: 2.1, delta_robust_score_vs_base: 0 },
+    { run_id: "run-asset-1", run_name: "SPY Baseline", robust_score: 1.2, delta_robust_score_vs_base: -0.9 },
+  ],
+  setting_diffs: [{ setting: "run_type", "run-portfolio-1": "portfolio_allocator", "run-asset-1": "asset_model" }],
+  feature_diffs: [{ run_id: "run-portfolio-1", feature_count: 12, semantic_features: 4 }],
+  benchmark_deltas: [{ run_id: "run-asset-1", benchmark_name: "always_long_spy", delta_total_return_vs_base: -0.02 }],
+  change_notes: ["run-asset-1: robust score -0.900; total return -4.00%; run type portfolio_allocator -> asset_model."],
+  charts: {
+    equity: {
+      data: [{ type: "scatter", mode: "lines", x: ["2026-04-17"], y: [1.12], name: "run-portfolio-1" }],
+      layout: { title: { text: "Selected run equity curves" } },
+    },
+  },
 };
 
 const researchPayload = {
@@ -304,6 +444,8 @@ async function mockApi(page: Page) {
   await fulfillJson(page, "/api/status", statusPayload);
   await fulfillJson(page, "/api/datasets/health", healthPayload);
   await fulfillJson(page, "/api/runs", runsPayload);
+  await fulfillJson(page, "/api/runs/run-portfolio-1**", runDetailPayload);
+  await fulfillJson(page, "/api/runs/compare**", runComparisonPayload);
   await fulfillJson(page, "/api/research**", researchPayload);
   await fulfillJson(page, "/api/live/current", livePayload);
   await fulfillJson(page, "/api/paper/portfolios", portfoliosPayload);
@@ -349,6 +491,27 @@ test("shows the migrated research workspace with narratives and export", async (
   await expect(page.getByRole("heading", { name: "Structured narrative inspection" })).toBeVisible();
   await expect(page.getByRole("cell", { name: "markets" }).first()).toBeVisible();
   await expect(page.getByText("heuristic-fallback")).toBeVisible();
+});
+
+test("shows the migrated run explorer with detail and comparison tables", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: /Run Explorer/ }).click();
+
+  await expect(page.getByRole("heading", { name: "Saved model results and comparisons" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Run Explorer" })).toBeVisible();
+  await expect(page.getByLabel("Selected run")).toHaveValue("run-portfolio-1");
+  await expect(page.getByRole("heading", { name: "Run summary" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "per_asset_hybrid" }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Variant comparison" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "hybrid" }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Narrative lift" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Feature-family impact" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "semantic" }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Session explainability" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "QQQ" }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Compare saved runs" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "SPY Baseline" })).toBeVisible();
+  await expect(page.getByText("run-asset-1: robust score")).toBeVisible();
 });
 
 test("shows the current live decision and candidate board", async ({ page }) => {

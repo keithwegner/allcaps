@@ -33,6 +33,7 @@ from .performance import (
 )
 from .runtime import missing_core_datasets
 from .research_workspace import build_research_workspace, detect_source_mode
+from .run_explorer import build_run_comparison_payload, build_run_detail_payload
 from .storage import DuckDBStore
 
 
@@ -218,6 +219,30 @@ def create_app(settings: AppSettings | None = None, store: DuckDBStore | None = 
             "count": int(len(saved_runs)),
             "runs": _frame_records(saved_runs),
         }
+
+    @app.get("/api/runs/compare")
+    def compare_runs(
+        run_ids: list[str] | None = Query(default=None),
+        base_run_id: str | None = None,
+    ) -> dict[str, Any]:
+        return build_run_comparison_payload(
+            experiment_store,
+            run_ids or [],
+            base_run_id=base_run_id,
+        )
+
+    @app.get("/api/runs/{run_id}")
+    def run_detail(
+        run_id: str,
+        variant_name: str | None = None,
+        session_date: str | None = None,
+    ) -> dict[str, Any]:
+        return build_run_detail_payload(
+            experiment_store,
+            run_id,
+            variant_name=variant_name,
+            session_date=session_date,
+        )
 
     @app.get("/api/live/current")
     def live_current() -> dict[str, Any]:

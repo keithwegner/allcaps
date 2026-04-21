@@ -12,11 +12,12 @@ const createPlotlyComponent = (
 ) as PlotComponentFactory;
 const Plot = createPlotlyComponent(Plotly);
 
-type PageKey = "overview" | "research" | "data" | "live" | "paper";
+type PageKey = "overview" | "research" | "runs" | "data" | "live" | "paper";
 
 const pages: Array<{ key: PageKey; label: string; deck: string }> = [
   { key: "overview", label: "Overview", deck: "API status and migration posture" },
   { key: "research", label: "Research", deck: "Sentiment, narratives, and export pack" },
+  { key: "runs", label: "Run Explorer", deck: "Saved model results and comparisons" },
   { key: "data", label: "Data Health", deck: "Freshness, completeness, and anomalies" },
   { key: "live", label: "Live Decision", deck: "Current portfolio board" },
   { key: "paper", label: "Paper + Performance", deck: "Portfolio audit and drift" },
@@ -409,6 +410,353 @@ function ResearchPage() {
   );
 }
 
+function RunExplorerPage() {
+  const runs = useQuery({ queryKey: ["runs"], queryFn: api.runs });
+  const [selectedRunId, setSelectedRunId] = useState("");
+  const [runTypeFilter, setRunTypeFilter] = useState("All");
+  const [allocatorFilter, setAllocatorFilter] = useState("All");
+  const [assetFilter, setAssetFilter] = useState("All");
+  const [search, setSearch] = useState("");
+  const [variantName, setVariantName] = useState("");
+  const [sessionDate, setSessionDate] = useState("");
+  const [compareIds, setCompareIds] = useState<string[]>([]);
+  const [baseRunId, setBaseRunId] = useState("");
+
+  const allRuns = runs.data?.runs ?? [];
+  const runTypes = useMemo(() => ["All", ...Array.from(new Set(allRuns.map((row) => String(row.run_type ?? "asset_model"))))], [allRuns]);
+  const allocatorModes = useMemo(() => ["All", ...Array.from(new Set(allRuns.map((row) => String(row.allocator_mode ?? "")).filter(Boolean)))], [allRuns]);
+  const targetAssets = useMemo(() => ["All", ...Array.from(new Set(allRuns.map((row) => String(row.target_asset ?? "SPY"))))], [allRuns]);
+  const filteredRuns = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return allRuns.filter((row) => {
+      if (runTypeFilter !== "All" && String(row.run_type ?? "asset_model") !== runTypeFilter) {
+        return false;
+      }
+      if (allocatorFilter !== "All" && String(row.allocator_mode ?? "") !== allocatorFilter) {
+        return false;
+      }
+      if (assetFilter !== "All" && String(row.target_asset ?? "SPY") !== assetFilter) {
+        return false;
+      }
+      if (!query) {
+        return true;
+      }
+      return `${row.run_id ?? ""} ${row.run_name ?? ""} ${row.target_asset ?? ""}`.toLowerCase().includes(query);
+    });
+  }, [allRuns, allocatorFilter, assetFilter, runTypeFilter, search]);
+
+  const activeRunId = selectedRunId || String(filteredRuns[0]?.run_id ?? allRuns[0]?.run_id ?? "");
+  const detail = useQuery({
+    queryKey: ["run-detail", activeRunId, variantName, sessionDate],
+    queryFn: () => api.runDetail(activeRunId, { variantName, sessionDate }),
+    enabled: Boolean(activeRunId),
+  });
+
+  const defaultCompareIds = useMemo(() => {
+    const ids = allRuns.map((row) => String(row.run_id ?? "")).filter(Boolean);
+    if (activeRunId && !ids.includes(activeRunId)) {
+      return [activeRunId];
+    }
+    return ids.slice(0, Math.min(2, ids.length));
+  }, [activeRunId, allRuns]);
+  const comparisonRunIds = compareIds.length ? compareIds : defaultCompareIds;
+  const activeBaseRunId = baseRunId || comparisonRunIds[0] || "";
+  const comparison = useQuery({
+    queryKey: ["run-comparison", comparisonRunIds, activeBaseRunId],
+    queryFn: () => api.runComparison(comparisonRunIds, activeBaseRunId),
+    enabled: comparisonRunIds.length > 0,
+  });
+
+  if (runs.isLoading) {
+    return <LoadingBlock label="Loading saved runs..." />;
+  }
+  if (runs.error) {
+    return <ErrorBlock error={runs.error} />;
+  }
+  if (!allRuns.length) {
+    return <div className="empty-state">No saved runs have been created yet. Train models in Streamlit first, then return here.</div>;
+  }
+
+  const payload = detail.data;
+  const variantRows = payload?.tables.variant_summary ?? [];
+  const sessionOptions = payload?.session_options ?? [];
+
+  return (
+    <section className="page-grid">
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Read-only migration slice</p>
+            <h2>Run Explorer</h2>
+          </div>
+          <StatusPill label={`${filteredRuns.length} visible runs`} tone="ok" />
+        </div>
+        <div className="filter-grid filter-grid--compact">
+          <label>
+            Run type
+            <select value={runTypeFilter} onChange={(event) => setRunTypeFilter(event.target.value)}>
+              {runTypes.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Allocator mode
+            <select value={allocatorFilter} onChange={(event) => setAllocatorFilter(event.target.value)}>
+              {allocatorModes.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Target asset
+            <select value={assetFilter} onChange={(event) => setAssetFilter(event.target.value)}>
+              {targetAssets.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Search
+            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Run name, id, or asset" />
+          </label>
+          <label>
+            Selected run
+            <select
+              value={activeRunId}
+              onChange={(event) => {
+                setSelectedRunId(event.target.value);
+                setVariantName("");
+                setSessionDate("");
+              }}
+            >
+              {filteredRuns.map((row) => (
+                <option key={String(row.run_id)} value={String(row.run_id)}>
+                  {String(row.run_name ?? row.run_id)} ({String(row.target_asset ?? "SPY")})
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Variant
+            <select value={variantName} onChange={(event) => setVariantName(event.target.value)}>
+              <option value="">Deployment default</option>
+              {variantRows.map((row) => (
+                <option key={String(row.variant_name)} value={String(row.variant_name)}>
+                  {String(row.variant_name)} {row.deployment_winner ? "(winner)" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Session inspector
+            <select value={sessionDate} onChange={(event) => setSessionDate(event.target.value)}>
+              <option value="">Latest session</option>
+              {sessionOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </article>
+
+      {detail.isLoading ? <LoadingBlock label="Loading run detail..." /> : null}
+      {detail.error ? <ErrorBlock error={detail.error} /> : null}
+      {payload && !payload.found ? <div className="empty-state">{payload.errors.join(" ")}</div> : null}
+      {payload?.found ? (
+        <>
+          <div className="metric-grid">
+            <MetricCard label="Total return" value={payload.metrics.total_return ?? 0} />
+            <MetricCard label="Robust score" value={payload.metrics.robust_score ?? 0} />
+            <MetricCard label="Max drawdown" value={payload.metrics.max_drawdown ?? 0} />
+            <MetricCard label="Feature count" value={payload.model_artifact.feature_count ?? 0} />
+          </div>
+
+          <article className="panel panel--wide">
+            <div className="panel-heading">
+              <h2>Run summary</h2>
+              <StatusPill label={String(payload.settings.run_type ?? "asset_model")} />
+            </div>
+            <dl className="detail-list">
+              <div>
+                <dt>Run</dt>
+                <dd>{String(payload.run.run_name ?? payload.run_id)}</dd>
+              </div>
+              <div>
+                <dt>Target asset</dt>
+                <dd>{String(payload.settings.target_asset ?? "SPY")}</dd>
+              </div>
+              <div>
+                <dt>Deployment variant</dt>
+                <dd>{String(payload.settings.deployment_variant ?? "n/a")}</dd>
+              </div>
+              <div>
+                <dt>Narrative mode</dt>
+                <dd>{String(payload.settings.deployment_narrative_feature_mode ?? "n/a")}</dd>
+              </div>
+              <div>
+                <dt>Allocator</dt>
+                <dd>{String(payload.settings.allocator_mode ?? "n/a")}</dd>
+              </div>
+              <div>
+                <dt>Rows loaded</dt>
+                <dd>{formatValue(payload.row_counts.trades)} trades</dd>
+              </div>
+            </dl>
+          </article>
+
+          <article className="panel panel--wide chart-grid">
+            <div>
+              <h2>Equity curve</h2>
+              <PlotlyChart figure={payload.charts.equity} title="Run equity curve" />
+            </div>
+            <div>
+              <h2>Diagnostics chart</h2>
+              <PlotlyChart figure={payload.charts.diagnostics} title="Run diagnostics chart" />
+            </div>
+          </article>
+
+          <article className="panel panel--wide">
+            <div className="panel-heading">
+              <h2>Benchmark curves</h2>
+            </div>
+            <PlotlyChart figure={payload.charts.benchmarks} title="Benchmark curves" />
+          </article>
+
+          <article className="panel panel--wide chart-grid">
+            <div>
+              <h2>Variant comparison</h2>
+              <DataTable rows={payload.tables.variant_summary ?? []} />
+            </div>
+            <div>
+              <h2>Narrative lift</h2>
+              <DataTable rows={payload.tables.narrative_lift ?? []} />
+            </div>
+          </article>
+
+          <article className="panel panel--wide chart-grid">
+            <div>
+              <h2>Feature-family impact</h2>
+              <DataTable rows={payload.tables.feature_family_summary ?? []} />
+            </div>
+            <div>
+              <h2>Feature importance</h2>
+              <DataTable rows={payload.tables.feature_importance ?? []} />
+            </div>
+          </article>
+
+          <article className="panel panel--wide chart-grid">
+            <div>
+              <h2>Session explainability</h2>
+              <DataTable rows={payload.selected_session.decision?.length ? payload.selected_session.decision : payload.selected_session.prediction ?? []} />
+            </div>
+            <div>
+              <h2>Session candidates</h2>
+              <DataTable rows={payload.selected_session.candidates ?? []} />
+            </div>
+          </article>
+
+          <article className="panel panel--wide chart-grid">
+            <div>
+              <h2>Feature contributions</h2>
+              <DataTable rows={payload.selected_session.feature_contributions ?? []} />
+            </div>
+            <div>
+              <h2>Post attribution</h2>
+              <DataTable rows={payload.selected_session.post_attribution ?? []} />
+            </div>
+          </article>
+
+          <article className="panel panel--wide chart-grid">
+            <div>
+              <h2>Diagnostics rows</h2>
+              <DataTable rows={payload.tables.diagnostics ?? []} />
+            </div>
+            <div>
+              <h2>Recent trades</h2>
+              <DataTable rows={payload.tables.trades ?? []} />
+            </div>
+          </article>
+        </>
+      ) : null}
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Comparison Workspace</p>
+            <h2>Compare saved runs</h2>
+          </div>
+          <StatusPill label={comparison.data?.ready ? "Ready" : "Select 2+ runs"} />
+        </div>
+        <div className="filter-grid filter-grid--compact">
+          <label>
+            Compare runs
+            <select
+              multiple
+              value={comparisonRunIds}
+              onChange={(event) => setCompareIds(selectedOptions(event.currentTarget.selectedOptions))}
+            >
+              {allRuns.map((row) => (
+                <option key={String(row.run_id)} value={String(row.run_id)}>
+                  {String(row.run_name ?? row.run_id)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Base run
+            <select value={activeBaseRunId} onChange={(event) => setBaseRunId(event.target.value)}>
+              {comparisonRunIds.map((runId) => (
+                <option key={runId} value={runId}>
+                  {runId}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        {comparison.isLoading ? <LoadingBlock label="Loading run comparison..." /> : null}
+        {comparison.error ? <ErrorBlock error={comparison.error} /> : null}
+        {comparison.data ? (
+          <>
+            <PlotlyChart figure={comparison.data.charts.equity} title="Run comparison equity" />
+            <div className="chart-grid">
+              <div>
+                <h2>Scorecard</h2>
+                <DataTable rows={comparison.data.scorecard} />
+              </div>
+              <div>
+                <h2>Setting diffs</h2>
+                <DataTable rows={comparison.data.setting_diffs} />
+              </div>
+              <div>
+                <h2>Feature diffs</h2>
+                <DataTable rows={comparison.data.feature_diffs} />
+              </div>
+              <div>
+                <h2>Benchmark deltas</h2>
+                <DataTable rows={comparison.data.benchmark_deltas} />
+              </div>
+            </div>
+            <div className="note-list">
+              {(comparison.data.change_notes.length ? comparison.data.change_notes : ["Choose at least one non-base run to summarize what changed."]).map((note) => (
+                <p key={note}>{note}</p>
+              ))}
+            </div>
+          </>
+        ) : null}
+      </article>
+    </section>
+  );
+}
+
 function OverviewPage() {
   const status = useQuery({ queryKey: ["status"], queryFn: api.status });
   const runs = useQuery({ queryKey: ["runs"], queryFn: api.runs });
@@ -658,6 +1006,7 @@ export function App() {
 
       {activePage === "overview" ? <OverviewPage /> : null}
       {activePage === "research" ? <ResearchPage /> : null}
+      {activePage === "runs" ? <RunExplorerPage /> : null}
       {activePage === "data" ? <DataHealthPage /> : null}
       {activePage === "live" ? <LiveDecisionPage /> : null}
       {activePage === "paper" ? <PaperPerformancePage /> : null}

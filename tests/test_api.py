@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 
 from trump_workbench.api import create_app
 from trump_workbench.config import AppSettings
+from trump_workbench.contracts import BacktestRun
+from trump_workbench.experiments import ExperimentStore
 from trump_workbench.paper_trading import (
     PAPER_BENCHMARK_CURVE_COLUMNS,
     PAPER_DECISION_JOURNAL_COLUMNS,
@@ -27,6 +29,7 @@ class ApiContractTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.settings = AppSettings(base_dir=Path(self.temp_dir.name))
         self.store = DuckDBStore(self.settings)
+        self.experiments = ExperimentStore(self.store)
         self.client = TestClient(create_app(settings=self.settings, store=self.store))
 
     def tearDown(self) -> None:
@@ -140,6 +143,298 @@ class ApiContractTests(unittest.TestCase):
                 "importance_path": "",
                 "model_path": "",
             },
+        )
+
+    def _save_asset_run_artifacts(self, run_id: str = "asset-run-1") -> None:
+        self.experiments.save_run(
+            run=BacktestRun(
+                run_id=run_id,
+                run_name="SPY asset model",
+                target_asset="SPY",
+                config_hash="asset-hash",
+                train_window=60,
+                validation_window=20,
+                test_window=20,
+                metrics={
+                    "total_return": 0.08,
+                    "sharpe": 1.2,
+                    "sortino": 1.4,
+                    "max_drawdown": -0.03,
+                    "robust_score": 1.6,
+                    "trade_count": 2,
+                },
+                selected_params={"threshold": 0.001, "min_post_count": 1, "account_weight": 1.0},
+            ),
+            config={
+                "run_name": "SPY asset model",
+                "target_asset": "SPY",
+                "feature_version": "v1",
+                "llm_enabled": True,
+                "train_window": 60,
+                "validation_window": 20,
+                "test_window": 20,
+                "transaction_cost_bps": 2.0,
+            },
+            trades=pd.DataFrame(
+                {
+                    "signal_session_date": [pd.Timestamp("2025-02-03"), pd.Timestamp("2025-02-04")],
+                    "next_session_date": [pd.Timestamp("2025-02-04"), pd.Timestamp("2025-02-05")],
+                    "trade_taken": [True, True],
+                    "net_return": [0.01, -0.002],
+                    "equity_curve": [1.01, 1.00798],
+                },
+            ),
+            predictions=pd.DataFrame(
+                {
+                    "signal_session_date": [pd.Timestamp("2025-02-03"), pd.Timestamp("2025-02-04")],
+                    "next_session_date": [pd.Timestamp("2025-02-04"), pd.Timestamp("2025-02-05")],
+                    "expected_return_score": [0.012, 0.004],
+                    "prediction_confidence": [0.7, 0.55],
+                    "post_count": [4, 2],
+                    "target_next_session_return": [0.01, -0.002],
+                    "suggested_stance": ["LONG", "LONG"],
+                },
+            ),
+            windows=pd.DataFrame({"window_id": [1], "train_start": [pd.Timestamp("2025-01-01")]}),
+            importance=pd.DataFrame(
+                {
+                    "feature_name": ["post_count", "semantic_relevance_avg"],
+                    "coefficient": [0.2, 0.4],
+                    "abs_coefficient": [0.2, 0.4],
+                },
+            ),
+            model_artifact={
+                "model_version": "asset-linear-v1",
+                "feature_names": ["post_count", "semantic_relevance_avg"],
+                "intercept": 0.0,
+                "coefficients": [0.2, 0.4],
+                "means": [2.0, 0.5],
+                "stds": [1.0, 0.2],
+                "residual_std": 0.01,
+                "train_rows": 30,
+                "metadata": {"run_type": "asset_model", "target_asset": "SPY", "llm_enabled": True},
+            },
+            feature_contributions=pd.DataFrame(
+                {
+                    "signal_session_date": [pd.Timestamp("2025-02-04"), pd.Timestamp("2025-02-04")],
+                    "feature_name": ["semantic_relevance_avg", "post_count"],
+                    "feature_family": ["semantic", "activity"],
+                    "raw_value": [0.9, 2.0],
+                    "coefficient": [0.4, 0.2],
+                    "contribution": [0.01, -0.002],
+                    "contribution_share": [0.83, 0.17],
+                },
+            ),
+            post_attribution=pd.DataFrame(
+                {
+                    "signal_session_date": [pd.Timestamp("2025-02-04")],
+                    "post_timestamp": [pd.Timestamp("2025-02-04 12:00:00")],
+                    "author_handle": ["realDonaldTrump"],
+                    "author_is_trump": [True],
+                    "is_active_tracked_account": [False],
+                    "sentiment_score": [0.5],
+                    "engagement_score": [10.0],
+                    "post_signal_score": [0.4],
+                    "post_preview": ["Market update"],
+                },
+            ),
+            account_attribution=pd.DataFrame(
+                {
+                    "signal_session_date": [pd.Timestamp("2025-02-04")],
+                    "author_handle": ["realDonaldTrump"],
+                    "author_is_trump": [True],
+                    "is_active_tracked_account": [False],
+                    "post_count": [1],
+                    "avg_sentiment": [0.5],
+                    "net_post_signal": [0.4],
+                    "total_engagement": [10.0],
+                },
+            ),
+            benchmarks=pd.DataFrame(
+                {
+                    "benchmark_name": ["strategy", "always_long_spy"],
+                    "total_return": [0.08, 0.05],
+                    "sharpe": [1.2, 0.8],
+                },
+            ),
+            diagnostics=pd.DataFrame(
+                {
+                    "signal_session_date": [pd.Timestamp("2025-02-03"), pd.Timestamp("2025-02-04")],
+                    "expected_return_score": [0.012, 0.004],
+                    "actual_next_session_return": [0.01, -0.002],
+                    "absolute_error": [0.002, 0.006],
+                },
+            ),
+            benchmark_curves=pd.DataFrame(
+                {
+                    "next_session_date": [pd.Timestamp("2025-02-04"), pd.Timestamp("2025-02-05")],
+                    "strategy": [1.01, 1.00798],
+                    "always_long_spy": [1.005, 1.003],
+                },
+            ),
+            leakage_audit={"overall_pass": True},
+        )
+
+    def _save_portfolio_run_artifacts(self, run_id: str = "portfolio-run-1") -> None:
+        self.experiments.save_portfolio_run(
+            run=BacktestRun(
+                run_id=run_id,
+                run_name="Portfolio Alpha",
+                target_asset="PORTFOLIO",
+                config_hash="portfolio-hash",
+                train_window=60,
+                validation_window=20,
+                test_window=20,
+                metrics={
+                    "total_return": 0.12,
+                    "sharpe": 1.5,
+                    "sortino": 1.7,
+                    "max_drawdown": -0.025,
+                    "robust_score": 2.1,
+                    "trade_count": 2,
+                },
+                selected_params={
+                    "fallback_mode": "SPY",
+                    "selected_symbols": ["SPY", "QQQ"],
+                    "deployment_variant": "per_asset_hybrid",
+                    "deployment_narrative_feature_mode": "hybrid",
+                },
+                run_type="portfolio_allocator",
+                allocator_mode="joint_model",
+                fallback_mode="SPY",
+                deployment_variant="per_asset_hybrid",
+                selected_symbols=["SPY", "QQQ"],
+                topology_variants=["per_asset"],
+                narrative_feature_modes=["baseline", "hybrid"],
+                model_families=["ridge"],
+            ),
+            config={
+                "allocator_mode": "joint_model",
+                "fallback_mode": "SPY",
+                "selected_symbols": ["SPY", "QQQ"],
+                "topology_variants": ["per_asset"],
+                "narrative_feature_modes": ["baseline", "hybrid"],
+                "model_families": ["ridge"],
+                "transaction_cost_bps": 2.0,
+            },
+            trades=pd.DataFrame(
+                {
+                    "variant_name": ["per_asset_hybrid", "per_asset_hybrid"],
+                    "signal_session_date": [pd.Timestamp("2025-02-03"), pd.Timestamp("2025-02-04")],
+                    "next_session_date": [pd.Timestamp("2025-02-04"), pd.Timestamp("2025-02-05")],
+                    "selected_asset": ["QQQ", "SPY"],
+                    "trade_taken": [True, True],
+                    "net_return": [0.015, 0.004],
+                    "equity_curve": [1.015, 1.01906],
+                },
+            ),
+            decision_history=pd.DataFrame(
+                {
+                    "variant_name": ["per_asset_hybrid", "per_asset_hybrid"],
+                    "signal_session_date": [pd.Timestamp("2025-02-03"), pd.Timestamp("2025-02-04")],
+                    "next_session_date": [pd.Timestamp("2025-02-04"), pd.Timestamp("2025-02-05")],
+                    "winning_asset": ["QQQ", "SPY"],
+                    "winning_run_id": ["qqq-model", "spy-model"],
+                    "decision_source": ["eligible", "eligible"],
+                    "fallback_mode": ["SPY", "SPY"],
+                    "stance": ["LONG QQQ NEXT SESSION", "LONG SPY NEXT SESSION"],
+                    "eligible_asset_count": [2, 1],
+                    "runner_up_asset": ["SPY", "QQQ"],
+                    "winner_score": [0.025, 0.012],
+                    "runner_up_score": [0.01, 0.002],
+                },
+            ),
+            candidate_predictions=pd.DataFrame(
+                {
+                    "variant_name": ["per_asset_hybrid", "per_asset_hybrid"],
+                    "signal_session_date": [pd.Timestamp("2025-02-04"), pd.Timestamp("2025-02-04")],
+                    "next_session_date": [pd.Timestamp("2025-02-05"), pd.Timestamp("2025-02-05")],
+                    "asset_symbol": ["SPY", "QQQ"],
+                    "run_id": ["spy-model", "qqq-model"],
+                    "run_name": ["SPY model", "QQQ model"],
+                    "expected_return_score": [0.012, 0.002],
+                    "confidence": [0.7, 0.55],
+                    "threshold": [0.001, 0.001],
+                    "min_post_count": [1, 1],
+                    "post_count": [3, 1],
+                    "tradeable": [True, True],
+                    "signal_qualifies": [True, True],
+                    "qualifies": [True, True],
+                    "eligible_rank": [1, 2],
+                    "is_winner": [True, False],
+                    "decision_source": ["eligible", "eligible"],
+                    "stance": ["LONG SPY NEXT SESSION", "FLAT"],
+                },
+            ),
+            component_summary=pd.DataFrame(
+                {
+                    "variant_name": ["per_asset_hybrid"],
+                    "window_id": [1],
+                    "model_family": ["ridge"],
+                    "account_weight": [1.0],
+                },
+            ),
+            benchmarks=pd.DataFrame(
+                {
+                    "variant_name": ["per_asset_hybrid", "per_asset_hybrid"],
+                    "benchmark_name": ["strategy", "always_long_spy"],
+                    "total_return": [0.12, 0.06],
+                },
+            ),
+            benchmark_curves=pd.DataFrame(
+                {
+                    "variant_name": ["per_asset_hybrid", "per_asset_hybrid"],
+                    "next_session_date": [pd.Timestamp("2025-02-04"), pd.Timestamp("2025-02-05")],
+                    "strategy": [1.015, 1.01906],
+                    "always_long_spy": [1.006, 1.01],
+                },
+            ),
+            diagnostics=pd.DataFrame(
+                {
+                    "variant_name": ["per_asset_hybrid", "per_asset_hybrid"],
+                    "signal_session_date": [pd.Timestamp("2025-02-03"), pd.Timestamp("2025-02-04")],
+                    "winner_score": [0.025, 0.012],
+                    "winner_gap_vs_runner_up": [0.015, 0.01],
+                },
+            ),
+            leakage_audit={"overall_pass": True},
+            variant_summary=pd.DataFrame(
+                {
+                    "variant_name": ["per_asset_baseline", "per_asset_hybrid"],
+                    "topology": ["per_asset", "per_asset"],
+                    "narrative_feature_mode": ["baseline", "hybrid"],
+                    "model_family": ["ridge", "ridge"],
+                    "validation_robust_score": [1.0, 1.4],
+                    "validation_total_return": [0.04, 0.06],
+                    "test_robust_score": [0.9, 1.2],
+                    "test_total_return": [0.03, 0.05],
+                    "deployment_winner": [False, True],
+                },
+            ),
+            portfolio_model_bundle={
+                "deployment_variant": "per_asset_hybrid",
+                "selected_symbols": ["SPY", "QQQ"],
+                "narrative_feature_modes": ["baseline", "hybrid"],
+                "variants": {
+                    "per_asset_hybrid": {
+                        "variant_name": "per_asset_hybrid",
+                        "topology": "per_asset",
+                        "narrative_feature_mode": "hybrid",
+                        "model_family": "ridge",
+                        "models": {
+                            "SPY": {"feature_names": ["post_count", "semantic_relevance_avg"]},
+                            "QQQ": {"feature_names": ["post_count", "policy_trade_count"]},
+                        },
+                    },
+                },
+            },
+            importance=pd.DataFrame(
+                {
+                    "variant_name": ["per_asset_hybrid", "per_asset_hybrid"],
+                    "feature_name": ["semantic_relevance_avg", "policy_trade_count"],
+                    "importance": [0.7, 0.3],
+                },
+            ),
         )
 
     def _save_paper_frames(self) -> None:
@@ -352,6 +647,74 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(live_response.status_code, 200)
         self.assertFalse(live_response.json()["configured"])
         self.assertIn("No live monitor config", live_response.json()["errors"][0])
+
+    def test_run_compare_endpoint_handles_empty_store(self) -> None:
+        response = self.client.get("/api/runs/compare")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["ready"])
+        self.assertEqual(payload["scorecard"], [])
+        self.assertEqual(payload["change_notes"], [])
+
+    def test_asset_run_detail_returns_model_inspection_payload(self) -> None:
+        self._save_asset_run_artifacts()
+
+        response = self.client.get("/api/runs/asset-run-1?session_date=2025-02-04")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["found"])
+        self.assertEqual(payload["settings"]["run_type"], "asset_model")
+        self.assertEqual(payload["settings"]["target_asset"], "SPY")
+        self.assertEqual(payload["model_artifact"]["feature_count"], 2)
+        self.assertIn("equity", payload["charts"])
+        self.assertEqual(len(payload["tables"]["feature_importance"]), 2)
+        self.assertEqual(payload["selected_session"]["session_date"], "2025-02-04")
+        self.assertEqual(payload["selected_session"]["prediction"][0]["expected_return_score"], 0.004)
+        self.assertGreaterEqual(len(payload["selected_session"]["feature_contributions"]), 1)
+        self.assertEqual(payload["leakage_audit"]["overall_pass"], True)
+
+    def test_portfolio_run_detail_returns_variant_and_candidate_payload(self) -> None:
+        self._save_portfolio_run_artifacts()
+
+        response = self.client.get("/api/runs/portfolio-run-1?variant_name=per_asset_hybrid&session_date=2025-02-04")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["found"])
+        self.assertEqual(payload["settings"]["run_type"], "portfolio_allocator")
+        self.assertEqual(payload["settings"]["deployment_variant"], "per_asset_hybrid")
+        self.assertEqual(payload["settings"]["deployment_narrative_feature_mode"], "hybrid")
+        self.assertGreaterEqual(len(payload["tables"]["variant_summary"]), 2)
+        self.assertEqual(payload["tables"]["narrative_lift"][0]["narrative_feature_mode"], "hybrid")
+        self.assertGreaterEqual(len(payload["tables"]["feature_family_summary"]), 1)
+        self.assertEqual(payload["selected_session"]["decision"][0]["winning_asset"], "SPY")
+        self.assertEqual(len(payload["selected_session"]["candidates"]), 2)
+        self.assertIn("diagnostics", payload["charts"])
+
+    def test_run_comparison_endpoint_returns_mixed_run_diffs(self) -> None:
+        self._save_asset_run_artifacts()
+        self._save_portfolio_run_artifacts()
+
+        response = self.client.get(
+            "/api/runs/compare",
+            params=[
+                ("run_ids", "asset-run-1"),
+                ("run_ids", "portfolio-run-1"),
+                ("base_run_id", "asset-run-1"),
+            ],
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ready"])
+        self.assertEqual(payload["base_run_id"], "asset-run-1")
+        self.assertEqual(len(payload["scorecard"]), 2)
+        self.assertGreaterEqual(len(payload["setting_diffs"]), 1)
+        self.assertGreaterEqual(len(payload["feature_diffs"]), 2)
+        self.assertGreaterEqual(len(payload["benchmark_deltas"]), 1)
+        self.assertTrue(any("portfolio-run-1" in note for note in payload["change_notes"]))
 
     def test_paper_and_performance_endpoints_return_portfolio_slices(self) -> None:
         self._save_paper_frames()

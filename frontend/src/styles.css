@@ -104,7 +104,7 @@ input {
 
 .page-tabs {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 8px;
   margin-bottom: 24px;
   padding: 8px;
@@ -372,6 +372,20 @@ select[multiple] {
   text-decoration: none;
   border-radius: 999px;
   background: var(--field);
+}
+
+.note-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.note-list p {
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.42);
 }
 
 .loading-block,
