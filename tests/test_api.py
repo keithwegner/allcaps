@@ -606,6 +606,113 @@ class ApiContractTests(unittest.TestCase):
             ),
         )
 
+    def _save_asset_lab_frames(self, include_intraday: bool = True) -> None:
+        self._save_research_frames(include_x=True)
+        self.store.save_frame(
+            "asset_daily",
+            pd.DataFrame(
+                [
+                    {"symbol": symbol, "trade_date": pd.Timestamp(date), "open": open_, "high": high, "low": low, "close": close, "volume": 1000}
+                    for symbol, prices in {
+                        "SPY": [(100.0, 101.0, 99.0, 100.0), (101.0, 102.0, 100.0, 101.0), (102.0, 103.0, 101.0, 102.0)],
+                        "NVDA": [(200.0, 202.0, 198.0, 200.0), (204.0, 206.0, 202.0, 205.0), (203.0, 207.0, 202.0, 204.0)],
+                        "QQQ": [(300.0, 302.0, 298.0, 300.0), (306.0, 307.0, 304.0, 306.0), (308.0, 310.0, 307.0, 309.0)],
+                    }.items()
+                    for date, (open_, high, low, close) in zip(["2025-02-03", "2025-02-04", "2025-02-05"], prices)
+                ],
+            ),
+        )
+        self.store.save_frame(
+            "asset_session_features",
+            pd.DataFrame(
+                [
+                    {
+                        "asset_symbol": "NVDA",
+                        "signal_session_date": pd.Timestamp("2025-02-03"),
+                        "post_count": 2,
+                        "rule_matched_post_count": 1,
+                        "semantic_matched_post_count": 1,
+                        "primary_match_post_count": 1,
+                        "asset_relevance_score_avg": 0.72,
+                        "sentiment_avg": 0.3,
+                        "target_next_session_return": 0.025,
+                        "target_available": True,
+                    },
+                    {
+                        "asset_symbol": "NVDA",
+                        "signal_session_date": pd.Timestamp("2025-02-04"),
+                        "post_count": 1,
+                        "rule_matched_post_count": 1,
+                        "semantic_matched_post_count": 0,
+                        "primary_match_post_count": 0,
+                        "asset_relevance_score_avg": 0.4,
+                        "sentiment_avg": -0.1,
+                        "target_next_session_return": -0.005,
+                        "target_available": True,
+                    },
+                ],
+            ),
+        )
+        self.store.save_frame(
+            "asset_post_mappings",
+            pd.DataFrame(
+                [
+                    {
+                        "asset_symbol": "NVDA",
+                        "session_date": pd.Timestamp("2025-02-03"),
+                        "post_id": "truth-1",
+                        "post_timestamp": pd.Timestamp("2025-02-03 08:00:00", tz="America/New_York"),
+                        "reaction_anchor_ts": pd.Timestamp("2025-02-03 10:00:00", tz="America/New_York"),
+                        "source_platform": "Truth Social",
+                        "author_handle": "realDonaldTrump",
+                        "author_display_name": "Donald Trump",
+                        "cleaned_text": "The stock market and economy are looking strong.",
+                        "asset_relevance_score": 0.8,
+                        "rule_match_score": 0.6,
+                        "semantic_match_score": 0.9,
+                        "match_rank": 1,
+                        "is_primary_asset": True,
+                        "match_reasons": "semantic_primary_asset",
+                    },
+                    {
+                        "asset_symbol": "NVDA",
+                        "session_date": pd.Timestamp("2025-02-03"),
+                        "post_id": "x-1",
+                        "post_timestamp": pd.Timestamp("2025-02-03 10:00:00", tz="America/New_York"),
+                        "reaction_anchor_ts": pd.Timestamp("2025-02-03 10:00:00", tz="America/New_York"),
+                        "source_platform": "X",
+                        "author_handle": "macroalpha",
+                        "author_display_name": "Macro Alpha",
+                        "cleaned_text": "Trump tariff headlines could pressure semiconductors.",
+                        "asset_relevance_score": 0.55,
+                        "rule_match_score": 0.5,
+                        "semantic_match_score": 0.7,
+                        "match_rank": 2,
+                        "is_primary_asset": False,
+                        "match_reasons": "semantic_target",
+                    },
+                ],
+            ),
+        )
+        if include_intraday:
+            rows = []
+            for symbol, base in {"SPY": 100.0, "NVDA": 200.0, "QQQ": 300.0}.items():
+                for offset, close in [(-60, base), (0, base * 1.01), (60, base * 1.02)]:
+                    timestamp = pd.Timestamp("2025-02-03 10:00:00", tz="America/New_York") + pd.Timedelta(minutes=offset)
+                    rows.append(
+                        {
+                            "symbol": symbol,
+                            "timestamp": timestamp,
+                            "open": close,
+                            "high": close + 1.0,
+                            "low": close - 1.0,
+                            "close": close,
+                            "volume": 100,
+                            "interval": "5m",
+                        },
+                    )
+            self.store.save_frame("asset_intraday", pd.DataFrame(rows))
+
     def _save_discovery_frames(self) -> None:
         self._save_research_frames(include_x=True)
         self.store.save_frame(
@@ -1447,6 +1554,89 @@ class ApiContractTests(unittest.TestCase):
             self.assertEqual(manifest["source_mode"]["mode"], "truth_only")
             self.assertTrue(manifest["filters"]["trump_authored_only"])
             self.assertEqual(manifest["headline_metrics"]["posts_in_view"], 1)
+
+    def test_research_asset_lab_returns_empty_state_without_asset_data(self) -> None:
+        response = self.client.get("/api/research/assets")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["ready"])
+        self.assertEqual(payload["asset_options"], [])
+        self.assertIn("Refresh datasets", payload["message"])
+        self.assertIn("overlay", payload["charts"])
+        self.assertIn("intraday", payload["empty_states"])
+
+    def test_research_asset_lab_uses_watchlist_default_and_filters_mapped_posts(self) -> None:
+        self._save_asset_lab_frames()
+
+        response = self.client.get(
+            "/api/research/assets",
+            params=[
+                ("date_start", "2025-02-03"),
+                ("date_end", "2025-02-05"),
+                ("platforms", "Truth Social"),
+                ("trump_authored_only", "true"),
+                ("benchmark_symbol", "QQQ"),
+            ],
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ready"])
+        self.assertEqual(payload["controls"]["selected_asset"], "NVDA")
+        self.assertEqual(payload["controls"]["comparison_mode"], "normalized")
+        self.assertEqual(payload["controls"]["benchmark_symbol"], "QQQ")
+        self.assertEqual(payload["mapped_post_rows"][0]["author_handle"], "realDonaldTrump")
+        self.assertNotIn("macroalpha", {row["author_handle"] for row in payload["mapped_post_rows"]})
+        self.assertGreaterEqual(len(payload["asset_session_rows"]), 1)
+        self.assertGreaterEqual(len(payload["event_study_rows"]), 1)
+        self.assertIn("overlay", payload["charts"])
+        self.assertIn("event_study", payload["charts"])
+
+    def test_research_asset_lab_returns_intraday_window_and_coverage(self) -> None:
+        self._save_asset_lab_frames()
+
+        response = self.client.get(
+            "/api/research/assets",
+            params=[
+                ("date_start", "2025-02-03"),
+                ("date_end", "2025-02-05"),
+                ("selected_asset", "NVDA"),
+                ("benchmark_symbol", "QQQ"),
+                ("before_minutes", "120"),
+                ("after_minutes", "240"),
+            ],
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ready"])
+        self.assertGreaterEqual(len(payload["intraday_anchor_options"]), 1)
+        self.assertGreaterEqual(len(payload["intraday_window_rows"]), 1)
+        self.assertEqual(
+            {row["symbol"] for row in payload["intraday_coverage_rows"]},
+            {"SPY", "NVDA", "QQQ"},
+        )
+        self.assertEqual(payload["empty_states"]["intraday"], "")
+        self.assertIn("intraday", payload["charts"])
+
+    def test_research_asset_lab_reports_missing_intraday_coverage_without_failing(self) -> None:
+        self._save_asset_lab_frames(include_intraday=False)
+
+        response = self.client.get(
+            "/api/research/assets",
+            params=[
+                ("date_start", "2025-02-03"),
+                ("date_end", "2025-02-05"),
+                ("selected_asset", "NVDA"),
+            ],
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ready"])
+        self.assertEqual(payload["intraday_window_rows"], [])
+        self.assertIn("No stored intraday data", payload["empty_states"]["intraday"])
 
     def test_discovery_endpoint_returns_empty_state_without_posts(self) -> None:
         response = self.client.get("/api/discovery")
