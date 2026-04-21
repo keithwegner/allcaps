@@ -345,6 +345,102 @@ const researchPayload = {
   export_filename: "research-pack-20250120-20260420.zip",
 };
 
+const discoveryPayload = {
+  ready: true,
+  message: "Discovery ranks non-Trump X accounts that mention Trump.",
+  source_mode: {
+    mode: "truth_plus_x",
+    truth_post_count: 42,
+    x_post_count: 12,
+  },
+  latest_ranked_at: "2026-04-17T00:00:00",
+  summary: {
+    post_count: 54,
+    x_candidate_post_count: 12,
+    active_account_count: 2,
+    latest_ranking_count: 3,
+    selected_account_count: 2,
+    pinned_account_count: 1,
+    suppressed_latest_count: 1,
+    override_count: 2,
+    pin_override_count: 1,
+    suppress_override_count: 1,
+  },
+  charts: {
+    top_discovered_accounts: {
+      data: [{ type: "bar", orientation: "h", x: [12, 9], y: ["macroalpha", "policywatch"], name: "Discovery score" }],
+      layout: { title: { text: "Top discovered accounts" } },
+    },
+    ranking_history: {
+      data: [{ type: "scatter", mode: "lines+markers", x: ["2026-04-17"], y: [3], name: "Ranked accounts" }],
+      layout: { title: { text: "Discovery ranking history" } },
+    },
+  },
+  active_accounts: [
+    {
+      handle: "macroalpha",
+      display_name: "Macro Alpha",
+      status: "active",
+      discovery_score: 12,
+      mention_count: 3,
+      provenance: "discovery_auto_include",
+    },
+    {
+      handle: "policywatch",
+      display_name: "Policy Watch",
+      status: "pinned",
+      discovery_score: 9,
+      mention_count: 1,
+      provenance: "manual_override:pin",
+    },
+  ],
+  latest_rankings: [
+    {
+      author_handle: "macroalpha",
+      author_display_name: "Macro Alpha",
+      discovery_score: 12,
+      mention_count: 3,
+      selected_status: "active",
+      suppressed_by_override: false,
+    },
+    {
+      author_handle: "policywatch",
+      author_display_name: "Policy Watch",
+      discovery_score: 9,
+      mention_count: 1,
+      selected_status: "pinned",
+      suppressed_by_override: false,
+    },
+    {
+      author_handle: "muted",
+      author_display_name: "Muted Account",
+      discovery_score: 3,
+      mention_count: 1,
+      selected_status: "excluded",
+      suppressed_by_override: true,
+    },
+  ],
+  override_history: [
+    {
+      handle: "policywatch",
+      action: "pin",
+      note: "Always inspect",
+    },
+    {
+      handle: "muted",
+      action: "suppress",
+      note: "Low quality",
+    },
+  ],
+  recent_ranking_history: [
+    {
+      ranked_at: "2026-04-17T00:00:00",
+      author_handle: "macroalpha",
+      discovery_score: 12,
+    },
+  ],
+};
+
 const livePayload = {
   configured: true,
   errors: [],
@@ -447,6 +543,7 @@ async function mockApi(page: Page) {
   await fulfillJson(page, "/api/runs/run-portfolio-1**", runDetailPayload);
   await fulfillJson(page, "/api/runs/compare**", runComparisonPayload);
   await fulfillJson(page, "/api/research**", researchPayload);
+  await fulfillJson(page, "/api/discovery", discoveryPayload);
   await fulfillJson(page, "/api/live/current", livePayload);
   await fulfillJson(page, "/api/paper/portfolios", portfoliosPayload);
   await fulfillJson(page, "/api/performance/paper-1", performancePayload);
@@ -491,6 +588,25 @@ test("shows the migrated research workspace with narratives and export", async (
   await expect(page.getByRole("heading", { name: "Structured narrative inspection" })).toBeVisible();
   await expect(page.getByRole("cell", { name: "markets" }).first()).toBeVisible();
   await expect(page.getByText("heuristic-fallback")).toBeVisible();
+});
+
+test("shows the migrated discovery workspace with rankings and overrides", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: /Discovery/ }).click();
+
+  await expect(page.getByRole("heading", { name: "Tracked account ranking workspace" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Discovery workspace" })).toBeVisible();
+  await expect(page.getByText("Manual pin/suppress override writes remain in Streamlit")).toBeVisible();
+  await expect(page.getByText("Discovery ranks non-Trump X accounts that mention Trump.", { exact: true })).toBeVisible();
+  await expect(page.getByText("X candidate posts")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Top discovered accounts" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Active tracked accounts" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "macroalpha" }).first()).toBeVisible();
+  await expect(page.getByRole("cell", { name: "policywatch" }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Latest ranking snapshot" })).toBeVisible();
+  await expect(page.getByRole("columnheader", { name: "suppressed by override" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Override history" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "suppress" })).toBeVisible();
 });
 
 test("shows the migrated run explorer with detail and comparison tables", async ({ page }) => {
