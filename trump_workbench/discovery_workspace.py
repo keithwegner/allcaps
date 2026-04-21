@@ -5,6 +5,7 @@ from typing import Any
 import pandas as pd
 import plotly.graph_objects as go
 
+from .config import AppSettings
 from .contracts import MANUAL_OVERRIDE_COLUMNS, RANKING_HISTORY_COLUMNS, TRACKED_ACCOUNT_COLUMNS
 from .discovery import DiscoveryService
 from .research_workspace import _figure_json, _frame_records, detect_source_mode
@@ -133,6 +134,82 @@ def _ranking_trend_chart(ranking_history: pd.DataFrame) -> dict[str, Any]:
     return _figure_json(fig)
 
 
+def _add_override_option(
+    rows: list[dict[str, Any]],
+    seen: set[str],
+    *,
+    account_id: Any,
+    handle: Any,
+    display_name: Any,
+    source_platform: Any,
+    status: Any,
+    source: str,
+) -> None:
+    normalized_account_id = str(account_id or "").strip()
+    if not normalized_account_id or normalized_account_id in seen:
+        return
+    seen.add(normalized_account_id)
+    normalized_handle = str(handle or "").strip()
+    normalized_display_name = str(display_name or "").strip()
+    label_parts = [f"@{normalized_handle}" if normalized_handle else normalized_account_id]
+    if normalized_display_name:
+        label_parts.append(normalized_display_name)
+    rows.append(
+        {
+            "account_id": normalized_account_id,
+            "handle": normalized_handle,
+            "display_name": normalized_display_name,
+            "source_platform": str(source_platform or "X").strip() or "X",
+            "status": str(status or "").strip(),
+            "source": source,
+            "label": " - ".join(label_parts),
+        },
+    )
+
+
+def _override_account_options(
+    latest_rankings: pd.DataFrame,
+    active_accounts: pd.DataFrame,
+    overrides: pd.DataFrame,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for _, row in latest_rankings.iterrows():
+        _add_override_option(
+            rows,
+            seen,
+            account_id=row.get("author_account_id"),
+            handle=row.get("author_handle"),
+            display_name=row.get("author_display_name"),
+            source_platform=row.get("source_platform", "X"),
+            status=row.get("selected_status", ""),
+            source="latest_ranking",
+        )
+    for _, row in active_accounts.iterrows():
+        _add_override_option(
+            rows,
+            seen,
+            account_id=row.get("account_id"),
+            handle=row.get("handle"),
+            display_name=row.get("display_name"),
+            source_platform=row.get("source_platform", "X"),
+            status=row.get("status", ""),
+            source="active_account",
+        )
+    for _, row in overrides.iterrows():
+        _add_override_option(
+            rows,
+            seen,
+            account_id=row.get("account_id"),
+            handle=row.get("handle"),
+            display_name=row.get("display_name"),
+            source_platform=row.get("source_platform", "X"),
+            status=row.get("action", ""),
+            source="override_history",
+        )
+    return rows
+
+
 def _message(posts: pd.DataFrame, source_mode: dict[str, Any], x_candidates: pd.DataFrame, latest_rankings: pd.DataFrame) -> str:
     if posts.empty:
         return "Refresh datasets first so Discovery can inspect X mention data."
@@ -149,7 +226,11 @@ def _message(posts: pd.DataFrame, source_mode: dict[str, Any], x_candidates: pd.
     return ""
 
 
-def build_discovery_workspace(store: DuckDBStore, discovery_service: DiscoveryService | None = None) -> dict[str, Any]:
+def build_discovery_workspace(
+    store: DuckDBStore,
+    discovery_service: DiscoveryService | None = None,
+    settings: AppSettings | None = None,
+) -> dict[str, Any]:
     discovery_service = discovery_service or DiscoveryService()
     posts = store.read_frame("normalized_posts")
     tracked_accounts = store.read_frame("tracked_accounts")
@@ -169,6 +250,13 @@ def build_discovery_workspace(store: DuckDBStore, discovery_service: DiscoverySe
     )
     selected_status = latest_rankings["selected_status"].fillna("").astype(str) if "selected_status" in latest_rankings.columns else pd.Series(dtype=str)
     override_actions = overrides["action"].fillna("").astype(str) if "action" in overrides.columns else pd.Series(dtype=str)
+    write_disabled_reason = ""
+    if posts.empty:
+        write_disabled_reason = "Refresh datasets first so Discovery overrides have stored posts to evaluate."
+    elif source_mode.get("mode") == "truth_only":
+        write_disabled_reason = "Discovery overrides require non-Trump X mention data; Truth Social-only analysis does not need account discovery."
+    elif x_candidates.empty:
+        write_disabled_reason = "Load X mention rows before managing Discovery account overrides."
 
     summary = {
         "post_count": int(len(posts)),
@@ -188,6 +276,11 @@ def build_discovery_workspace(store: DuckDBStore, discovery_service: DiscoverySe
         "message": message,
         "source_mode": source_mode,
         "latest_ranked_at": latest_ranked_at,
+        "admin": {
+            "mode": "public" if settings is not None and settings.public_mode else "private",
+            "writes_enabled": bool(write_disabled_reason == ""),
+            "write_disabled_reason": write_disabled_reason,
+        },
         "summary": summary,
         "charts": {
             "top_discovered_accounts": _top_accounts_chart(latest_rankings),
@@ -195,6 +288,7 @@ def build_discovery_workspace(store: DuckDBStore, discovery_service: DiscoverySe
         },
         "active_accounts": _frame_records(active_accounts.head(TABLE_LIMIT)),
         "latest_rankings": _frame_records(latest_rankings.head(TABLE_LIMIT)),
+        "override_account_options": _override_account_options(latest_rankings, active_accounts, overrides),
         "override_history": _frame_records(overrides.head(TABLE_LIMIT) if not overrides.empty else pd.DataFrame(columns=MANUAL_OVERRIDE_COLUMNS)),
         "recent_ranking_history": _frame_records(recent_history.head(TABLE_LIMIT)),
     }

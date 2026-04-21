@@ -7,6 +7,7 @@ import type { Data, Frame, Layout } from "plotly.js";
 import {
   api,
   type DatasetAdminPayload,
+  type DiscoveryOverrideRequest,
   type LiveOpsPayload,
   type ModelTrainingJobRequest,
   type ModelTrainingPayload,
@@ -621,7 +622,62 @@ function ResearchPage() {
 }
 
 function DiscoveryPage() {
+  const queryClient = useQueryClient();
   const discovery = useQuery({ queryKey: ["discovery"], queryFn: api.discovery });
+  const [adminToken, setAdminToken] = useState(() =>
+    typeof window === "undefined" ? "" : window.sessionStorage.getItem("allcaps_admin_token") ?? "",
+  );
+  const [password, setPassword] = useState("");
+  const [selectedAccountId, setSelectedAccountId] = useState("");
+  const [overrideAction, setOverrideAction] = useState<"pin" | "suppress">("pin");
+  const [effectiveFrom, setEffectiveFrom] = useState(() => new Date().toISOString().slice(0, 10));
+  const [effectiveTo, setEffectiveTo] = useState("");
+  const [overrideNote, setOverrideNote] = useState("");
+  const [selectedOverrideId, setSelectedOverrideId] = useState("");
+
+  const applyDiscoveryPayload = (payload: NonNullable<typeof discovery.data>) => {
+    queryClient.setQueryData(["discovery"], payload);
+  };
+  const unlock = useMutation({
+    mutationFn: () => api.adminSession(password),
+    onSuccess: (payload) => {
+      setAdminToken(payload.token);
+      if (typeof window !== "undefined") {
+        window.sessionStorage.setItem("allcaps_admin_token", payload.token);
+      }
+      setPassword("");
+    },
+  });
+  const saveOverride = useMutation({
+    mutationFn: (request: DiscoveryOverrideRequest) => api.createDiscoveryOverride(request, adminToken),
+    onSuccess: (payload) => {
+      setOverrideNote("");
+      setEffectiveTo("");
+      applyDiscoveryPayload(payload);
+    },
+  });
+  const deleteOverride = useMutation({
+    mutationFn: (overrideId: string) => api.deleteDiscoveryOverride(overrideId, adminToken),
+    onSuccess: (payload) => {
+      setSelectedOverrideId("");
+      applyDiscoveryPayload(payload);
+    },
+  });
+
+  const payload = discovery.data;
+  const summary = payload?.summary ?? {};
+  const accountOptions = payload?.override_account_options ?? [];
+  const overrideRows = payload?.override_history ?? [];
+  const currentAccount = accountOptions.find((option) => option.account_id === selectedAccountId) ?? accountOptions[0];
+  const isUnlocked = Boolean(adminToken);
+  const writesEnabled = Boolean(payload?.admin.writes_enabled);
+  const mutationError = unlock.error ?? saveOverride.error ?? deleteOverride.error;
+
+  useEffect(() => {
+    if (!selectedAccountId && accountOptions[0]?.account_id) {
+      setSelectedAccountId(accountOptions[0].account_id);
+    }
+  }, [accountOptions, selectedAccountId]);
 
   if (discovery.isLoading) {
     return <LoadingBlock label="Loading discovery workspace..." />;
@@ -630,23 +686,161 @@ function DiscoveryPage() {
     return <ErrorBlock error={discovery.error} />;
   }
 
-  const payload = discovery.data;
-  const summary = payload?.summary ?? {};
   return (
     <section className="page-grid">
       <article className="panel panel--wide">
         <div className="panel-heading">
           <div>
-            <p className="eyebrow">Read-only migration slice</p>
+            <p className="eyebrow">Admin-enabled migration slice</p>
             <h2>Discovery workspace</h2>
           </div>
           <StatusPill label={payload?.ready ? "Rankings available" : "Guidance"} tone={payload?.ready ? "ok" : "warn"} />
         </div>
         <p>
-          Discovery ranks non-Trump X accounts that mention Trump. Manual pin/suppress override writes remain in Streamlit
-          for this migration slice.
+          Discovery ranks non-Trump X accounts that mention Trump. Admins can now pin or suppress accounts from this
+          web workspace; dataset refreshes still live in Data Admin.
         </p>
         {payload?.message ? <div className="empty-state">{payload.message}</div> : null}
+      </article>
+
+      <article className="panel panel--wide">
+        <div className="panel-heading">
+          <div>
+            <h2>Discovery admin overrides</h2>
+            <p>Pin strong accounts, suppress noisy accounts, or delete an existing manual override.</p>
+          </div>
+          <StatusPill label={isUnlocked ? "Admin unlocked" : "Read-only"} tone={isUnlocked ? "ok" : "warn"} />
+        </div>
+        <div className="filter-grid filter-grid--compact">
+          <label>
+            Admin unlock
+            <input
+              type="password"
+              placeholder={payload?.admin.mode === "private" ? "Private mode: password optional" : "Admin password"}
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+            />
+          </label>
+          <label>
+            Session status
+            <button
+              className="action-button"
+              type="button"
+              aria-label={isUnlocked ? "Refresh admin token" : "Unlock admin writes"}
+              onClick={() => unlock.mutate()}
+              disabled={unlock.isPending}
+            >
+              {isUnlocked ? "Refresh admin token" : "Unlock admin writes"}
+            </button>
+          </label>
+          <label>
+            Write state
+            <span className="form-readout">{isUnlocked ? "Unlocked for this browser session" : "Read-only until unlocked"}</span>
+          </label>
+          <label>
+            Discovery writes
+            <span className="form-readout">{writesEnabled ? "Enabled for X mentions" : payload?.admin.write_disabled_reason || "Disabled"}</span>
+          </label>
+        </div>
+        {mutationError ? <ErrorBlock error={mutationError} /> : null}
+
+        <div className="filter-grid">
+          <label>
+            Account
+            <select
+              aria-label="Override account"
+              value={currentAccount?.account_id ?? ""}
+              onChange={(event) => setSelectedAccountId(event.target.value)}
+              disabled={!accountOptions.length}
+            >
+              {accountOptions.map((option) => (
+                <option key={option.account_id} value={option.account_id}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Action
+            <select
+              aria-label="Override action"
+              value={overrideAction}
+              onChange={(event) => setOverrideAction(event.target.value === "suppress" ? "suppress" : "pin")}
+            >
+              <option value="pin">Pin</option>
+              <option value="suppress">Suppress</option>
+            </select>
+          </label>
+          <label>
+            Effective from
+            <input type="date" value={effectiveFrom} onChange={(event) => setEffectiveFrom(event.target.value)} />
+          </label>
+          <label>
+            Effective to
+            <input type="date" value={effectiveTo} onChange={(event) => setEffectiveTo(event.target.value)} />
+          </label>
+          <label>
+            Note
+            <input value={overrideNote} onChange={(event) => setOverrideNote(event.target.value)} placeholder="Optional rationale" />
+          </label>
+          <label>
+            Save override
+            <button
+              className="action-button"
+              type="button"
+              aria-label="Save discovery override"
+              disabled={!isUnlocked || !writesEnabled || !currentAccount || !effectiveFrom || saveOverride.isPending}
+              onClick={() => {
+                if (!currentAccount) {
+                  return;
+                }
+                saveOverride.mutate({
+                  account_id: currentAccount.account_id,
+                  handle: currentAccount.handle,
+                  display_name: currentAccount.display_name,
+                  source_platform: currentAccount.source_platform || "X",
+                  action: overrideAction,
+                  effective_from: effectiveFrom,
+                  effective_to: effectiveTo || undefined,
+                  note: overrideNote,
+                });
+              }}
+            >
+              Save {overrideAction} override
+            </button>
+          </label>
+        </div>
+
+        <div className="filter-grid filter-grid--compact">
+          <label>
+            Delete override
+            <select
+              aria-label="Override to delete"
+              value={selectedOverrideId}
+              onChange={(event) => setSelectedOverrideId(event.target.value)}
+              disabled={!overrideRows.length}
+            >
+              <option value="">Select override</option>
+              {overrideRows.map((row) => (
+                <option key={String(row.override_id ?? "")} value={String(row.override_id ?? "")}>
+                  {String(row.action ?? "")} | @{String(row.handle ?? row.account_id ?? "")} | {String(row.effective_from ?? "")}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Remove
+            <button
+              className="action-button action-button--secondary"
+              type="button"
+              aria-label="Delete selected override"
+              disabled={!isUnlocked || !selectedOverrideId || deleteOverride.isPending}
+              onClick={() => deleteOverride.mutate(selectedOverrideId)}
+            >
+              Delete selected override
+            </button>
+          </label>
+        </div>
       </article>
 
       <div className="metric-grid">
