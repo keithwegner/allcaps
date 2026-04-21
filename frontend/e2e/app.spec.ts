@@ -469,6 +469,85 @@ const livePayload = {
   ],
 };
 
+const liveOpsPayload = {
+  ...livePayload,
+  admin: {
+    mode: "public",
+    write_requires_unlock: true,
+    capture_scope: "stored_data_only",
+  },
+  current_config: {
+    mode: "portfolio_run",
+    portfolio_run_id: "run-portfolio-1",
+    portfolio_run_name: "Portfolio Alpha",
+    deployment_variant: "per_asset_hybrid",
+    fallback_mode: "SPY",
+  },
+  seeded_config: {
+    mode: "portfolio_run",
+    portfolio_run_id: "run-portfolio-1",
+    fallback_mode: "SPY",
+  },
+  run_options: [
+    {
+      run_id: "run-portfolio-1",
+      run_name: "Portfolio Alpha",
+      deployment_variant: "per_asset_hybrid",
+      deployment_narrative_feature_mode: "hybrid",
+      selected_symbols: "SPY, QQQ",
+      transaction_cost_bps: 2,
+    },
+  ],
+  asset_history: [],
+  decision_history: [
+    {
+      generated_at: "2026-04-20T12:00:00Z",
+      winning_asset: "QQQ",
+      winner_score: 0.024,
+    },
+  ],
+  paper: {
+    current_config: {
+      paper_portfolio_id: "paper-1",
+      portfolio_run_name: "Portfolio Alpha",
+      enabled: true,
+    },
+    active_config: {
+      paper_portfolio_id: "paper-1",
+      portfolio_run_name: "Portfolio Alpha",
+      deployment_variant: "per_asset_hybrid",
+      transaction_cost_bps: 2,
+      starting_cash: 100000,
+      enabled: true,
+    },
+    portfolios: [
+      {
+        paper_portfolio_id: "paper-1",
+        portfolio_run_name: "Portfolio Alpha",
+        deployment_variant: "per_asset_hybrid",
+        enabled: true,
+      },
+    ],
+    decision_journal: [
+      {
+        paper_portfolio_id: "paper-1",
+        winning_asset: "QQQ",
+        settlement_status: "pending",
+      },
+    ],
+    trade_ledger: [],
+    equity_curve: [],
+    benchmark_curve: [],
+  },
+  capture_result: {
+    persisted_assets: 2,
+    persisted_decisions: 1,
+    captured: 1,
+    settled: 0,
+    performance_persisted: true,
+  },
+};
+
 const portfoliosPayload = {
   current_config: {
     paper_portfolio_id: "paper-1",
@@ -545,6 +624,11 @@ async function mockApi(page: Page) {
   await fulfillJson(page, "/api/research**", researchPayload);
   await fulfillJson(page, "/api/discovery", discoveryPayload);
   await fulfillJson(page, "/api/live/current", livePayload);
+  await fulfillJson(page, "/api/live/ops", liveOpsPayload);
+  await fulfillJson(page, "/api/admin/session", { token: "admin-token", token_type: "bearer", expires_at: "2026-04-20T20:00:00Z", expires_in_seconds: 43200, mode: "public" });
+  await fulfillJson(page, "/api/live/config", liveOpsPayload);
+  await fulfillJson(page, "/api/live/capture", liveOpsPayload);
+  await fulfillJson(page, "/api/paper/current", liveOpsPayload);
   await fulfillJson(page, "/api/paper/portfolios", portfoliosPayload);
   await fulfillJson(page, "/api/performance/paper-1", performancePayload);
 }
@@ -630,14 +714,28 @@ test("shows the migrated run explorer with detail and comparison tables", async 
   await expect(page.getByText("run-asset-1: robust score")).toBeVisible();
 });
 
-test("shows the current live decision and candidate board", async ({ page }) => {
+test("shows live ops controls and supports admin actions", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: /Live Decision/ }).click();
+  await page.getByRole("button", { name: /Live Ops/ }).click();
 
-  await expect(page.getByRole("cell", { name: "QQQ" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Live Ops Console" })).toBeVisible();
+  await expect(page.getByText("Stored-data capture only")).toBeVisible();
+  await expect(page.getByText("Read-only until unlocked")).toBeVisible();
+  await page.getByPlaceholder("Admin password").fill("secret");
+  await page.getByRole("button", { name: "Unlock admin writes" }).click();
+  await expect(page.getByText("Unlocked for this browser session")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Pinned portfolio run" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Save pinned portfolio run" })).toBeEnabled();
+  await page.getByRole("button", { name: "Save pinned portfolio run" }).click();
+  await page.getByRole("button", { name: "Capture current board" }).click();
+  await expect(page.getByRole("cell", { name: "QQQ", exact: true }).first()).toBeVisible();
   await expect(page.getByText("eligible", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Current ranked board" })).toBeVisible();
-  await expect(page.getByRole("cell", { name: "SPY" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "SPY", exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Paper portfolio controls" })).toBeVisible();
+  await page.getByRole("button", { name: "Disable paper trading" }).click();
+  await expect(page.getByRole("heading", { name: "Recent paper journal" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "pending" })).toBeVisible();
 });
 
 test("shows paper performance diagnostics and winner distribution", async ({ page }) => {
