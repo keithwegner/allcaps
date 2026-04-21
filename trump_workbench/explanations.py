@@ -43,19 +43,25 @@ ACCOUNT_ATTRIBUTION_COLUMNS = [
 ]
 
 
+def _series_or_default(frame: pd.DataFrame, column: str, default: object) -> pd.Series:
+    if column in frame.columns:
+        return frame[column]
+    return pd.Series([default] * len(frame), index=frame.index)
+
+
 def build_post_attribution(mapped_posts: pd.DataFrame) -> pd.DataFrame:
     if mapped_posts.empty:
         return pd.DataFrame(columns=POST_ATTRIBUTION_COLUMNS)
 
     posts = mapped_posts.copy()
     posts["signal_session_date"] = pd.to_datetime(posts["session_date"], errors="coerce")
-    posts["engagement_score"] = pd.to_numeric(posts.get("engagement_score", 0.0), errors="coerce").fillna(0.0)
-    posts["sentiment_score"] = pd.to_numeric(posts.get("sentiment_score", 0.0), errors="coerce").fillna(0.0)
-    posts["tracked_discovery_score"] = pd.to_numeric(posts.get("tracked_discovery_score", 0.0), errors="coerce").fillna(0.0)
-    posts["is_active_tracked_account"] = posts.get("is_active_tracked_account", False).fillna(False).astype(bool)
-    posts["author_is_trump"] = posts.get("author_is_trump", False).fillna(False).astype(bool)
-    posts["mentions_trump"] = posts.get("mentions_trump", False).fillna(False).astype(bool)
-    posts["tracked_account_status"] = posts.get("tracked_account_status", "none").fillna("none")
+    posts["engagement_score"] = pd.to_numeric(_series_or_default(posts, "engagement_score", 0.0), errors="coerce").fillna(0.0)
+    posts["sentiment_score"] = pd.to_numeric(_series_or_default(posts, "sentiment_score", 0.0), errors="coerce").fillna(0.0)
+    posts["tracked_discovery_score"] = pd.to_numeric(_series_or_default(posts, "tracked_discovery_score", 0.0), errors="coerce").fillna(0.0)
+    posts["is_active_tracked_account"] = _series_or_default(posts, "is_active_tracked_account", False).fillna(False).astype(bool)
+    posts["author_is_trump"] = _series_or_default(posts, "author_is_trump", False).fillna(False).astype(bool)
+    posts["mentions_trump"] = _series_or_default(posts, "mentions_trump", False).fillna(False).astype(bool)
+    posts["tracked_account_status"] = _series_or_default(posts, "tracked_account_status", "none").fillna("none")
 
     posts["author_weight"] = (
         1.0
@@ -106,4 +112,3 @@ def build_account_attribution(post_attribution: pd.DataFrame) -> pd.DataFrame:
         ["signal_session_date", "abs_net_post_signal", "post_count"],
         ascending=[True, False, False],
     ).reset_index(drop=True)
-

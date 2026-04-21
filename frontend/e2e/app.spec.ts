@@ -136,6 +136,100 @@ const runsPayload = {
   ],
 };
 
+const modelTrainingPayload = {
+  admin: {
+    write_requires_unlock: true,
+  },
+  status: {
+    ready: true,
+    active_job_id: "",
+    readiness_errors: {
+      single_asset: [],
+      saved_run_portfolio: [],
+      joint_portfolio: [],
+    },
+  },
+  defaults: {
+    single_asset: {
+      run_name: "baseline-research-run",
+      target_asset: "SPY",
+      feature_version: "v1",
+    },
+    saved_run_portfolio: {
+      run_name: "portfolio-allocator-run",
+      fallback_mode: "SPY",
+    },
+    joint_portfolio: {
+      run_name: "joint-portfolio-run",
+      feature_version: "asset-v1",
+      selected_symbols: ["SPY", "QQQ", "NVDA"],
+    },
+  },
+  asset_options: [
+    { symbol: "SPY", label: "SPY - SPDR S&P 500 ETF Trust" },
+    { symbol: "QQQ", label: "QQQ - Invesco QQQ Trust" },
+  ],
+  feature_versions: ["asset-v1"],
+  asset_session_symbols: ["SPY", "QQQ", "NVDA"],
+  narrative_feature_modes: ["baseline", "narrative_only", "hybrid"],
+  model_families: ["ridge", "elastic_net", "hist_gradient_boosting_regressor"],
+  topology_variants: ["per_asset", "pooled"],
+  run_options: runsPayload.runs,
+  asset_model_runs: [
+    {
+      run_id: "run-asset-1",
+      run_name: "SPY Baseline",
+      target_asset: "SPY",
+      run_type: "asset_model",
+      selected_params: {
+        threshold: 0.001,
+      },
+    },
+    {
+      run_id: "run-asset-qqq",
+      run_name: "QQQ Baseline",
+      target_asset: "QQQ",
+      run_type: "asset_model",
+    },
+  ],
+  recent_jobs: [
+    {
+      job_id: "model-training-1",
+      workflow_mode: "joint_portfolio",
+      status: "success",
+      run_id: "run-portfolio-1",
+      run_name: "Portfolio Alpha",
+    },
+  ],
+};
+
+const modelTrainingStartedPayload = {
+  ...modelTrainingPayload,
+  job_id: "model-training-2",
+  status: {
+    ...modelTrainingPayload.status,
+    active_job_id: "model-training-2",
+  },
+  recent_jobs: [
+    {
+      job_id: "model-training-2",
+      workflow_mode: "joint_portfolio",
+      status: "success",
+      run_id: "run-portfolio-2",
+      run_name: "Joint Portfolio Web Test",
+      run_type: "portfolio_allocator",
+      target_asset: "PORTFOLIO",
+      summary: JSON.stringify({
+        metrics: {
+          total_return: 0.07,
+          robust_score: 1.4,
+        },
+      }),
+    },
+    ...modelTrainingPayload.recent_jobs,
+  ],
+};
+
 const runDetailPayload = {
   found: true,
   run_id: "run-portfolio-1",
@@ -710,6 +804,14 @@ async function mockApi(page: Page) {
     recent_jobs: datasetAdminPayload.refresh_jobs,
   });
   await fulfillJson(page, "/api/runs", runsPayload);
+  await fulfillJson(page, "/api/models/training", modelTrainingPayload);
+  await fulfillJson(page, "/api/models/jobs", modelTrainingStartedPayload);
+  await fulfillJson(page, "/api/models/jobs/model-training-2", {
+    job_id: "model-training-2",
+    found: true,
+    job: modelTrainingStartedPayload.recent_jobs[0],
+    recent_jobs: modelTrainingStartedPayload.recent_jobs,
+  });
   await fulfillJson(page, "/api/runs/run-portfolio-1**", runDetailPayload);
   await fulfillJson(page, "/api/runs/compare**", runComparisonPayload);
   await fulfillJson(page, "/api/research**", researchPayload);
@@ -820,6 +922,34 @@ test("shows the migrated run explorer with detail and comparison tables", async 
   await expect(page.getByRole("heading", { name: "Compare saved runs" })).toBeVisible();
   await expect(page.getByRole("cell", { name: "SPY Baseline" })).toBeVisible();
   await expect(page.getByText("run-asset-1: robust score")).toBeVisible();
+});
+
+test("shows model training forms and submits an admin job", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: /Model Training/ }).click();
+
+  await expect(page.getByRole("heading", { name: "Model Training Job Console" })).toBeVisible();
+  await expect(page.getByText("Read-only until unlocked")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Single Asset" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Saved-Run Portfolio" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Joint Portfolio" })).toBeVisible();
+  await page.getByPlaceholder("Admin password").fill("secret");
+  await page.getByRole("button", { name: "Unlock admin writes" }).click();
+  await expect(page.getByText("Unlocked for this browser session")).toBeVisible();
+  await page.getByRole("button", { name: "Saved-Run Portfolio" }).click();
+  await expect(page.getByRole("heading", { name: "Saved-Run Portfolio configuration" })).toBeVisible();
+  await page.getByRole("button", { name: "Single Asset" }).click();
+  await expect(page.getByRole("heading", { name: "Single Asset configuration" })).toBeVisible();
+  await page.getByRole("button", { name: "Joint Portfolio" }).click();
+  await expect(page.getByRole("heading", { name: "Joint Portfolio configuration" })).toBeVisible();
+  await page.getByRole("button", { name: "Start model training job" }).click();
+  await expect(page.getByRole("heading", { name: "Latest training result" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Inspect in Run Explorer" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Configure in Live Ops" })).toBeEnabled();
+  await expect(page.getByRole("cell", { name: "model-training-2" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "run-portfolio-2" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Saved asset-model run options" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "QQQ Baseline" })).toBeVisible();
 });
 
 test("shows live ops controls and supports admin actions", async ({ page }) => {

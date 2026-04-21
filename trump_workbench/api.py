@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .access import verify_admin_password
+from .backtesting import BacktestService
 from .config import AppSettings
 from .dataset_admin import (
     UploadedCsv,
@@ -35,6 +36,12 @@ from .live_ops import (
 )
 from .market import MarketDataService
 from .modeling import ModelService
+from .model_training import (
+    ModelTrainingRequest,
+    build_model_training_payload,
+    ensure_model_training_jobs_frame,
+    submit_model_training_job,
+)
 from .paper_trading import (
     PaperTradingService,
     ensure_paper_benchmark_curve_frame,
@@ -80,6 +87,53 @@ class WatchlistSaveRequest(BaseModel):
     reset: bool = False
 
 
+class ModelTrainingJobRequest(BaseModel):
+    workflow_mode: str
+    run_name: str = ""
+    target_asset: str = "SPY"
+    feature_version: str = ""
+    llm_enabled: bool = False
+    train_window: int = 90
+    validation_window: int = 30
+    test_window: int = 30
+    step_size: int = 30
+    transaction_cost_bps: float = 2.0
+    ridge_alpha: float = 1.0
+    threshold_grid: str | list[float] = "0,0.001,0.0025,0.005"
+    minimum_signal_grid: str | list[int] = "1,2,3"
+    account_weight_grid: str | list[float] = "0.5,1.0,1.5"
+    fallback_mode: str = "SPY"
+    component_run_ids: list[str] = []
+    selected_symbols: list[str] = []
+    topology_variants: list[str] = []
+    model_families: list[str] = []
+    narrative_feature_modes: list[str] = []
+
+    def to_training_request(self) -> ModelTrainingRequest:
+        return ModelTrainingRequest(
+            workflow_mode=self.workflow_mode,
+            run_name=self.run_name,
+            target_asset=self.target_asset,
+            feature_version=self.feature_version,
+            llm_enabled=self.llm_enabled,
+            train_window=self.train_window,
+            validation_window=self.validation_window,
+            test_window=self.test_window,
+            step_size=self.step_size,
+            transaction_cost_bps=self.transaction_cost_bps,
+            ridge_alpha=self.ridge_alpha,
+            threshold_grid=self.threshold_grid,
+            minimum_signal_grid=self.minimum_signal_grid,
+            account_weight_grid=self.account_weight_grid,
+            fallback_mode=self.fallback_mode,
+            component_run_ids=tuple(self.component_run_ids),
+            selected_symbols=tuple(self.selected_symbols),
+            topology_variants=tuple(self.topology_variants),
+            model_families=tuple(self.model_families),
+            narrative_feature_modes=tuple(self.narrative_feature_modes),
+        )
+
+
 def _json_safe(value: Any) -> Any:
     if isinstance(value, pd.Timestamp):
         return None if pd.isna(value) else value.isoformat()
@@ -114,7 +168,9 @@ def create_app(
     discovery_service: DiscoveryService | None = None,
     feature_service: FeatureService | None = None,
     health_service: DataHealthService | None = None,
+    backtest_service: BacktestService | None = None,
     run_refresh_jobs_inline: bool = False,
+    run_model_training_jobs_inline: bool = False,
 ) -> FastAPI:
     settings = settings or AppSettings()
     store = store or DuckDBStore(settings)
@@ -126,6 +182,7 @@ def create_app(
     ingestion_service = ingestion_service or IngestionService()
     market_service = market_service or MarketDataService()
     feature_service = feature_service or FeatureService(enrichment_service)
+    backtest_service = backtest_service or BacktestService(model_service)
     paper_service = PaperTradingService(store)
     performance_service = PerformanceObservatoryService(store)
 
@@ -138,6 +195,7 @@ def create_app(
     app.state.store = store
     app.state.admin_tokens = {}
     app.state.run_refresh_jobs_inline = bool(run_refresh_jobs_inline)
+    app.state.run_model_training_jobs_inline = bool(run_model_training_jobs_inline)
 
     if settings.api_cors_origins:
         app.add_middleware(
@@ -373,6 +431,52 @@ def create_app(
     @app.get("/api/datasets/jobs/{job_id}")
     def dataset_refresh_job(job_id: str) -> dict[str, Any]:
         jobs = ensure_refresh_jobs_frame(store.read_frame("dataset_refresh_jobs"))
+        current = jobs.loc[jobs["job_id"].astype(str) == str(job_id)].copy()
+        return _json_safe(
+            {
+                "job_id": job_id,
+                "found": not current.empty,
+                "job": _frame_records(current.tail(1))[0] if not current.empty else None,
+                "recent_jobs": _frame_records(jobs.tail(10)),
+            },
+        )
+
+    @app.get("/api/models/training")
+    def model_training() -> dict[str, Any]:
+        return _json_safe(
+            build_model_training_payload(
+                store=store,
+                experiment_store=experiment_store,
+            ),
+        )
+
+    @app.post("/api/models/jobs")
+    def start_model_training_job(
+        request: ModelTrainingJobRequest,
+        _admin: None = Depends(require_admin),
+    ) -> dict[str, Any]:
+        job_id, errors = submit_model_training_job(
+            store=store,
+            experiment_store=experiment_store,
+            feature_service=feature_service,
+            backtest_service=backtest_service,
+            request=request.to_training_request(),
+            run_inline=bool(app.state.run_model_training_jobs_inline),
+        )
+        if errors:
+            status_code = 409 if any("already running" in error for error in errors) else 400
+            raise HTTPException(status_code=status_code, detail=errors)
+        payload = build_model_training_payload(
+            store=store,
+            experiment_store=experiment_store,
+            active_job_id=job_id,
+        )
+        payload["job_id"] = job_id
+        return _json_safe(payload)
+
+    @app.get("/api/models/jobs/{job_id}")
+    def model_training_job(job_id: str) -> dict[str, Any]:
+        jobs = ensure_model_training_jobs_frame(store.read_frame("model_training_jobs"))
         current = jobs.loc[jobs["job_id"].astype(str) == str(job_id)].copy()
         return _json_safe(
             {
