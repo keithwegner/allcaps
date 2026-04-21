@@ -589,6 +589,81 @@ const researchPayload = {
   export_filename: "research-pack-20250120-20260420.zip",
 };
 
+const researchAssetPayload = {
+  ready: true,
+  message: "",
+  source_mode: researchPayload.source_mode,
+  filters: researchPayload.filters,
+  controls: {
+    selected_asset: "NVDA",
+    comparison_mode: "normalized",
+    benchmark_symbol: "QQQ",
+    pre_sessions: 3,
+    post_sessions: 5,
+    before_minutes: 120,
+    after_minutes: 240,
+    intraday_session_date: "2026-04-17",
+    intraday_anchor_post_id: "truth-1",
+  },
+  asset_options: [{ symbol: "NVDA", label: "NVDA - NVIDIA", source: "watchlist", is_watchlist: true, has_daily: true }],
+  benchmark_options: ["None", "QQQ", "XLK", "XLF", "XLE", "SMH"],
+  headline_metrics: {
+    sessions_in_range: 12,
+    spy_move: 0.04,
+    asset_move: 0.12,
+    asset_vs_spy_spread: 0.08,
+    mapped_post_count: 2,
+    asset_session_count: 2,
+    event_count: 2,
+    intraday_bars: 9,
+  },
+  charts: {
+    overlay: {
+      data: [{ type: "scatter", mode: "lines", x: ["2026-04-17"], y: [0.12], name: "NVDA" }],
+      layout: { title: { text: "SPY vs. NVDA normalized returns" } },
+    },
+    event_study: {
+      data: [{ type: "scatter", mode: "lines+markers", x: [-1, 0, 1], y: [-0.01, 0, 0.02], name: "NVDA" }],
+      layout: { title: { text: "SPY vs. NVDA event study" } },
+    },
+    intraday: {
+      data: [{ type: "scatter", mode: "lines", x: ["2026-04-17T13:35:00Z"], y: [0.01], name: "NVDA" }],
+      layout: { title: { text: "SPY vs. NVDA intraday reaction" } },
+    },
+  },
+  asset_session_rows: [{ trade_date: "2026-04-17", post_count: 2, next_session_return: 0.012 }],
+  mapped_post_rows: [
+    {
+      asset_symbol: "NVDA",
+      session_date: "2026-04-17",
+      author_handle: "realDonaldTrump",
+      match_reasons: "semantic_primary_asset",
+      post_text: "Semiconductor production is strong.",
+    },
+  ],
+  event_study_rows: [{ symbol: "NVDA", relative_session: 1, avg_relative_return: 0.02, event_count: 2 }],
+  intraday_anchor_options: [
+    {
+      anchor_id: "truth-1",
+      session_date: "2026-04-17",
+      label: "2026-04-17 09:35 ET | @realDonaldTrump | Semiconductor production is strong.",
+      post_timestamp: "2026-04-17T13:35:00Z",
+    },
+  ],
+  intraday_coverage_rows: [
+    { symbol: "SPY", bars: 3, covered_dates: "2026-04-17" },
+    { symbol: "NVDA", bars: 3, covered_dates: "2026-04-17" },
+    { symbol: "QQQ", bars: 3, covered_dates: "2026-04-17" },
+  ],
+  intraday_window_rows: [{ symbol: "NVDA", timestamp: "2026-04-17T13:35:00Z", normalized_return: 0.01 }],
+  empty_states: {
+    asset_market: "",
+    mapped_posts: "",
+    event_study: "",
+    intraday: "",
+  },
+};
+
 const discoveryPayload = {
   ready: true,
   message: "Discovery ranks non-Trump X accounts that mention Trump.",
@@ -906,6 +981,7 @@ async function mockApi(page: Page) {
   await fulfillJson(page, "/api/replay**", replayPayload);
   await fulfillJson(page, "/api/replay/session**", replaySessionPayload);
   await fulfillJson(page, "/api/research**", researchPayload);
+  await fulfillJson(page, "/api/research/assets**", researchAssetPayload);
   await fulfillJson(page, "/api/discovery", discoveryPayload);
   await fulfillJson(page, "/api/live/current", livePayload);
   await fulfillJson(page, "/api/live/ops", liveOpsPayload);
@@ -973,6 +1049,17 @@ test("shows the migrated research workspace with narratives and export", async (
   await expect(page.getByRole("heading", { name: "Structured narrative inspection" })).toBeVisible();
   await expect(page.getByRole("cell", { name: "markets" }).first()).toBeVisible();
   await expect(page.getByText("heuristic-fallback")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Multi-asset comparison, event study, and intraday reaction" })).toBeVisible();
+  await expect(page.locator("label", { hasText: "Selected asset" }).locator("select")).toHaveValue("NVDA");
+  await expect(page.getByLabel("ETF baseline")).toHaveValue("QQQ");
+  await expect(page.getByText("Mapped posts", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "SPY vs. selected asset" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Event study", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Intraday reaction", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Mapped posts for selected asset" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "semantic_primary_asset" }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Intraday coverage" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "NVDA" }).first()).toBeVisible();
 });
 
 test("shows the migrated discovery workspace with rankings and overrides", async ({ page }) => {
