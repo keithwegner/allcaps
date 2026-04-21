@@ -4232,6 +4232,10 @@ def main() -> None:
         "Single-user web workbench for ingesting Trump-related social data, discovering influential mention accounts, "
         "building next-session features for SPY and watchlist assets, and evaluating long/flat strategies with walk-forward testing.",
     )
+    st.info(
+        "React + FastAPI is now the primary app surface for day-to-day workflows. "
+        "This Streamlit shell remains available as a fallback while legacy-only views are retired.",
+    )
 
     store = DuckDBStore(settings)
     ingestion_service = IngestionService()

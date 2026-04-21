@@ -1,14 +1,14 @@
 # Trump Social Trading Research Workbench
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![UI: Streamlit](https://img.shields.io/badge/ui-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
 [![API: FastAPI](https://img.shields.io/badge/api-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Frontend: React](https://img.shields.io/badge/frontend-React%20%2B%20Vite-61DAFB?logo=react&logoColor=black)](https://vite.dev/)
+[![Primary UI: React](https://img.shields.io/badge/primary%20ui-React%20%2B%20Vite-61DAFB?logo=react&logoColor=black)](https://vite.dev/)
+[![Fallback UI: Streamlit](https://img.shields.io/badge/fallback%20ui-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
 [![Storage: DuckDB + Parquet](https://img.shields.io/badge/storage-DuckDB%20%2B%20Parquet-FFF000?logo=duckdb&logoColor=black)](https://duckdb.org/)
 [![CI](https://github.com/keithwegner/allcaps/actions/workflows/ci.yml/badge.svg)](https://github.com/keithwegner/allcaps/actions/workflows/ci.yml)
 [![Status: Experimental](https://img.shields.io/badge/status-experimental-orange)](https://github.com/keithwegner/allcaps)
 
-This is a local Streamlit workbench for researching whether President Donald Trump's social posts, plus posts from influential X accounts that mention him, help predict the **next trading session's SPY return**.
+This is a React + FastAPI workbench for researching whether President Donald Trump's social posts, plus posts from influential X accounts that mention him, help predict next-session market behavior across `SPY` and tracked assets. The Python analytics engine remains intact, and the Streamlit app is kept as a fallback shell while legacy-only surfaces are retired.
 
 In plain English, the app helps you:
 
@@ -25,18 +25,18 @@ In plain English, the app helps you:
 - [What You Need Before You Start](#what-you-need-before-you-start)
 - [Quick Start](#quick-start)
 - [Contributor Workflow](#contributor-workflow)
-- [Web-First Migration Preview](#web-first-migration-preview)
+- [React + FastAPI Primary App](#react--fastapi-primary-app)
 - [Run With Docker](#run-with-docker)
 - [Hosting On Render](#hosting-on-render)
 - [Hosted Environment Variables](#hosted-environment-variables)
 - [Recommended First Run](#recommended-first-run)
 - [Trump Truth Social-Only Workflow](#trump-truth-social-only-workflow)
 - [How To Work With Each Page](#how-to-work-with-each-page)
-  - [`Datasets`](#datasets)
+  - [`Data Admin`](#data-admin)
   - [`Discovery`](#discovery)
-  - [`Research View`](#research-view)
-  - [`Models & Backtests`](#models--backtests)
-  - [`Live Monitor`](#live-monitor)
+  - [`Research`](#research)
+  - [`Model Training` and `Run Explorer`](#model-training-and-run-explorer)
+  - [`Live Ops` and `Paper + Performance`](#live-ops-and-paper--performance)
 - [Data Inputs](#data-inputs)
 - [CSV Expectations](#csv-expectations)
 - [What Gets Stored Locally](#what-gets-stored-locally)
@@ -69,6 +69,22 @@ The app can start with just Truth Social plus market data, but the **Discovery**
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
+python -m uvicorn trump_workbench.api:app --reload --host 127.0.0.1 --port 8000
+```
+
+Run the React frontend in a second terminal:
+
+```bash
+npm install --prefix frontend
+npm run dev --prefix frontend
+```
+
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173).
+
+Fallback Streamlit shell:
+
+```bash
+source .venv/bin/activate
 python -m streamlit run app.py
 ```
 
@@ -85,15 +101,15 @@ bash scripts/ci.sh
 
 `main` is intended to stay behind pull requests with a green `ci` check, so `bash scripts/ci.sh` is the local pre-push baseline.
 
-## Web-First Migration Preview
+## React + FastAPI Primary App
 
-The Streamlit app remains available while the web-first migration is built in slices. The current web surface adds:
+React + FastAPI is now the primary day-to-day application surface. The current web app includes:
 
 - a FastAPI backend in `trump_workbench/api.py`
 - a React + TypeScript + Vite frontend in `frontend/`
-- API-backed views for status, research, Discovery, saved runs, live decisions, paper portfolios, performance diagnostics, and dataset administration
-- a migrated read-only Research workspace with sentiment filters, interactive Plotly charts, Narrative Lab outputs, and research ZIP export
-- admin-gated React controls for Live Ops and Data Admin workflows, including pinned portfolio-run configuration, paper controls, watchlist edits, CSV inputs, and dataset refresh jobs
+- API-backed views for status, research, Discovery, saved runs, replay, live decisions, paper portfolios, performance diagnostics, and dataset administration
+- read-only research surfaces with sentiment filters, Asset Lab, interactive Plotly charts, Narrative Lab outputs, and research ZIP export
+- admin-gated React controls for Discovery overrides, Data Admin, Model Training, Live Ops, and paper portfolio workflows
 
 Run the API locally:
 
@@ -119,32 +135,36 @@ Optional frontend env var:
 
 - `VITE_ALLCAPS_API_BASE_URL=http://127.0.0.1:8000`
 
-The React app is now mixed read/write. Public users can browse research and status pages, while mutating Data Admin and Live Ops actions require an admin token from `/api/admin/session`. Model training and Discovery override writes still live in Streamlit until those workflows are migrated behind explicit job APIs.
+The React app is mixed read/write. Public users can browse research, saved runs, replay, live history, paper history, and performance pages. Mutating Discovery, Data Admin, Model Training, Live Ops, and paper controls require an admin token from `/api/admin/session`.
 
-Run browser UI tests for the React shell:
+Run browser UI tests for the React app:
 
 ```bash
 npm exec --prefix frontend playwright install chromium
 npm run test:ui --prefix frontend
 ```
 
-On the first launch, the app may take a little longer because it can bootstrap local working datasets automatically.
+The React app opens as a tabbed workbench with these primary sections:
 
-The app opens as a multi-page Streamlit workbench with these sections:
-
-- `Research View`
-- `Datasets`
+- `Overview`
+- `Research`
 - `Discovery`
-- `Models & Backtests`
-- `Live Monitor`
+- `Run Explorer`
+- `Replay`
+- `Model Training`
+- `Data Admin`
+- `Live Ops`
+- `Paper + Performance`
+
+Streamlit remains available for fallback validation and the legacy Alpha Vantage SPY intraday drill-down. New day-to-day workflows should use React first.
 
 ## Run With Docker
 
-The repo includes local Docker packaging for a single-user browser workflow.
+The repo includes local Docker packaging for a single-user browser workflow. The current Compose package serves the fallback Streamlit shell on port `8501`; use the Quick Start commands above for the primary React + FastAPI development workflow.
 
 Default behavior:
 
-- runs the app on [http://127.0.0.1:8501](http://127.0.0.1:8501)
+- runs the fallback Streamlit shell on [http://127.0.0.1:8501](http://127.0.0.1:8501)
 - keeps the app private and writable by default
 - stores runtime state in a named Docker volume mounted at `/var/data`
 - leaves the scheduler off by default
@@ -205,11 +225,13 @@ That will store DuckDB, parquet data, cache files, and run artifacts in `./docke
 
 The repo includes a first-pass Render deployment blueprint in `render.yaml` plus a startup script at `scripts/start_render.sh`.
 
+Current hosted packaging still launches the fallback Streamlit shell. A production React + FastAPI hosting cutover should update the Render start command to serve the FastAPI API plus the built React frontend, or split those into explicit web services. Until then, Render is useful for the existing single-service Streamlit deployment shape.
+
 This deployment shape assumes:
 
 - one Render web service
 - one persistent disk mounted at `/var/data`
-- public read-only browsing by default
+- public read-only browsing by default in the fallback shell
 - admin-only writes for dataset refreshes, watchlist edits, and run creation
 - a background scheduler inside the same service for nightly full refreshes and 30-minute incremental refreshes
 
@@ -244,31 +266,31 @@ The hosted deployment uses these env vars:
 
 If you are new to the app, follow this order:
 
-1. Open React `Data Admin` or Streamlit `Datasets`.
-2. Run `Bootstrap`, `Full`, or `Refresh full datasets`.
+1. Open React `Data Admin`.
+2. Run `Bootstrap`, `Full`, or `Incremental` refresh.
 3. If you have X data, upload CSVs or point the app at a remote CSV URL.
 4. Open `Discovery` and review the tracked-account universe if you loaded X/mention data.
-5. Open `Research View` to inspect mapped posts and market context.
-6. Open `Models & Backtests` and run a baseline walk-forward backtest.
-7. Save a joint portfolio run in `Models & Backtests`.
-8. Open `Live Monitor` to pin that run, inspect the live board, and optionally enable paper trading.
+5. Open `Research` to inspect mapped posts, narratives, Asset Lab charts, and market context.
+6. Open `Model Training` and run a baseline or joint portfolio model.
+7. Open `Run Explorer` to inspect metrics, variants, diagnostics, and comparisons.
+8. Open `Live Ops` to pin a deployment run, inspect the live board, and optionally enable paper trading.
 
 ## Trump Truth Social-Only Workflow
 
 Use this workflow when you want to review sentiment based only on Donald Trump's Truth Social posts.
 
-1. Open `Datasets`.
-2. Click `Refresh full datasets` or `Bootstrap datasets`.
-3. Open `Research View`.
+1. Open `Data Admin`.
+2. Click `Full` or `Bootstrap`.
+3. Open `Research`.
 4. Confirm `Platforms` is set to `Truth Social`.
 5. Confirm `Trump-authored only` is enabled.
 6. Ignore `Discovery` unless you also want to load X/mention CSVs and rank non-Trump X accounts.
 
-When the stored dataset contains only Truth Social rows, the app auto-detects that mode and seeds the Research View controls to the Truth-only scope.
+When the stored dataset contains only Truth Social rows, the app auto-detects that mode and seeds the Research controls to the Truth-only scope.
 
 ## How To Work With Each Page
 
-### `Datasets`
+### `Data Admin`
 
 This is the best place to start.
 
@@ -284,8 +306,9 @@ The React `Data Admin` tab covers day-to-day dataset operations through FastAPI:
 
 Buttons:
 
-- `Refresh full datasets`: rebuilds the local working datasets from scratch
-- `Incremental refresh`: polls for newer rows and appends them when possible
+- `Full`: rebuilds the working datasets from stored/source inputs
+- `Bootstrap`: initializes missing core datasets
+- `Incremental`: polls for newer rows and appends them when possible
 
 ## `Discovery`
 
@@ -304,7 +327,7 @@ Important note:
 - If you do not provide X/mention data, the page may have little or nothing to rank
 - The page uses historical effective dates, so overrides and account inclusion can be evaluated without lookahead leakage
 
-## `Research View`
+## `Research`
 
 This is the descriptive analysis page.
 
@@ -316,25 +339,25 @@ Use it to:
 - inspect sentiment candlesticks built from mapped post sessions
 - review session-level and post-level tables
 - download a ZIP research pack for the current filters
-- drill into an intraday SPY reaction window for a selected post
+- compare selected assets, event-study windows, and stored intraday reaction windows
 
 Important note:
 
 - The research page is for exploration, not proof of causality
-- Intraday drill-down depends on Alpha Vantage data and is optional
+- The primary React intraday workflow uses stored `asset_intraday` rows
+- The older Alpha Vantage SPY drill-down remains available only in the fallback Streamlit shell
 - For a Truth Social-only review, set `Platforms` to `Truth Social` and enable `Trump-authored only`
 
-## `Models & Backtests`
+## `Model Training` and `Run Explorer`
 
-This page turns the dataset into features, trains a model, and evaluates the trading idea.
+These tabs turn the dataset into features, train models, and inspect saved results.
 
 Use it to:
 
-- build the latest session-feature dataset
-- train a next-session expected-return model
-- run walk-forward optimization
-- compare saved runs
-- inspect strategy metrics, benchmark tables, leakage audits, and prediction misses
+- run single-asset, saved-run portfolio, or joint portfolio training jobs
+- compare saved runs and portfolio variants
+- inspect strategy metrics, benchmark tables, leakage audits, feature contributions, and prediction misses
+- reconstruct historical asset-model decisions in `Replay`
 
 Inputs you can tune here include:
 
@@ -348,13 +371,12 @@ Inputs you can tune here include:
 - minimum-post-count grid
 - tracked-account-weight grid
 
-## `Live Monitor`
+## `Live Ops` and `Paper + Performance`
 
 This page gives you a live decision console after you already have a saved joint portfolio run.
 
 Use it to:
 
-- poll sources for new rows
 - pin a saved joint portfolio run for live monitoring
 - inspect the ranked live asset board and current suggested stance
 - review explanation details for the winner and runner-up
@@ -364,7 +386,7 @@ Use it to:
 
 Important note:
 
-- This page will not do much until you have already created at least one saved joint portfolio run in `Models & Backtests`
+- These pages will not do much until you have already created at least one saved joint portfolio run in `Model Training`
 - The `Performance Observatory` is informational only. It does not retrain models, block live decisions, or change paper-trading behavior.
 
 ## Data Inputs
@@ -427,14 +449,14 @@ For hosted deployments, the same paths are created under `ALLCAPS_STATE_DIR` ins
 
 Here is the most common way to use the app from start to finish:
 
-1. Refresh data in `Datasets`.
+1. Refresh data in `Data Admin`.
 2. Add X or mention CSVs if you want account discovery.
 3. Review the `Discovery` page and pin or suppress accounts you care about.
-4. Explore `Research View` to sanity-check whether the mapped posts look reasonable.
-5. Run a default experiment in `Models & Backtests`.
-6. Compare the strategy against the built-in baselines.
+4. Explore `Research` to sanity-check whether the mapped posts look reasonable.
+5. Run a default job in `Model Training`.
+6. Compare the strategy against the built-in baselines in `Run Explorer`.
 7. Save a joint portfolio run if you want live portfolio monitoring.
-8. Use `Live Monitor` to watch the latest board, pin a deployment run, and optionally track paper PnL.
+8. Use `Live Ops` and `Paper + Performance` to watch the latest board, pin a deployment run, and optionally track paper PnL.
 
 ## Troubleshooting
 
@@ -443,19 +465,19 @@ If `Discovery` is empty:
 - make sure you loaded X mention data, not only Truth Social data
 - refresh datasets again after adding CSVs
 
-If `Research View` says it has no source data:
+If `Research` says it has no source data:
 
-- open `Datasets` and run a full refresh
+- open `Data Admin` and run a full refresh
 
-If `Models & Backtests` says there is no data:
+If `Model Training` says there is no data:
 
 - make sure both normalized posts and SPY daily data were loaded successfully
 
-If `Live Monitor` says there is no saved model:
+If `Live Ops` says there is no saved model:
 
-- create and save a joint portfolio run in `Models & Backtests` first
+- create and save a joint portfolio run in `Model Training` first
 
-If `Live Monitor` shows no paper portfolio history:
+If `Paper + Performance` shows no paper portfolio history:
 
 - save and pin a joint portfolio run first
 - enable paper trading from the `Paper Portfolio` tab
@@ -469,7 +491,8 @@ If the `Performance Observatory` has limited diagnostics:
 
 If the intraday drill-down fails:
 
-- verify your Alpha Vantage setup or skip the intraday section
+- use the React Asset Lab stored-intraday workflow first
+- verify your Alpha Vantage setup only if you are using the fallback Streamlit SPY drill-down
 
 ## Current Limits
 
@@ -479,6 +502,7 @@ If the intraday drill-down fails:
 - semantic enrichment is optional and heuristic-backed by default
 - hosted mode is still single-instance and admin-gated rather than full multi-user auth
 - the research and live layers are decision-support tools, not production trading infrastructure
+- Streamlit remains in the repo as a fallback shell; it is not the primary user interface
 
 ## Architecture
 
@@ -492,9 +516,9 @@ The code is organized as a modular monolith under `trump_workbench/`:
 - `backtesting.py` for walk-forward evaluation and strategy simulation
 - `experiments.py` for saved runs and artifacts
 - `research.py` for descriptive visualization helpers
-- `ui.py` for the Streamlit app shell
-- `api.py` for the FastAPI migration surface
-- `frontend/` for the React + TypeScript web shell
+- `ui.py` for the fallback Streamlit app shell
+- `api.py` for the primary FastAPI surface
+- `frontend/` for the primary React + TypeScript web app
 
 ## Testing
 
