@@ -15,6 +15,11 @@
   --warning: #ba7b16;
   --severe: #9a2f28;
   --shadow: 0 24px 70px rgba(54, 45, 29, 0.18);
+  --shadow-lift: 0 32px 88px rgba(54, 45, 29, 0.24);
+  --motion-fast: 180ms;
+  --motion-medium: 420ms;
+  --motion-slow: 720ms;
+  --motion-ease: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 * {
@@ -25,10 +30,40 @@ body {
   min-width: 320px;
   min-height: 100vh;
   margin: 0;
+  overflow-x: hidden;
   background:
     radial-gradient(circle at 10% 0%, rgba(188, 108, 76, 0.18), transparent 32rem),
     radial-gradient(circle at 90% 8%, rgba(109, 155, 120, 0.26), transparent 28rem),
     linear-gradient(135deg, #f6efe2 0%, #e8eadb 54%, #dfe8d6 100%);
+}
+
+body::before,
+body::after {
+  position: fixed;
+  inset: -18%;
+  z-index: 0;
+  pointer-events: none;
+  content: "";
+}
+
+body::before {
+  opacity: 0.42;
+  background:
+    radial-gradient(circle at 18% 24%, rgba(255, 255, 255, 0.58), transparent 18rem),
+    radial-gradient(circle at 72% 18%, rgba(188, 108, 76, 0.18), transparent 20rem),
+    radial-gradient(circle at 68% 78%, rgba(109, 155, 120, 0.24), transparent 22rem);
+  filter: blur(2px);
+  animation: paperWash 18s var(--motion-ease) infinite alternate;
+}
+
+body::after {
+  opacity: 0.18;
+  background-image:
+    linear-gradient(rgba(23, 32, 24, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(23, 32, 24, 0.08) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(circle at 50% 24%, #000, transparent 68%);
+  animation: gridDrift 28s linear infinite;
 }
 
 button,
@@ -39,6 +74,8 @@ textarea {
 }
 
 .app-shell {
+  position: relative;
+  z-index: 1;
   width: min(1180px, calc(100% - 32px));
   margin: 0 auto;
   padding: 32px 0 56px;
@@ -74,6 +111,10 @@ textarea {
   background: var(--paper);
   box-shadow: var(--shadow);
   backdrop-filter: blur(14px);
+  transition:
+    box-shadow var(--motion-medium) var(--motion-ease),
+    border-color var(--motion-medium) var(--motion-ease),
+    background var(--motion-medium) var(--motion-ease);
 }
 
 .hero-card {
@@ -113,6 +154,7 @@ textarea {
 }
 
 .page-tabs button {
+  position: relative;
   display: grid;
   gap: 4px;
   min-height: 82px;
@@ -123,11 +165,38 @@ textarea {
   border-radius: 20px;
   background: transparent;
   cursor: pointer;
+  overflow: hidden;
+  transition:
+    color var(--motion-fast) var(--motion-ease),
+    background var(--motion-fast) var(--motion-ease),
+    box-shadow var(--motion-fast) var(--motion-ease);
 }
 
 .page-tabs button.active {
   color: #0f1b12;
   background: var(--field);
+}
+
+.page-tabs button:hover,
+.page-tabs button:focus-visible {
+  box-shadow: inset 0 0 0 1px rgba(109, 155, 120, 0.36);
+  outline: none;
+}
+
+.tab-active-wash {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: inherit;
+  background:
+    radial-gradient(circle at 20% 15%, rgba(255, 255, 255, 0.72), transparent 44%),
+    linear-gradient(135deg, rgba(217, 234, 213, 0.96), rgba(255, 252, 244, 0.72));
+}
+
+.page-tabs button > span:not(.tab-active-wash),
+.page-tabs button > small {
+  position: relative;
+  z-index: 1;
 }
 
 .page-tabs span {
@@ -153,6 +222,31 @@ textarea {
   gap: 18px;
 }
 
+.page-motion {
+  display: grid;
+  gap: 18px;
+}
+
+.page-motion .panel,
+.page-motion .metric-grid,
+.page-motion .chart-grid,
+.page-motion .table-wrap,
+.page-motion .empty-state {
+  animation: editorialRise var(--motion-slow) var(--motion-ease) both;
+}
+
+.page-motion .panel:nth-of-type(2n),
+.page-motion .metric-grid:nth-of-type(2n),
+.page-motion .chart-grid:nth-of-type(2n) {
+  animation-delay: 60ms;
+}
+
+.page-motion .panel:nth-of-type(3n),
+.page-motion .metric-grid:nth-of-type(3n),
+.page-motion .chart-grid:nth-of-type(3n) {
+  animation-delay: 120ms;
+}
+
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -163,6 +257,14 @@ textarea {
   min-height: 132px;
   padding: 18px;
   border-radius: 24px;
+}
+
+.metric-card:hover,
+.metric-card:focus-within,
+.panel:hover,
+.chart-frame:hover {
+  border-color: rgba(109, 155, 120, 0.32);
+  box-shadow: var(--shadow-lift);
 }
 
 .metric-card strong {
@@ -258,6 +360,15 @@ textarea {
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 20px;
+  background: rgba(255, 252, 244, 0.3);
+  transition:
+    border-color var(--motion-medium) var(--motion-ease),
+    box-shadow var(--motion-medium) var(--motion-ease);
+}
+
+.table-wrap:hover {
+  border-color: rgba(109, 155, 120, 0.3);
+  box-shadow: 0 18px 44px rgba(54, 45, 29, 0.12);
 }
 
 table {
@@ -285,6 +396,22 @@ th {
 td {
   max-width: 280px;
   overflow-wrap: anywhere;
+}
+
+tbody tr {
+  animation: rowReveal var(--motion-medium) var(--motion-ease) both;
+}
+
+tbody tr:nth-child(2n) {
+  animation-delay: 25ms;
+}
+
+tbody tr:nth-child(3n) {
+  animation-delay: 50ms;
+}
+
+tbody tr:hover {
+  background: rgba(217, 234, 213, 0.35);
 }
 
 select {
@@ -359,6 +486,14 @@ select[multiple] {
 .chart-frame {
   width: 100%;
   min-height: 460px;
+  border-radius: 22px;
+  transition:
+    filter var(--motion-medium) var(--motion-ease),
+    box-shadow var(--motion-medium) var(--motion-ease);
+}
+
+.chart-frame:hover {
+  filter: saturate(1.05) contrast(1.02);
 }
 
 .chart-grid {
@@ -407,6 +542,34 @@ select[multiple] {
   cursor: not-allowed;
 }
 
+select,
+input,
+textarea,
+.button-link,
+.action-button {
+  transition:
+    transform var(--motion-fast) var(--motion-ease),
+    box-shadow var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease),
+    background var(--motion-fast) var(--motion-ease);
+}
+
+select:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+.button-link:focus-visible,
+.action-button:focus-visible {
+  border-color: var(--field-strong);
+  box-shadow: 0 0 0 4px rgba(109, 155, 120, 0.2);
+  outline: none;
+}
+
+.button-link:hover,
+.action-button:not(:disabled):hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 26px rgba(54, 45, 29, 0.14);
+}
+
 .action-button--danger {
   color: #fff;
   background: var(--severe);
@@ -449,8 +612,70 @@ select[multiple] {
   color: var(--muted);
 }
 
+.loading-block {
+  position: relative;
+  overflow: hidden;
+}
+
+.loading-block::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  background: linear-gradient(110deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+  transform: translateX(-100%);
+  animation: loadingSheen 1.4s var(--motion-ease) infinite;
+}
+
 .error-block {
   color: var(--severe);
+}
+
+@keyframes paperWash {
+  0% {
+    transform: translate3d(-1.5%, -1%, 0) scale(1);
+  }
+  100% {
+    transform: translate3d(1.5%, 1%, 0) scale(1.035);
+  }
+}
+
+@keyframes gridDrift {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(44px, 44px, 0);
+  }
+}
+
+@keyframes editorialRise {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+    filter: blur(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes rowReveal {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes loadingSheen {
+  to {
+    transform: translateX(100%);
+  }
 }
 
 @media (max-width: 860px) {
@@ -468,5 +693,22 @@ select[multiple] {
 
   .page-tabs {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 1ms !important;
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+  }
+
+  body::before,
+  body::after,
+  .loading-block::after {
+    animation: none !important;
   }
 }

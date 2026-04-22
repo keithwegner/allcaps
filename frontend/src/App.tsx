@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ComponentType } from "react";
+import type { ComponentType, ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { AnimatePresence, MotionConfig, motion, useReducedMotion } from "motion/react";
 import createPlotlyComponentModule from "react-plotly.js/factory";
 import Plotly from "plotly.js-dist-min";
 import type { Data, Frame, Layout } from "plotly.js";
@@ -33,6 +34,26 @@ const createPlotlyComponent = (
 ) as PlotComponentFactory;
 const Plot = createPlotlyComponent(Plotly);
 
+const editorialEase: [number, number, number, number] = [0.16, 1, 0.3, 1];
+const pageVariants = {
+  initial: { opacity: 0, y: 22, filter: "blur(10px)" },
+  animate: {
+    opacity: 1,
+    y: 0,
+    filter: "blur(0px)",
+    transition: { duration: 0.52, ease: editorialEase, when: "beforeChildren", staggerChildren: 0.045 },
+  },
+  exit: { opacity: 0, y: -12, filter: "blur(8px)", transition: { duration: 0.22, ease: editorialEase } },
+};
+const revealVariants = {
+  initial: { opacity: 0, y: 18 },
+  animate: { opacity: 1, y: 0, transition: { duration: 0.5, ease: editorialEase } },
+};
+const surfaceHover = {
+  y: -5,
+  transition: { duration: 0.22, ease: editorialEase },
+};
+
 type PageKey = "overview" | "research" | "discovery" | "runs" | "replay" | "models" | "data" | "live" | "paper";
 
 const pages: Array<{ key: PageKey; label: string; deck: string }> = [
@@ -52,20 +73,66 @@ function StatusPill({ label, tone = "neutral" }: { label: string; tone?: "neutra
 }
 
 function LoadingBlock({ label }: { label: string }) {
-  return <div className="loading-block">{label}</div>;
+  return (
+    <motion.div className="loading-block" variants={revealVariants} initial="initial" animate="animate">
+      {label}
+    </motion.div>
+  );
 }
 
 function ErrorBlock({ error }: { error: unknown }) {
-  return <div className="error-block">{error instanceof Error ? error.message : "Unable to load API data."}</div>;
+  return (
+    <motion.div className="error-block" variants={revealVariants} initial="initial" animate="animate">
+      {error instanceof Error ? error.message : "Unable to load API data."}
+    </motion.div>
+  );
+}
+
+function MetricValue({ value }: { value: unknown }) {
+  const prefersReducedMotion = useReducedMotion();
+  const numericValue = typeof value === "number" && Number.isFinite(value) ? value : null;
+  const [displayValue, setDisplayValue] = useState<unknown>(value);
+
+  useEffect(() => {
+    if (numericValue === null || prefersReducedMotion) {
+      setDisplayValue(value);
+      return;
+    }
+    const durationMs = 720;
+    const start = performance.now();
+    let animationFrame = 0;
+    const tick = (now: number) => {
+      const progress = Math.min((now - start) / durationMs, 1);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setDisplayValue(numericValue * eased);
+      if (progress < 1) {
+        animationFrame = requestAnimationFrame(tick);
+      }
+    };
+    animationFrame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(animationFrame);
+  }, [numericValue, prefersReducedMotion, value]);
+
+  return <>{formatValue(displayValue)}</>;
+}
+
+function AnimatedPage({ pageKey, children }: { pageKey: PageKey; children: ReactNode }) {
+  return (
+    <motion.div key={pageKey} className="page-motion" variants={pageVariants} initial="initial" animate="animate" exit="exit">
+      {children}
+    </motion.div>
+  );
 }
 
 function MetricCard({ label, value, caption }: { label: string; value: unknown; caption?: string }) {
   return (
-    <article className="metric-card">
+    <motion.article className="metric-card" variants={revealVariants} whileHover={surfaceHover}>
       <span>{label}</span>
-      <strong>{formatValue(value)}</strong>
+      <strong>
+        <MetricValue value={value} />
+      </strong>
       {caption ? <small>{caption}</small> : null}
-    </article>
+    </motion.article>
   );
 }
 
@@ -74,7 +141,7 @@ function PlotlyChart({ figure, title }: { figure?: PlotlyFigure; title: string }
     return <div className="empty-state">No chart data returned yet.</div>;
   }
   return (
-    <div className="chart-frame" aria-label={title}>
+    <motion.div className="chart-frame" aria-label={title} variants={revealVariants} whileHover={surfaceHover}>
       <Plot
         data={(figure.data ?? []) as Data[]}
         layout={
@@ -90,7 +157,7 @@ function PlotlyChart({ figure, title }: { figure?: PlotlyFigure; title: string }
         style={{ width: "100%", height: "100%" }}
         useResizeHandler
       />
-    </div>
+    </motion.div>
   );
 }
 
@@ -106,7 +173,7 @@ function DataTable({ rows, emptyLabel = "No rows returned yet." }: { rows: Recor
   }
 
   return (
-    <div className="table-wrap">
+    <motion.div className="table-wrap" variants={revealVariants}>
       <table>
         <thead>
           <tr>
@@ -125,7 +192,7 @@ function DataTable({ rows, emptyLabel = "No rows returned yet." }: { rows: Recor
           ))}
         </tbody>
       </table>
-    </div>
+    </motion.div>
   );
 }
 
@@ -2448,52 +2515,74 @@ function PaperPerformancePage() {
 export function App() {
   const [activePage, setActivePage] = useState<PageKey>("overview");
   const activeMeta = pages.find((page) => page.key === activePage) ?? pages[0];
+  const pageContent =
+    activePage === "overview" ? (
+      <OverviewPage />
+    ) : activePage === "research" ? (
+      <ResearchPage />
+    ) : activePage === "discovery" ? (
+      <DiscoveryPage />
+    ) : activePage === "runs" ? (
+      <RunExplorerPage />
+    ) : activePage === "replay" ? (
+      <ReplayPage />
+    ) : activePage === "models" ? (
+      <ModelTrainingPage onNavigate={setActivePage} />
+    ) : activePage === "data" ? (
+      <DataAdminPage />
+    ) : activePage === "live" ? (
+      <LiveDecisionPage />
+    ) : (
+      <PaperPerformancePage />
+    );
 
   return (
-    <main className="app-shell">
-      <header className="hero">
-        <div>
-          <p className="eyebrow">AllCaps Web App</p>
-          <h1>Web-first decision workbench</h1>
-          <p>
-            A React and FastAPI decision workbench backed by the existing Python analytics engine.
-          </p>
-        </div>
-        <div className="hero-card">
-          <span>Milestone</span>
-          <strong>React primary cutover</strong>
-          <small>Streamlit fallback retained</small>
-        </div>
-      </header>
+    <MotionConfig reducedMotion="user">
+      <motion.main className="app-shell" initial="initial" animate="animate" variants={pageVariants}>
+        <motion.header className="hero" variants={revealVariants}>
+          <motion.div variants={revealVariants}>
+            <p className="eyebrow">AllCaps Web App</p>
+            <h1>Web-first decision workbench</h1>
+            <p>
+              A React and FastAPI decision workbench backed by the existing Python analytics engine.
+            </p>
+          </motion.div>
+          <motion.div className="hero-card" variants={revealVariants} whileHover={surfaceHover}>
+            <span>Milestone</span>
+            <strong>React primary cutover</strong>
+            <small>Streamlit fallback retained</small>
+          </motion.div>
+        </motion.header>
 
-      <nav className="page-tabs" aria-label="Workbench sections">
-        {pages.map((page) => (
-          <button
-            key={page.key}
-            type="button"
-            className={page.key === activePage ? "active" : ""}
-            onClick={() => setActivePage(page.key)}
-          >
-            <span>{page.label}</span>
-            <small>{page.deck}</small>
-          </button>
-        ))}
-      </nav>
+        <motion.nav className="page-tabs" aria-label="Workbench sections" variants={revealVariants}>
+          {pages.map((page) => (
+            <motion.button
+              key={page.key}
+              type="button"
+              className={page.key === activePage ? "active" : ""}
+              onClick={() => setActivePage(page.key)}
+              whileHover={{ y: -3 }}
+              whileTap={{ scale: 0.98 }}
+            >
+              {page.key === activePage ? (
+                <motion.span className="tab-active-wash" layoutId="active-tab-wash" aria-hidden="true" />
+              ) : null}
+              <span>{page.label}</span>
+              <small>{page.deck}</small>
+            </motion.button>
+          ))}
+        </motion.nav>
 
-      <section className="section-heading">
-        <p className="eyebrow">{activeMeta.label}</p>
-        <h2>{activeMeta.deck}</h2>
-      </section>
-
-      {activePage === "overview" ? <OverviewPage /> : null}
-      {activePage === "research" ? <ResearchPage /> : null}
-      {activePage === "discovery" ? <DiscoveryPage /> : null}
-      {activePage === "runs" ? <RunExplorerPage /> : null}
-      {activePage === "replay" ? <ReplayPage /> : null}
-      {activePage === "models" ? <ModelTrainingPage onNavigate={setActivePage} /> : null}
-      {activePage === "data" ? <DataAdminPage /> : null}
-      {activePage === "live" ? <LiveDecisionPage /> : null}
-      {activePage === "paper" ? <PaperPerformancePage /> : null}
-    </main>
+        <AnimatePresence mode="wait">
+          <AnimatedPage pageKey={activePage}>
+            <motion.section className="section-heading" variants={revealVariants}>
+              <p className="eyebrow">{activeMeta.label}</p>
+              <h2>{activeMeta.deck}</h2>
+            </motion.section>
+            {pageContent}
+          </AnimatedPage>
+        </AnimatePresence>
+      </motion.main>
+    </MotionConfig>
   );
 }
