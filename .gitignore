@@ -11,6 +11,7 @@ htmlcov/
 .workbench/
 docker-state/
 frontend/dist/
+frontend/coverage/
 frontend/node_modules/
 frontend/playwright-report/
 frontend/test-results/
