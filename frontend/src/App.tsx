@@ -28,7 +28,7 @@ const Plot = createPlotlyComponent(Plotly);
 type PageKey = "overview" | "research" | "discovery" | "runs" | "replay" | "models" | "data" | "live" | "paper";
 
 const pages: Array<{ key: PageKey; label: string; deck: string }> = [
-  { key: "overview", label: "Overview", deck: "API status and migration posture" },
+  { key: "overview", label: "Overview", deck: "API status and app posture" },
   { key: "research", label: "Research", deck: "Sentiment, narratives, and export pack" },
   { key: "discovery", label: "Discovery", deck: "Tracked account ranking workspace" },
   { key: "runs", label: "Run Explorer", deck: "Saved model results and comparisons" },
@@ -186,7 +186,7 @@ function ResearchPage() {
       <article className="panel panel--wide">
         <div className="panel-heading">
           <div>
-            <p className="eyebrow">Read-only migration slice</p>
+            <p className="eyebrow">Primary research workspace</p>
             <h2>Research workspace</h2>
           </div>
           <StatusPill label={payload?.source_mode.mode === "truth_only" ? "Truth Social-only" : "Research API"} tone="ok" />
@@ -691,7 +691,7 @@ function DiscoveryPage() {
       <article className="panel panel--wide">
         <div className="panel-heading">
           <div>
-            <p className="eyebrow">Admin-enabled migration slice</p>
+            <p className="eyebrow">Primary Discovery workspace</p>
             <h2>Discovery workspace</h2>
           </div>
           <StatusPill label={payload?.ready ? "Rankings available" : "Guidance"} tone={payload?.ready ? "ok" : "warn"} />
@@ -955,7 +955,7 @@ function RunExplorerPage() {
     return <ErrorBlock error={runs.error} />;
   }
   if (!allRuns.length) {
-    return <div className="empty-state">No saved runs have been created yet. Train models in Streamlit first, then return here.</div>;
+    return <div className="empty-state">No saved runs have been created yet. Train a model in the Model Training tab first, then return here.</div>;
   }
 
   const payload = detail.data;
@@ -967,7 +967,7 @@ function RunExplorerPage() {
       <article className="panel panel--wide">
         <div className="panel-heading">
           <div>
-            <p className="eyebrow">Read-only migration slice</p>
+            <p className="eyebrow">Primary results workspace</p>
             <h2>Run Explorer</h2>
           </div>
           <StatusPill label={`${filteredRuns.length} visible runs`} tone="ok" />
@@ -1261,15 +1261,15 @@ function OverviewPage() {
       <article className="panel panel--wide">
         <div className="panel-heading">
           <div>
-            <p className="eyebrow">Migration checkpoint</p>
-            <h2>Streamlit remains live while the web app grows beside it.</h2>
+            <p className="eyebrow">React primary checkpoint</p>
+            <h2>React + FastAPI is now the primary app surface.</h2>
           </div>
-          <StatusPill label="Read-only API" tone="ok" />
+          <StatusPill label="Read/write API" tone="ok" />
         </div>
         <p>
-          This React shell is the first web-first surface. It talks to the FastAPI backend,
-          which reuses the existing DuckDB, Parquet, modeling, live-monitor, paper-trading,
-          and observability services.
+          This web app covers the main research, dataset administration, model training,
+          run inspection, Discovery override, live ops, paper-trading, and performance workflows.
+          Streamlit remains available as a fallback shell while the legacy-only surfaces are retired.
         </p>
         <dl className="detail-list">
           <div>
@@ -1988,7 +1988,7 @@ function DataAdminPage() {
             <h2>Data Admin Console</h2>
             <p>
               Manage stored datasets, watchlist symbols, CSV inputs, refresh jobs, and warn-only data health from the web UI.
-              Refresh jobs reuse the same lock as the scheduler and Streamlit controls.
+              Refresh jobs reuse the same lock as the scheduler and legacy Streamlit controls.
             </p>
           </div>
           <StatusPill label={status?.operating_mode ?? "Unknown mode"} tone={summary.overall_severity === "severe" ? "severe" : summary.overall_severity === "warn" ? "warn" : "ok"} />
@@ -2258,7 +2258,7 @@ function LiveDecisionPage() {
             <h2>Live Ops Console</h2>
             <p>
               Configure the pinned joint portfolio run, capture stored-data live snapshots, and manage the matching
-              paper portfolio. Dataset refreshes and model training remain in Streamlit for now.
+              paper portfolio. Dataset refreshes and model training are available in the React Data Admin and Model Training tabs.
             </p>
           </div>
           <StatusPill label={payload?.admin.capture_scope === "stored_data_only" ? "Stored-data capture only" : "Live ops"} />
@@ -2524,17 +2524,16 @@ export function App() {
     <main className="app-shell">
       <header className="hero">
         <div>
-          <p className="eyebrow">AllCaps Web Migration</p>
+          <p className="eyebrow">AllCaps Web App</p>
           <h1>Web-first decision workbench</h1>
           <p>
-            A React and FastAPI foundation that keeps the Python analytics engine intact
-            while moving the user experience toward a production web application.
+            A React and FastAPI decision workbench backed by the existing Python analytics engine.
           </p>
         </div>
         <div className="hero-card">
           <span>Milestone</span>
-          <strong>API foundation + React shell</strong>
-          <small>Issue #43</small>
+          <strong>React primary cutover</strong>
+          <small>Streamlit fallback retained</small>
         </div>
       </header>
 
