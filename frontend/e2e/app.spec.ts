@@ -1062,8 +1062,15 @@ test("renders primary navigation with reduced motion enabled", async ({ page }) 
   await page.goto("/");
 
   await expect(page.getByRole("heading", { name: "Web-first decision workbench" })).toBeVisible();
+  await expect(page.getByText("Workflow map", { exact: true })).toBeVisible();
+  await expect(page.getByText("Explore", { exact: true })).toBeVisible();
+  await expect(page.getByText("Build", { exact: true })).toBeVisible();
+  await expect(page.getByText("Operate", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Help: Workflow map" }).focus();
+  await expect(page.getByText(/Follow the flow from data and research/)).toBeVisible();
   await page.getByRole("button", { name: /Research/ }).click();
   await expect(page.getByRole("heading", { name: "Sentiment, narratives, and export pack" })).toBeVisible();
+  await expect(page.getByText(/Use this page to inspect filtered Trump Truth Social/).first()).toBeVisible();
   await expect(page.getByRole("link", { name: "Export research pack" })).toBeVisible();
 });
 

@@ -449,39 +449,46 @@ describe("App component", () => {
     expect(await screen.findByRole("heading", { name: "Web-first decision workbench" })).toBeInTheDocument();
     expect(await screen.findByText("truth_only (42 Truth, 0 X)")).toBeInTheDocument();
     expect(screen.getByText("Portfolio Alpha")).toBeInTheDocument();
+    expect(screen.getByText("Workflow map")).toBeInTheDocument();
+    expect(screen.getByText("Explore")).toBeInTheDocument();
+    expect(screen.getByText("Build")).toBeInTheDocument();
+    expect(screen.getByText("Operate")).toBeInTheDocument();
+    expect(screen.getAllByText(/Start here to confirm the API/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Follow the flow from data and research/)).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /ResearchSentiment/ }));
+    await user.click(screen.getByRole("button", { name: /Research: Sentiment/ }));
     expect(await screen.findByRole("heading", { name: "Research workspace" })).toBeInTheDocument();
     expect(screen.getByText(/Truth Social-only mode is active/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Use this page to inspect filtered Trump Truth Social/).length).toBeGreaterThan(0);
     expect(screen.getByRole("link", { name: "Export research pack" })).toHaveAttribute("href", expect.stringContaining("/api/research/export"));
     expect(await screen.findByRole("heading", { name: "Multi-asset comparison, event study, and intraday reaction" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /DiscoveryTracked/ }));
+    await user.click(screen.getByRole("button", { name: /Discovery: Tracked/ }));
     expect(await screen.findByRole("heading", { name: "Discovery workspace" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Discovery admin overrides" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Run ExplorerSaved/ }));
+    await user.click(screen.getByRole("button", { name: /Run Explorer: Saved/ }));
     expect(await screen.findByRole("heading", { name: "Run Explorer" })).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "Variant comparison" })).toBeInTheDocument();
     expect(screen.getByText("run-asset-1: robust score changed")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /ReplayHistorical/ }));
+    await user.click(screen.getByRole("button", { name: /Replay: Historical/ }));
     expect(await screen.findByRole("heading", { name: "Historical Replay Workspace" })).toBeInTheDocument();
     expect(await screen.findByText("LONG SPY NEXT SESSION")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Model TrainingTrain/ }));
+    await user.click(screen.getByRole("button", { name: /Model Training: Train/ }));
     expect(await screen.findByRole("heading", { name: "Model Training Job Console" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Use Joint Portfolio workflow" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Data AdminRefresh/ }));
+    await user.click(screen.getByRole("button", { name: /Data Admin: Refresh/ }));
     expect(await screen.findByRole("heading", { name: "Data Admin Console" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Watchlist controls" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Live OpsOperate/ }));
+    await user.click(screen.getByRole("button", { name: /Live Ops: Operate/ }));
     expect(await screen.findByRole("heading", { name: "Live Ops Console" })).toBeInTheDocument();
     expect(screen.getByText("Stored-data capture only")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Paper \+ PerformancePortfolio/ }));
+    await user.click(screen.getByRole("button", { name: /Paper \+ Performance: Portfolio/ }));
     expect(await screen.findByRole("heading", { name: "Portfolio selector" })).toBeInTheDocument();
     expect(await screen.findByText("score_outcome_correlation")).toBeInTheDocument();
   });
@@ -491,7 +498,7 @@ describe("App component", () => {
     const fetchMock = installFetchMock();
     renderApp();
 
-    await user.click(await screen.findByRole("button", { name: /Data AdminRefresh/ }));
+    await user.click(await screen.findByRole("button", { name: /Data Admin: Refresh/ }));
     await user.type(screen.getByPlaceholderText(/password/i), "secret");
     await user.click(screen.getByRole("button", { name: "Unlock admin writes" }));
     expect(await screen.findByText("Unlocked for this browser session")).toBeInTheDocument();
@@ -502,7 +509,7 @@ describe("App component", () => {
     await user.click(screen.getByRole("button", { name: "Start refresh job" }));
     expect(await screen.findByRole("cell", { name: "dataset-refresh-2" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /DiscoveryTracked/ }));
+    await user.click(screen.getByRole("button", { name: /Discovery: Tracked/ }));
     await user.selectOptions(screen.getByLabelText("Override account"), "acct-muted");
     await user.selectOptions(screen.getByLabelText("Override action"), "suppress");
     await user.type(screen.getByPlaceholderText("Optional rationale"), "Noisy source");
@@ -511,7 +518,7 @@ describe("App component", () => {
     await user.click(screen.getByRole("button", { name: "Delete selected override" }));
     await waitFor(() => expect(screen.queryByText("override-pin")).not.toBeInTheDocument());
 
-    await user.click(screen.getByRole("button", { name: /Model TrainingTrain/ }));
+    await user.click(screen.getByRole("button", { name: /Model Training: Train/ }));
     await user.click(screen.getByRole("button", { name: "Use Single Asset workflow" }));
     expect(screen.getByRole("heading", { name: "Single Asset configuration" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Use Saved-Run Portfolio workflow" }));
@@ -520,7 +527,7 @@ describe("App component", () => {
     await user.click(screen.getByRole("button", { name: "Start model training job" }));
     expect(await screen.findByRole("heading", { name: "Latest training result" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Live OpsOperate/ }));
+    await user.click(screen.getByRole("button", { name: /Live Ops: Operate/ }));
     await user.click(screen.getByRole("button", { name: "Save pinned portfolio run" }));
     await user.click(screen.getByRole("button", { name: "Capture current board" }));
     await user.click(screen.getByRole("button", { name: "Disable paper trading" }));
@@ -539,7 +546,7 @@ describe("App component", () => {
     const user = userEvent.setup();
     renderApp();
 
-    await user.click(await screen.findByRole("button", { name: /ResearchSentiment/ }));
+    await user.click(await screen.findByRole("button", { name: /Research: Sentiment/ }));
     await user.clear(screen.getByLabelText("Start date"));
     await user.type(screen.getByLabelText("Start date"), "2025-01-02");
     await user.clear(screen.getByLabelText("End date"));
@@ -572,7 +579,7 @@ describe("App component", () => {
     await user.type(screen.getByLabelText("Minutes after"), "300");
     expect(await screen.findByRole("heading", { name: "Intraday reaction" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Run ExplorerSaved/ }));
+    await user.click(screen.getByRole("button", { name: /Run Explorer: Saved/ }));
     await user.selectOptions(await screen.findByLabelText("Run type"), "asset_model");
     await user.selectOptions(screen.getByLabelText("Target asset"), "QQQ");
     await user.type(screen.getByPlaceholderText("Run name, id, or asset"), "Baseline");
@@ -583,12 +590,12 @@ describe("App component", () => {
     await user.selectOptions(screen.getByLabelText("Base run"), "run-asset-2");
     await waitFor(() => expect(screen.getAllByText("QQQ Baseline").length).toBeGreaterThan(0));
 
-    await user.click(screen.getByRole("button", { name: /ReplayHistorical/ }));
+    await user.click(screen.getByRole("button", { name: /Replay: Historical/ }));
     await user.selectOptions(await screen.findByLabelText("Replay template run"), "run-asset-2");
     await user.selectOptions(screen.getByLabelText("Historical signal session"), "2025-03-04");
     expect(await screen.findByText("LONG SPY NEXT SESSION")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Paper \+ PerformancePortfolio/ }));
+    await user.click(screen.getByRole("button", { name: /Paper \+ Performance: Portfolio/ }));
     await user.selectOptions(await screen.findByRole("combobox"), "paper 2");
     expect(await screen.findByText("score_outcome_correlation")).toBeInTheDocument();
   });
@@ -597,7 +604,7 @@ describe("App component", () => {
     const user = userEvent.setup();
     renderApp();
 
-    await user.click(await screen.findByRole("button", { name: /Model TrainingTrain/ }));
+    await user.click(await screen.findByRole("button", { name: /Model Training: Train/ }));
     await user.type(screen.getByPlaceholderText("Admin password"), "secret");
     await user.click(screen.getByRole("button", { name: "Unlock admin writes" }));
     expect(await screen.findByText("Unlocked for this browser session")).toBeInTheDocument();
@@ -639,13 +646,13 @@ describe("App component", () => {
     await user.click(screen.getByRole("button", { name: "Start model training job" }));
     expect(await screen.findByText("run-portfolio-2")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Data AdminRefresh/ }));
+    await user.click(screen.getByRole("button", { name: /Data Admin: Refresh/ }));
     await user.click(screen.getByRole("button", { name: "Reset watchlist" }));
     await user.selectOptions(screen.getByLabelText("Refresh mode"), "full");
     const file = new File(["author,text\nmacro,hello\n"], "mentions.csv", { type: "text/csv" });
     await user.upload(screen.getByLabelText("CSV upload"), file);
 
-    await user.click(screen.getByRole("button", { name: /Live OpsOperate/ }));
+    await user.click(screen.getByRole("button", { name: /Live Ops: Operate/ }));
     await user.selectOptions(screen.getByLabelText("Pinned joint portfolio run"), "run-portfolio-1");
     await user.selectOptions(screen.getByLabelText("Fallback mode"), "FLAT");
     await user.clear(screen.getByLabelText("Starting cash"));
@@ -676,9 +683,9 @@ describe("App component", () => {
     renderApp();
 
     expect(await screen.findByText("No rows returned yet.")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Run ExplorerSaved/ }));
+    await user.click(screen.getByRole("button", { name: /Run Explorer: Saved/ }));
     expect(await screen.findByText("No saved runs have been created yet. Train a model in the Model Training tab first, then return here.")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /ResearchSentiment/ }));
+    await user.click(screen.getByRole("button", { name: /Research: Sentiment/ }));
     expect(await screen.findByText("API request failed: broken")).toBeInTheDocument();
   });
 
