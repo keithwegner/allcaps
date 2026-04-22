@@ -1057,6 +1057,16 @@ test("renders the overview shell from API-backed data", async ({ page }) => {
   await expect(page.getByText("Portfolio Alpha")).toBeVisible();
 });
 
+test("renders primary navigation with reduced motion enabled", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/");
+
+  await expect(page.getByRole("heading", { name: "Web-first decision workbench" })).toBeVisible();
+  await page.getByRole("button", { name: /Research/ }).click();
+  await expect(page.getByRole("heading", { name: "Sentiment, narratives, and export pack" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Export research pack" })).toBeVisible();
+});
+
 test("shows data admin controls, health rows, and refresh jobs", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: /Data Admin/ }).click();
