@@ -39,7 +39,7 @@ if [[ -f "$ROOT_DIR/frontend/package.json" ]]; then
     npm run test:coverage --prefix "$ROOT_DIR/frontend"
     echo "==> Frontend UI tests"
     npm exec --prefix "$ROOT_DIR/frontend" playwright install chromium
-    npm run test:ui --prefix "$ROOT_DIR/frontend"
+    ALLCAPS_FRONTEND_TEST_PORT="${ALLCAPS_FRONTEND_TEST_PORT:-5174}" npm run test:ui --prefix "$ROOT_DIR/frontend"
   else
     echo "npm is required for the frontend build but was not found on PATH." >&2
     exit 1

@@ -42,7 +42,7 @@ describe("frontend API client", () => {
       narrative_topic: "",
     });
 
-    const url = new URL(calls[0].url);
+    const url = new URL(calls[0].url, "http://127.0.0.1:5173");
     expect(url.pathname).toBe("/api/research");
     expect(url.searchParams.getAll("platforms")).toEqual(["Truth Social", "X"]);
     expect(url.searchParams.get("keyword")).toBe("tariff rally");
@@ -121,6 +121,25 @@ describe("frontend API client", () => {
     await expect(api.status()).rejects.toThrow("502 Bad Gateway");
   });
 
+  test("rejects HTTP 200 responses that are not API JSON", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response("<!doctype html><title>Vite fallback</title>", {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        }),
+      ),
+    );
+    await expect(api.status()).rejects.toThrow("not the frontend dev server");
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("{not-json", { status: 200, headers: { "Content-Type": "application/json" } })),
+    );
+    await expect(api.status()).rejects.toThrow("invalid JSON");
+  });
+
   test("surfaces delete and upload HTTP errors", async () => {
     mockFetch(409, { detail: "override locked" }, "Conflict");
     await expect(api.deleteDiscoveryOverride("override-1", "token")).rejects.toThrow("override locked");
@@ -157,7 +176,7 @@ describe("frontend API client", () => {
     await api.liveOps();
     await api.paperPortfolios();
 
-    expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
+    expect(calls.map((call) => new URL(call.url, "http://127.0.0.1:5173").pathname)).toEqual([
       "/api/status",
       "/api/datasets/health",
       "/api/datasets/admin",

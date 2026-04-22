@@ -1,5 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const testPort = process.env.ALLCAPS_FRONTEND_TEST_PORT ?? "5173";
+const testBaseUrl = `http://127.0.0.1:${testPort}`;
+
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: true,
@@ -9,13 +12,13 @@ export default defineConfig({
   },
   reporter: process.env.CI ? [["list"], ["html", { open: "never" }]] : "list",
   use: {
-    baseURL: "http://127.0.0.1:5173",
+    baseURL: testBaseUrl,
     trace: "on-first-retry",
     serviceWorkers: "block",
   },
   webServer: {
-    command: "npm run dev -- --port 5173",
-    url: "http://127.0.0.1:5173",
+    command: `npm run dev -- --port ${testPort}`,
+    url: testBaseUrl,
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
   },
