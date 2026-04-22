@@ -144,6 +144,14 @@ npm exec --prefix frontend playwright install chromium
 npm run test:ui --prefix frontend
 ```
 
+Run measured React unit/component coverage:
+
+```bash
+npm run test:coverage --prefix frontend
+```
+
+The frontend coverage gate requires at least 90% statements, functions, and lines. Branch coverage is tracked with a lower ratchet because V8 counts many JSX optional-render fallbacks as branches; raise it as branch-focused tests are added.
+
 The React app opens as a tabbed workbench with these primary sections:
 
 - `Overview`
@@ -546,6 +554,12 @@ Run the React browser UI tests:
 ```bash
 npm exec --prefix frontend playwright install chromium
 npm run test:ui --prefix frontend
+```
+
+Run the React unit/component coverage gate:
+
+```bash
+npm run test:coverage --prefix frontend
 ```
 
 Run the same checks as GitHub Actions:

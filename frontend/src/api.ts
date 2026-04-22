@@ -641,5 +641,5 @@ export const api = {
   captureLive: (token: string) => postJson<LiveOpsPayload>("/api/live/capture", {}, token),
   paperCurrentAction: (request: PaperCurrentActionRequest, token: string) => postJson<LiveOpsPayload>("/api/paper/current", request, token),
   paperPortfolios: () => getJson<PaperPortfoliosPayload>("/api/paper/portfolios"),
-  performance: (paperPortfolioId: string) => getJson<PerformancePayload>(`/api/performance/${paperPortfolioId}`),
+  performance: (paperPortfolioId: string) => getJson<PerformancePayload>(`/api/performance/${encodeURIComponent(paperPortfolioId)}`),
 };
