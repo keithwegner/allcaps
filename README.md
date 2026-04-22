@@ -81,6 +81,8 @@ npm run dev --prefix frontend
 
 Open [http://127.0.0.1:5173](http://127.0.0.1:5173).
 
+By default, Vite proxies `/api/*` requests to the local FastAPI server on `127.0.0.1:8000`. Leave `VITE_ALLCAPS_API_BASE_URL` unset unless your backend is running somewhere else.
+
 Fallback Streamlit shell:
 
 ```bash
@@ -134,6 +136,8 @@ Open:
 Optional frontend env var:
 
 - `VITE_ALLCAPS_API_BASE_URL=http://127.0.0.1:8000`
+
+Normally this is not required for local development because the Vite dev server proxies same-origin `/api/*` requests to FastAPI. If the React UI shows API load errors while the network tab shows HTTP 200 responses, confirm this variable is not pointing at the frontend dev server.
 
 The React app is mixed read/write. Public users can browse research, saved runs, replay, live history, paper history, and performance pages. Mutating Discovery, Data Admin, Model Training, Live Ops, and paper controls require an admin token from `/api/admin/session`.
 

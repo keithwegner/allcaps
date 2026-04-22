@@ -399,7 +399,7 @@ function payloadFor(pathname: string, method = "GET") {
 
 function installFetchMock() {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = new URL(String(input));
+    const url = new URL(String(input), "http://127.0.0.1:5173");
     const method = init?.method ?? "GET";
     const payload = payloadFor(url.pathname, method);
     return new Response(JSON.stringify(payload), {
@@ -525,7 +525,7 @@ describe("App component", () => {
     await user.click(screen.getByRole("button", { name: "Capture current board" }));
     await user.click(screen.getByRole("button", { name: "Disable paper trading" }));
 
-    const requestedPaths = fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname);
+    const requestedPaths = fetchMock.mock.calls.map(([input]) => new URL(String(input), "http://127.0.0.1:5173").pathname);
     expect(requestedPaths).toContain("/api/datasets/watchlist");
     expect(requestedPaths).toContain("/api/datasets/refresh");
     expect(requestedPaths).toContain("/api/discovery/overrides");
@@ -662,7 +662,7 @@ describe("App component", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
-        const path = new URL(String(input)).pathname;
+        const path = new URL(String(input), "http://127.0.0.1:5173").pathname;
         if (path === "/api/status") {
           return new Response(JSON.stringify(statusPayload), { status: 200, headers: { "Content-Type": "application/json" } });
         }
@@ -679,7 +679,7 @@ describe("App component", () => {
     await user.click(screen.getByRole("button", { name: /Run ExplorerSaved/ }));
     expect(await screen.findByText("No saved runs have been created yet. Train a model in the Model Training tab first, then return here.")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /ResearchSentiment/ }));
-    expect(await screen.findByText("API request failed: 500 Server Error")).toBeInTheDocument();
+    expect(await screen.findByText("API request failed: broken")).toBeInTheDocument();
   });
 
   test("renders a table empty state and limited columns", async () => {

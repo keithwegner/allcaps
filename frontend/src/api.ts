@@ -1,4 +1,12 @@
-const API_BASE_URL = import.meta.env.VITE_ALLCAPS_API_BASE_URL ?? "http://127.0.0.1:8000";
+const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_ALLCAPS_API_BASE_URL);
+
+function normalizeApiBaseUrl(value: unknown): string {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  if (!trimmed || trimmed === "/" || trimmed === ".") {
+    return "";
+  }
+  return trimmed.replace(/\/+$/, "");
+}
 
 export type RecordRow = Record<string, string | number | boolean | null>;
 export type PlotlyFigure = {
@@ -497,12 +505,42 @@ function researchQuery(filters: ResearchFilters = {}): string {
   return query ? `?${query}` : "";
 }
 
+async function parseJsonResponse<T>(response: Response, path: string): Promise<T> {
+  const contentType = response.headers.get("content-type") ?? "";
+  const text = await response.text();
+  if (!contentType.toLowerCase().includes("application/json")) {
+    const snippet = text.trim().replace(/\s+/g, " ").slice(0, 160);
+    throw new Error(
+      `API returned ${contentType || "non-JSON"} for ${path}. Check that the React app is pointing at the FastAPI backend, not the frontend dev server.${snippet ? ` Body starts with: ${snippet}` : ""}`,
+    );
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(`API returned invalid JSON for ${path}.`);
+  }
+}
+
+async function readErrorDetail(response: Response): Promise<string> {
+  const fallback = `${response.status} ${response.statusText}`;
+  try {
+    const body = await parseJsonResponse<{ detail?: unknown }>(response, response.url || "API request");
+    if (body.detail) {
+      return Array.isArray(body.detail) ? body.detail.join("; ") : String(body.detail);
+    }
+  } catch {
+    // Keep the HTTP status fallback when the error response is not JSON.
+  }
+  return fallback;
+}
+
 async function getJson<T>(path: string): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`);
   if (!response.ok) {
-    throw new Error(`API request failed: ${response.status} ${response.statusText}`);
+    const detail = await readErrorDetail(response);
+    throw new Error(`API request failed: ${detail}`);
   }
-  return response.json() as Promise<T>;
+  return parseJsonResponse<T>(response, path);
 }
 
 async function postJson<T>(path: string, payload: unknown = {}, token?: string): Promise<T> {
@@ -515,18 +553,10 @@ async function postJson<T>(path: string, payload: unknown = {}, token?: string):
     body: JSON.stringify(payload),
   });
   if (!response.ok) {
-    let detail = `${response.status} ${response.statusText}`;
-    try {
-      const body = (await response.json()) as { detail?: unknown };
-      if (body.detail) {
-        detail = Array.isArray(body.detail) ? body.detail.join("; ") : String(body.detail);
-      }
-    } catch {
-      // Keep the HTTP status fallback when the response is not JSON.
-    }
+    const detail = await readErrorDetail(response);
     throw new Error(`API request failed: ${detail}`);
   }
-  return response.json() as Promise<T>;
+  return parseJsonResponse<T>(response, path);
 }
 
 async function deleteJson<T>(path: string, token?: string): Promise<T> {
@@ -537,18 +567,10 @@ async function deleteJson<T>(path: string, token?: string): Promise<T> {
     },
   });
   if (!response.ok) {
-    let detail = `${response.status} ${response.statusText}`;
-    try {
-      const body = (await response.json()) as { detail?: unknown };
-      if (body.detail) {
-        detail = Array.isArray(body.detail) ? body.detail.join("; ") : String(body.detail);
-      }
-    } catch {
-      // Keep the HTTP status fallback when the response is not JSON.
-    }
+    const detail = await readErrorDetail(response);
     throw new Error(`API request failed: ${detail}`);
   }
-  return response.json() as Promise<T>;
+  return parseJsonResponse<T>(response, path);
 }
 
 async function postForm<T>(path: string, formData: FormData, token?: string): Promise<T> {
@@ -560,22 +582,14 @@ async function postForm<T>(path: string, formData: FormData, token?: string): Pr
     body: formData,
   });
   if (!response.ok) {
-    let detail = `${response.status} ${response.statusText}`;
-    try {
-      const body = (await response.json()) as { detail?: unknown };
-      if (body.detail) {
-        detail = Array.isArray(body.detail) ? body.detail.join("; ") : String(body.detail);
-      }
-    } catch {
-      // Keep the HTTP status fallback when the response is not JSON.
-    }
+    const detail = await readErrorDetail(response);
     throw new Error(`API request failed: ${detail}`);
   }
-  return response.json() as Promise<T>;
+  return parseJsonResponse<T>(response, path);
 }
 
 export const api = {
-  baseUrl: API_BASE_URL,
+  baseUrl: API_BASE_URL || "same-origin",
   status: () => getJson<StatusPayload>("/api/status"),
   adminSession: (password = "") => postJson<AdminSessionPayload>("/api/admin/session", { password }),
   health: () => getJson<HealthPayload>("/api/datasets/health"),
