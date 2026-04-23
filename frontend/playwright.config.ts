@@ -1,6 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 
-const testPort = process.env.ALLCAPS_FRONTEND_TEST_PORT ?? "5173";
+const testPort = process.env.ALLCAPS_FRONTEND_TEST_PORT ?? "57173";
 const testBaseUrl = `http://127.0.0.1:${testPort}`;
 
 export default defineConfig({
@@ -19,7 +19,7 @@ export default defineConfig({
   webServer: {
     command: `npm run dev -- --port ${testPort}`,
     url: testBaseUrl,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
     timeout: 60_000,
   },
   projects: [

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import type { ComponentType, ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AnimatePresence, MotionConfig, motion, useReducedMotion } from "motion/react";
@@ -56,17 +56,126 @@ const surfaceHover = {
 
 type PageKey = "overview" | "research" | "discovery" | "runs" | "replay" | "models" | "data" | "live" | "paper";
 
-const pages: Array<{ key: PageKey; label: string; deck: string }> = [
-  { key: "overview", label: "Overview", deck: "API status and app posture" },
-  { key: "research", label: "Research", deck: "Sentiment, narratives, and export pack" },
-  { key: "discovery", label: "Discovery", deck: "Tracked account ranking workspace" },
-  { key: "runs", label: "Run Explorer", deck: "Saved model results and comparisons" },
-  { key: "replay", label: "Replay", deck: "Historical signal reconstruction" },
-  { key: "models", label: "Model Training", deck: "Train and save model runs" },
-  { key: "data", label: "Data Admin", deck: "Refresh jobs, watchlist, and data health" },
-  { key: "live", label: "Live Ops", deck: "Operate deployed portfolio" },
-  { key: "paper", label: "Paper + Performance", deck: "Portfolio audit and drift" },
+type PageMeta = {
+  key: PageKey;
+  label: string;
+  deck: string;
+  workflow: "Start" | "Explore" | "Build" | "Operate";
+  help: string;
+  nextStep: string;
+};
+
+const pages: PageMeta[] = [
+  {
+    key: "overview",
+    label: "Overview",
+    deck: "API status and app posture",
+    workflow: "Start",
+    help: "Start here to confirm the API, data posture, and recent saved runs before choosing a workflow.",
+    nextStep: "If the app has data, continue to Research. If core datasets are missing, go to Data Admin first.",
+  },
+  {
+    key: "research",
+    label: "Research",
+    deck: "Sentiment, narratives, and export pack",
+    workflow: "Explore",
+    help: "Use this page to inspect filtered Trump Truth Social or X-backed sentiment before building models.",
+    nextStep: "Use the export pack when you want a portable evidence bundle, or move to Model Training after validating the slice.",
+  },
+  {
+    key: "discovery",
+    label: "Discovery",
+    deck: "Tracked account ranking workspace",
+    workflow: "Explore",
+    help: "Discovery ranks non-Trump X accounts that mention Trump. It is optional for Truth Social-only analysis.",
+    nextStep: "Use overrides only when X mention data is loaded and you want to pin or suppress tracked accounts.",
+  },
+  {
+    key: "runs",
+    label: "Run Explorer",
+    deck: "Saved model results and comparisons",
+    workflow: "Build",
+    help: "Inspect saved model and portfolio runs. This is analysis, not deployment.",
+    nextStep: "After choosing a portfolio run, deploy it explicitly from Live Ops.",
+  },
+  {
+    key: "replay",
+    label: "Replay",
+    deck: "Historical signal reconstruction",
+    workflow: "Explore",
+    help: "Replay rebuilds an old asset-model signal using only prior rows so you can audit drift and leakage.",
+    nextStep: "Use replay findings to decide whether a saved asset model is still trustworthy.",
+  },
+  {
+    key: "models",
+    label: "Model Training",
+    deck: "Train and save model runs",
+    workflow: "Build",
+    help: "Create single-asset runs, saved-run allocators, or joint portfolio models from stored datasets.",
+    nextStep: "After training finishes, inspect the run in Run Explorer before deploying it in Live Ops.",
+  },
+  {
+    key: "data",
+    label: "Data Admin",
+    deck: "Refresh jobs, watchlist, and data health",
+    workflow: "Operate",
+    help: "Owns dataset refreshes, watchlist edits, source inputs, manifests, and health checks.",
+    nextStep: "Refresh or fix data here before using Research, Model Training, or Live Ops.",
+  },
+  {
+    key: "live",
+    label: "Live Ops",
+    deck: "Operate deployed portfolio",
+    workflow: "Operate",
+    help: "Pin a portfolio run, capture stored-data live boards, and manage paper trading for the deployed strategy.",
+    nextStep: "Use Data Admin for fresh data. Live Ops only captures decisions from currently stored datasets.",
+  },
+  {
+    key: "paper",
+    label: "Paper + Performance",
+    deck: "Portfolio audit and drift",
+    workflow: "Operate",
+    help: "Review paper portfolio outcomes, benchmark comparison, diagnostics, and drift warnings.",
+    nextStep: "If performance degrades, inspect the deployed run and retrain from Model Training rather than changing live logic here.",
+  },
 ];
+
+const workflowGroups: Array<{
+  label: PageMeta["workflow"];
+  description: string;
+  pageKeys: PageKey[];
+}> = [
+  { label: "Start", description: "Check app posture", pageKeys: ["overview"] },
+  { label: "Explore", description: "Inspect signals and context", pageKeys: ["research", "discovery", "replay"] },
+  { label: "Build", description: "Train, compare, and select", pageKeys: ["models", "runs"] },
+  { label: "Operate", description: "Refresh data and run live audit", pageKeys: ["data", "live", "paper"] },
+];
+
+function HelpTip({ label, children }: { label: string; children: ReactNode }) {
+  const tooltipId = useId();
+  return (
+    <span className="help-tip">
+      <button type="button" className="help-tip__button" aria-label={`Help: ${label}`} aria-describedby={tooltipId}>
+        ?
+      </button>
+      <span id={tooltipId} className="help-tip__bubble" role="tooltip">
+        {children}
+      </span>
+    </span>
+  );
+}
+
+function WorkflowHint({ page }: { page: PageMeta }) {
+  return (
+    <motion.aside className="workflow-hint" variants={revealVariants}>
+      <div>
+        <p className="eyebrow">Workflow guide</p>
+        <strong>{page.help}</strong>
+      </div>
+      <p>{page.nextStep}</p>
+    </motion.aside>
+  );
+}
 
 function StatusPill({ label, tone = "neutral" }: { label: string; tone?: "neutral" | "ok" | "warn" | "severe" }) {
   return <span className={`status-pill status-pill--${tone}`}>{label}</span>;
@@ -2554,34 +2663,63 @@ export function App() {
           </motion.div>
         </motion.header>
 
-        <motion.nav className="page-tabs" aria-label="Workbench sections" variants={revealVariants}>
-          {pages.map((page) => (
-            <motion.button
-              key={page.key}
-              type="button"
-              className={page.key === activePage ? "active" : ""}
-              onClick={() => setActivePage(page.key)}
-              whileHover={{ y: -3 }}
-              whileTap={{ scale: 0.98 }}
-            >
-              {page.key === activePage ? (
-                <motion.span className="tab-active-wash" layoutId="active-tab-wash" aria-hidden="true" />
-              ) : null}
-              <span>{page.label}</span>
-              <small>{page.deck}</small>
-            </motion.button>
-          ))}
-        </motion.nav>
+        <div className="workspace-layout">
+          <motion.nav className="workflow-rail page-tabs" aria-label="Guided workflow navigation" variants={revealVariants}>
+            <div className="workflow-rail__intro">
+              <p className="eyebrow">Workflow map</p>
+              <strong>Choose where you are in the process.</strong>
+              <HelpTip label="Workflow map">
+                Follow the flow from data and research through model building, then operate the selected portfolio run.
+              </HelpTip>
+            </div>
+            {workflowGroups.map((group) => (
+              <section className="workflow-group" key={group.label} aria-labelledby={`workflow-${group.label}`}>
+                <div className="workflow-group__heading">
+                  <span id={`workflow-${group.label}`}>{group.label}</span>
+                  <small>{group.description}</small>
+                </div>
+                <div className="workflow-group__pages">
+                  {group.pageKeys.map((pageKey) => {
+                    const page = pages.find((candidate) => candidate.key === pageKey) ?? pages[0];
+                    return (
+                      <motion.button
+                        key={page.key}
+                        type="button"
+                        className={`workflow-page-button${page.key === activePage ? " active" : ""}`}
+                        aria-label={`${page.label}: ${page.deck}`}
+                        onClick={() => setActivePage(page.key)}
+                        whileHover={{ x: 3 }}
+                        whileTap={{ scale: 0.98 }}
+                      >
+                        {page.key === activePage ? (
+                          <motion.span className="tab-active-wash" layoutId="active-tab-wash" aria-hidden="true" />
+                        ) : null}
+                        <span>{page.label}</span>
+                        <small>{page.deck}</small>
+                      </motion.button>
+                    );
+                  })}
+                </div>
+              </section>
+            ))}
+          </motion.nav>
 
-        <AnimatePresence mode="wait">
-          <AnimatedPage pageKey={activePage}>
-            <motion.section className="section-heading" variants={revealVariants}>
-              <p className="eyebrow">{activeMeta.label}</p>
-              <h2>{activeMeta.deck}</h2>
-            </motion.section>
-            {pageContent}
-          </AnimatedPage>
-        </AnimatePresence>
+          <div className="workspace-main">
+            <AnimatePresence mode="wait">
+              <AnimatedPage pageKey={activePage}>
+                <motion.section className="section-heading" variants={revealVariants}>
+                  <div>
+                    <p className="eyebrow">{activeMeta.workflow} / {activeMeta.label}</p>
+                    <h2>{activeMeta.deck}</h2>
+                  </div>
+                  <HelpTip label={`${activeMeta.label} page`}>{activeMeta.help}</HelpTip>
+                </motion.section>
+                <WorkflowHint page={activeMeta} />
+                {pageContent}
+              </AnimatedPage>
+            </AnimatePresence>
+          </div>
+        </div>
       </motion.main>
     </MotionConfig>
   );
