@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 import secrets
 import time
 from typing import Any
@@ -8,6 +9,8 @@ import numpy as np
 import pandas as pd
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .access import verify_admin_password
@@ -189,6 +192,17 @@ def _frame_records(frame: pd.DataFrame, limit: int | None = None) -> list[dict[s
     if limit is not None:
         out = out.head(max(0, int(limit)))
     return [_json_safe(record) for record in out.to_dict(orient="records")]
+
+
+def _safe_static_file(root: Path, requested_path: str) -> Path | None:
+    try:
+        candidate = (root / requested_path).resolve()
+        candidate.relative_to(root.resolve())
+    except ValueError:
+        return None
+    if candidate.is_file():
+        return candidate
+    return None
 
 
 def create_app(
@@ -839,6 +853,28 @@ def create_app(
                 ),
             ),
         }
+
+    frontend_dist = settings.code_root / "frontend" / "dist"
+    frontend_index = frontend_dist / "index.html"
+    frontend_assets = frontend_dist / "assets"
+    if frontend_index.exists():
+        if frontend_assets.exists():
+            app.mount("/assets", StaticFiles(directory=str(frontend_assets)), name="frontend-assets")
+
+        @app.get("/", include_in_schema=False)
+        def frontend_root() -> FileResponse:
+            return FileResponse(frontend_index)
+
+        @app.get("/{full_path:path}", include_in_schema=False)
+        def frontend_spa(full_path: str) -> FileResponse:
+            if full_path == "favicon.ico":
+                raise HTTPException(status_code=404, detail="Not found.")
+            if full_path == "api" or full_path.startswith("api/"):
+                raise HTTPException(status_code=404, detail="API route not found.")
+            static_file = _safe_static_file(frontend_dist, full_path)
+            if static_file is not None:
+                return FileResponse(static_file)
+            return FileResponse(frontend_index)
 
     return app
 

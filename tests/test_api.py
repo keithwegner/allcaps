@@ -1488,6 +1488,27 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(payload["source_mode"]["mode"], "truth_only")
         self.assertIn(".workbench", payload["db_path"])
 
+    def test_fastapi_serves_built_frontend_when_dist_exists(self) -> None:
+        frontend_dist = self.settings.code_root / "frontend" / "dist"
+        assets_dir = frontend_dist / "assets"
+        assets_dir.mkdir(parents=True)
+        (frontend_dist / "index.html").write_text("<html><body><div id=\"root\">AllCaps React</div></body></html>", encoding="utf-8")
+        (assets_dir / "app.js").write_text("console.log('allcaps');", encoding="utf-8")
+        client = TestClient(create_app(settings=self.settings, store=self.store))
+
+        root_response = client.get("/")
+        spa_response = client.get("/research")
+        asset_response = client.get("/assets/app.js")
+        missing_api_response = client.get("/api/not-a-real-route")
+
+        self.assertEqual(root_response.status_code, 200)
+        self.assertIn("AllCaps React", root_response.text)
+        self.assertEqual(spa_response.status_code, 200)
+        self.assertIn("AllCaps React", spa_response.text)
+        self.assertEqual(asset_response.status_code, 200)
+        self.assertIn("allcaps", asset_response.text)
+        self.assertEqual(missing_api_response.status_code, 404)
+
     def test_research_endpoint_returns_empty_state_without_core_data(self) -> None:
         response = self.client.get("/api/research")
 

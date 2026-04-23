@@ -4,9 +4,10 @@ services:
       context: .
     container_name: allcaps
     ports:
-      - "127.0.0.1:8501:8501"
+      - "127.0.0.1:8000:8000"
     environment:
-      PORT: "8501"
+      PORT: "8000"
+      ALLCAPS_RUNTIME: web
       ALLCAPS_STATE_DIR: /var/data
       ALLCAPS_PUBLIC_MODE: "false"
       ALLCAPS_AUTO_BOOTSTRAP_ON_START: "true"
