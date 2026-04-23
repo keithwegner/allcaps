@@ -1,13 +1,13 @@
 :root {
   color: #111827;
-  background: #f5f1e8;
+  background: #f6f8fb;
   font-family: "Avenir Next", "Gill Sans", "Trebuchet MS", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   --ink: #111827;
   --muted: #536174;
-  --paper: rgba(255, 253, 247, 0.9);
+  --paper: rgba(255, 255, 255, 0.92);
   --paper-strong: rgba(255, 255, 255, 0.96);
   --line: rgba(21, 42, 74, 0.15);
   --navy: #0b1f3a;
@@ -19,8 +19,8 @@
   --ok: #0f766e;
   --warning: #b45309;
   --severe: #b42318;
-  --shadow: 0 24px 70px rgba(15, 23, 42, 0.14);
-  --shadow-lift: 0 32px 88px rgba(15, 23, 42, 0.2);
+  --shadow: 0 14px 38px rgba(15, 23, 42, 0.08);
+  --shadow-lift: 0 20px 52px rgba(15, 23, 42, 0.13);
   --motion-fast: 180ms;
   --motion-medium: 420ms;
   --motion-slow: 720ms;
@@ -37,9 +37,9 @@ body {
   margin: 0;
   overflow-x: hidden;
   background:
-    radial-gradient(circle at 12% 0%, rgba(31, 111, 178, 0.18), transparent 34rem),
-    radial-gradient(circle at 88% 10%, rgba(11, 31, 58, 0.12), transparent 30rem),
-    linear-gradient(135deg, #fffdf7 0%, #eef4fb 48%, #e6edf7 100%);
+    radial-gradient(circle at 12% 0%, rgba(31, 111, 178, 0.1), transparent 32rem),
+    radial-gradient(circle at 88% 10%, rgba(11, 31, 58, 0.07), transparent 28rem),
+    linear-gradient(135deg, #fbfdff 0%, #f4f7fb 48%, #edf3f9 100%);
 }
 
 body::before,
@@ -52,7 +52,7 @@ body::after {
 }
 
 body::before {
-  opacity: 0.42;
+  opacity: 0.26;
   background:
     radial-gradient(circle at 18% 24%, rgba(255, 255, 255, 0.72), transparent 18rem),
     radial-gradient(circle at 72% 18%, rgba(31, 111, 178, 0.16), transparent 20rem),
@@ -62,7 +62,7 @@ body::before {
 }
 
 body::after {
-  opacity: 0.18;
+  opacity: 0.08;
   background-image:
     linear-gradient(rgba(11, 31, 58, 0.08) 1px, transparent 1px),
     linear-gradient(90deg, rgba(11, 31, 58, 0.08) 1px, transparent 1px);
@@ -88,17 +88,17 @@ textarea {
 
 .hero {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
+  grid-template-columns: minmax(0, 1fr) 360px;
   gap: 24px;
   align-items: stretch;
-  margin-bottom: 24px;
+  margin-bottom: 28px;
 }
 
 .hero h1 {
   max-width: 760px;
   margin: 0;
-  font-size: clamp(2.4rem, 7vw, 5.8rem);
-  line-height: 0.9;
+  font-size: clamp(2.4rem, 6vw, 5rem);
+  line-height: 0.94;
   letter-spacing: -0.08em;
 }
 
@@ -108,6 +108,13 @@ textarea {
   font-size: 1.08rem;
 }
 
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 22px;
+}
+
 .hero-card,
 .panel,
 .metric-card,
@@ -115,7 +122,7 @@ textarea {
   border: 1px solid var(--line);
   background: var(--paper);
   box-shadow: var(--shadow);
-  backdrop-filter: blur(14px);
+  backdrop-filter: blur(10px);
   transition:
     box-shadow var(--motion-medium) var(--motion-ease),
     border-color var(--motion-medium) var(--motion-ease),
@@ -128,7 +135,10 @@ textarea {
   justify-content: flex-end;
   min-height: 220px;
   padding: 24px;
-  border-radius: 32px;
+  border-radius: 28px;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.96), rgba(239, 246, 255, 0.82)),
+    var(--paper);
 }
 
 .hero-card span,
@@ -164,9 +174,9 @@ textarea {
   position: sticky;
   top: 18px;
   display: grid;
-  gap: 18px;
-  padding: 18px;
-  border-radius: 30px;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 26px;
 }
 
 .workflow-rail__intro {
@@ -175,7 +185,7 @@ textarea {
   gap: 8px;
   padding: 16px;
   color: #fff;
-  border-radius: 22px;
+  border-radius: 20px;
   background:
     radial-gradient(circle at 18% 18%, rgba(255, 255, 255, 0.2), transparent 44%),
     linear-gradient(135deg, var(--navy), var(--navy-soft));
@@ -194,7 +204,7 @@ textarea {
 
 .workflow-group {
   display: grid;
-  gap: 8px;
+  gap: 7px;
 }
 
 .workflow-group__heading {
@@ -218,19 +228,19 @@ textarea {
 
 .workflow-group__pages {
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
 .workflow-page-button {
   position: relative;
   display: grid;
   gap: 4px;
-  min-height: 72px;
-  padding: 14px 15px;
+  min-height: 62px;
+  padding: 12px 14px;
   color: var(--ink);
   text-align: left;
   border: 0;
-  border-radius: 18px;
+  border-radius: 16px;
   background: transparent;
   cursor: pointer;
   overflow: hidden;
@@ -350,11 +360,11 @@ textarea {
   gap: 18px;
   padding: 18px;
   border: 1px solid rgba(31, 111, 178, 0.18);
-  border-radius: 24px;
+  border-radius: 22px;
   background:
     linear-gradient(135deg, rgba(255, 255, 255, 0.82), rgba(217, 234, 255, 0.58)),
     var(--paper);
-  box-shadow: 0 16px 48px rgba(15, 23, 42, 0.08);
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.06);
 }
 
 .workflow-hint strong {
@@ -374,6 +384,125 @@ textarea {
 .page-grid {
   display: grid;
   gap: 18px;
+}
+
+.workflow-home {
+  display: grid;
+  gap: 18px;
+}
+
+.workflow-home__intro h2 {
+  max-width: 840px;
+  font-size: clamp(1.9rem, 4vw, 3.3rem);
+  line-height: 1;
+  letter-spacing: -0.06em;
+}
+
+.home-action-row,
+.workflow-step-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.recommendation-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: center;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.96), rgba(239, 246, 255, 0.78)),
+    var(--paper);
+}
+
+.recommendation-card h2 {
+  margin: 4px 0 0;
+}
+
+.recommendation-card--ok {
+  border-color: rgba(15, 118, 110, 0.22);
+}
+
+.recommendation-card--warn {
+  border-color: rgba(180, 83, 9, 0.28);
+}
+
+.home-status-grid {
+  align-items: stretch;
+}
+
+.workflow-steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.workflow-step-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  padding: 20px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: var(--shadow);
+}
+
+.workflow-step-card::before {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 4px;
+  content: "";
+  background: linear-gradient(90deg, var(--accent), rgba(31, 111, 178, 0.16));
+}
+
+.workflow-step-card__number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  margin-bottom: 16px;
+  color: #fff;
+  font-weight: 950;
+  border-radius: 999px;
+  background: var(--navy);
+}
+
+.workflow-step-card h2 {
+  margin: 4px 0 0;
+}
+
+.workflow-step-card p {
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.workflow-step-card__done {
+  display: grid;
+  gap: 4px;
+  margin-top: auto;
+  padding-top: 14px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.workflow-step-card__done strong {
+  color: var(--navy);
+}
+
+.compact-table-section {
+  display: grid;
+  gap: 12px;
+  margin-top: 22px;
+}
+
+.compact-table-section h3 {
+  margin: 0;
 }
 
 .page-motion {
@@ -418,7 +547,7 @@ textarea {
 .panel:hover,
 .chart-frame:hover {
   border-color: rgba(31, 111, 178, 0.28);
-  box-shadow: var(--shadow-lift);
+  box-shadow: 0 18px 44px rgba(15, 23, 42, 0.1);
 }
 
 .metric-card strong {
@@ -431,7 +560,7 @@ textarea {
 
 .panel {
   padding: 22px;
-  border-radius: 28px;
+  border-radius: 24px;
 }
 
 .panel--wide {
@@ -690,6 +819,11 @@ select[multiple] {
   cursor: pointer;
 }
 
+.action-button--secondary {
+  color: var(--navy-soft);
+  background: rgba(255, 255, 255, 0.78);
+}
+
 .action-button:disabled {
   color: var(--muted);
   background: rgba(21, 42, 74, 0.06);
@@ -839,7 +973,9 @@ textarea:focus-visible,
   .filter-grid,
   .chart-grid,
   .workspace-layout,
-  .workflow-hint {
+  .workflow-hint,
+  .workflow-steps,
+  .recommendation-card {
     grid-template-columns: 1fr;
   }
 
@@ -857,6 +993,10 @@ textarea:focus-visible,
 
   .section-heading {
     align-items: flex-start;
+  }
+
+  .recommendation-card .action-button {
+    width: 100%;
   }
 }
 

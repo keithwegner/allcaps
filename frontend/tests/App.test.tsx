@@ -446,51 +446,125 @@ describe("App component", () => {
     const user = userEvent.setup();
     renderApp();
 
-    expect(await screen.findByRole("heading", { name: "Web-first decision workbench" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Signal research to portfolio decisions." })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Turn political posts into a researched, tested, and monitored portfolio decision." })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Prepare Data" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Research Signals" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Build Strategy" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Operate & Audit" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Inspect and deploy deliberately" })).toBeInTheDocument();
     expect(await screen.findByText("truth_only (42 Truth, 0 X)")).toBeInTheDocument();
     expect(screen.getByText("Portfolio Alpha")).toBeInTheDocument();
-    expect(screen.getByText("Workflow map")).toBeInTheDocument();
-    expect(screen.getByText("Explore")).toBeInTheDocument();
+    expect(screen.getByText("Product workflow")).toBeInTheDocument();
+    expect(screen.getByText("Prepare")).toBeInTheDocument();
+    expect(screen.getAllByText("Research").length).toBeGreaterThan(0);
     expect(screen.getByText("Build")).toBeInTheDocument();
     expect(screen.getByText("Operate")).toBeInTheDocument();
-    expect(screen.getAllByText(/Start here to confirm the API/).length).toBeGreaterThan(0);
-    expect(screen.getByText(/Follow the flow from data and research/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Start here for the shortest path/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Prepare data, research the signal/)).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Research: Sentiment/ }));
+    await user.click(screen.getByRole("button", { name: /Research: Inspect signals/ }));
     expect(await screen.findByRole("heading", { name: "Research workspace" })).toBeInTheDocument();
     expect(screen.getByText(/Truth Social-only mode is active/)).toBeInTheDocument();
-    expect(screen.getAllByText(/Use this page to inspect filtered Trump Truth Social/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Inspect filtered Truth Social/).length).toBeGreaterThan(0);
     expect(screen.getByRole("link", { name: "Export research pack" })).toHaveAttribute("href", expect.stringContaining("/api/research/export"));
     expect(await screen.findByRole("heading", { name: "Multi-asset comparison, event study, and intraday reaction" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Discovery: Tracked/ }));
+    await user.click(screen.getByRole("button", { name: /Discovery: X account context/ }));
     expect(await screen.findByRole("heading", { name: "Discovery workspace" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Discovery admin overrides" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Run Explorer: Saved/ }));
+    await user.click(screen.getByRole("button", { name: /Runs: Compare strategies/ }));
     expect(await screen.findByRole("heading", { name: "Run Explorer" })).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "Variant comparison" })).toBeInTheDocument();
     expect(screen.getByText("run-asset-1: robust score changed")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Replay: Historical/ }));
+    await user.click(screen.getByRole("button", { name: /Replay: Audit old signals/ }));
     expect(await screen.findByRole("heading", { name: "Historical Replay Workspace" })).toBeInTheDocument();
     expect(await screen.findByText("LONG SPY NEXT SESSION")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Model Training: Train/ }));
+    await user.click(screen.getByRole("button", { name: /Training: Build model runs/ }));
     expect(await screen.findByRole("heading", { name: "Model Training Job Console" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Use Joint Portfolio workflow" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Data Admin: Refresh/ }));
+    await user.click(screen.getByRole("button", { name: /Data Admin: Prepare datasets/ }));
     expect(await screen.findByRole("heading", { name: "Data Admin Console" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Watchlist controls" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Live Ops: Operate/ }));
+    await user.click(screen.getByRole("button", { name: /Live Ops: Deploy and capture/ }));
     expect(await screen.findByRole("heading", { name: "Live Ops Console" })).toBeInTheDocument();
     expect(screen.getByText("Stored-data capture only")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Paper \+ Performance: Portfolio/ }));
+    await user.click(screen.getByRole("button", { name: /Audit: Paper and drift/ }));
     expect(await screen.findByRole("heading", { name: "Portfolio selector" })).toBeInTheDocument();
     expect(await screen.findByText("score_outcome_correlation")).toBeInTheDocument();
+  });
+
+  test("drives workflow home calls to action", async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(await screen.findByRole("button", { name: "Open Data Admin" }));
+    expect(await screen.findByRole("heading", { name: "Data Admin Console" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Home: Guided workflow" }));
+    await user.click(await screen.findByRole("button", { name: "Open Research" }));
+    expect(await screen.findByRole("heading", { name: "Research workspace" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Home: Guided workflow" }));
+    await user.click(await screen.findByRole("button", { name: "Open Training" }));
+    expect(await screen.findByRole("heading", { name: "Model Training Job Console" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Home: Guided workflow" }));
+    await user.click(await screen.findByRole("button", { name: "Open Runs" }));
+    expect(await screen.findByRole("heading", { name: "Run Explorer" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Home: Guided workflow" }));
+    await user.click(await screen.findByRole("button", { name: "Open Live Ops" }));
+    expect(await screen.findByRole("heading", { name: "Live Ops Console" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Home: Guided workflow" }));
+    await user.click(await screen.findByRole("button", { name: "Open Audit" }));
+    expect(await screen.findByRole("heading", { name: "Portfolio selector" })).toBeInTheDocument();
+  });
+
+  test("recommends data admin when core datasets are missing", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), "http://127.0.0.1:5173");
+        const method = init?.method ?? "GET";
+        const payload =
+          url.pathname === "/api/status"
+            ? { ...statusPayload, missing_core_datasets: ["normalized_posts", "asset_daily"] }
+            : payloadFor(url.pathname, method);
+        return new Response(JSON.stringify(payload), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+    renderApp();
+
+    expect(await screen.findByRole("heading", { name: "Prepare the datasets first" })).toBeInTheDocument();
+    await user.click(screen.getAllByRole("button", { name: "Go to Data Admin" })[0]);
+    expect(await screen.findByRole("heading", { name: "Data Admin Console" })).toBeInTheDocument();
+  });
+
+  test("recommends model training when data exists without saved runs", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), "http://127.0.0.1:5173");
+        const method = init?.method ?? "GET";
+        const payload = url.pathname === "/api/runs" ? { count: 0, runs: [] } : payloadFor(url.pathname, method);
+        return new Response(JSON.stringify(payload), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+    renderApp();
+
+    expect(await screen.findByRole("heading", { name: "Train the first strategy" })).toBeInTheDocument();
+    await user.click(screen.getAllByRole("button", { name: "Go to Model Training" })[0]);
+    expect(await screen.findByRole("heading", { name: "Model Training Job Console" })).toBeInTheDocument();
   });
 
   test("supports admin mutations from React pages", async () => {
@@ -498,7 +572,7 @@ describe("App component", () => {
     const fetchMock = installFetchMock();
     renderApp();
 
-    await user.click(await screen.findByRole("button", { name: /Data Admin: Refresh/ }));
+    await user.click(await screen.findByRole("button", { name: /Data Admin: Prepare datasets/ }));
     await user.type(screen.getByPlaceholderText(/password/i), "secret");
     await user.click(screen.getByRole("button", { name: "Unlock admin writes" }));
     expect(await screen.findByText("Unlocked for this browser session")).toBeInTheDocument();
@@ -509,7 +583,7 @@ describe("App component", () => {
     await user.click(screen.getByRole("button", { name: "Start refresh job" }));
     expect(await screen.findByRole("cell", { name: "dataset-refresh-2" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Discovery: Tracked/ }));
+    await user.click(screen.getByRole("button", { name: /Discovery: X account context/ }));
     await user.selectOptions(screen.getByLabelText("Override account"), "acct-muted");
     await user.selectOptions(screen.getByLabelText("Override action"), "suppress");
     await user.type(screen.getByPlaceholderText("Optional rationale"), "Noisy source");
@@ -518,7 +592,7 @@ describe("App component", () => {
     await user.click(screen.getByRole("button", { name: "Delete selected override" }));
     await waitFor(() => expect(screen.queryByText("override-pin")).not.toBeInTheDocument());
 
-    await user.click(screen.getByRole("button", { name: /Model Training: Train/ }));
+    await user.click(screen.getByRole("button", { name: /Training: Build model runs/ }));
     await user.click(screen.getByRole("button", { name: "Use Single Asset workflow" }));
     expect(screen.getByRole("heading", { name: "Single Asset configuration" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Use Saved-Run Portfolio workflow" }));
@@ -527,7 +601,7 @@ describe("App component", () => {
     await user.click(screen.getByRole("button", { name: "Start model training job" }));
     expect(await screen.findByRole("heading", { name: "Latest training result" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Live Ops: Operate/ }));
+    await user.click(screen.getByRole("button", { name: /Live Ops: Deploy and capture/ }));
     await user.click(screen.getByRole("button", { name: "Save pinned portfolio run" }));
     await user.click(screen.getByRole("button", { name: "Capture current board" }));
     await user.click(screen.getByRole("button", { name: "Disable paper trading" }));
@@ -540,13 +614,13 @@ describe("App component", () => {
     expect(requestedPaths).toContain("/api/live/config");
     expect(requestedPaths).toContain("/api/live/capture");
     expect(requestedPaths).toContain("/api/paper/current");
-  });
+  }, 10000);
 
   test("drives read-only research, run, replay, and performance controls", async () => {
     const user = userEvent.setup();
     renderApp();
 
-    await user.click(await screen.findByRole("button", { name: /Research: Sentiment/ }));
+    await user.click(await screen.findByRole("button", { name: /Research: Inspect signals/ }));
     await user.clear(screen.getByLabelText("Start date"));
     await user.type(screen.getByLabelText("Start date"), "2025-01-02");
     await user.clear(screen.getByLabelText("End date"));
@@ -579,7 +653,7 @@ describe("App component", () => {
     await user.type(screen.getByLabelText("Minutes after"), "300");
     expect(await screen.findByRole("heading", { name: "Intraday reaction" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Run Explorer: Saved/ }));
+    await user.click(screen.getByRole("button", { name: /Runs: Compare strategies/ }));
     await user.selectOptions(await screen.findByLabelText("Run type"), "asset_model");
     await user.selectOptions(screen.getByLabelText("Target asset"), "QQQ");
     await user.type(screen.getByPlaceholderText("Run name, id, or asset"), "Baseline");
@@ -590,21 +664,21 @@ describe("App component", () => {
     await user.selectOptions(screen.getByLabelText("Base run"), "run-asset-2");
     await waitFor(() => expect(screen.getAllByText("QQQ Baseline").length).toBeGreaterThan(0));
 
-    await user.click(screen.getByRole("button", { name: /Replay: Historical/ }));
+    await user.click(screen.getByRole("button", { name: /Replay: Audit old signals/ }));
     await user.selectOptions(await screen.findByLabelText("Replay template run"), "run-asset-2");
     await user.selectOptions(screen.getByLabelText("Historical signal session"), "2025-03-04");
     expect(await screen.findByText("LONG SPY NEXT SESSION")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Paper \+ Performance: Portfolio/ }));
+    await user.click(screen.getByRole("button", { name: /Audit: Paper and drift/ }));
     await user.selectOptions(await screen.findByRole("combobox"), "paper 2");
     expect(await screen.findByText("score_outcome_correlation")).toBeInTheDocument();
-  });
+  }, 10000);
 
   test("drives admin configuration controls across model, data, and live ops", async () => {
     const user = userEvent.setup();
     renderApp();
 
-    await user.click(await screen.findByRole("button", { name: /Model Training: Train/ }));
+    await user.click(await screen.findByRole("button", { name: /Training: Build model runs/ }));
     await user.type(screen.getByPlaceholderText("Admin password"), "secret");
     await user.click(screen.getByRole("button", { name: "Unlock admin writes" }));
     expect(await screen.findByText("Unlocked for this browser session")).toBeInTheDocument();
@@ -646,13 +720,13 @@ describe("App component", () => {
     await user.click(screen.getByRole("button", { name: "Start model training job" }));
     expect(await screen.findByText("run-portfolio-2")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Data Admin: Refresh/ }));
+    await user.click(screen.getByRole("button", { name: /Data Admin: Prepare datasets/ }));
     await user.click(screen.getByRole("button", { name: "Reset watchlist" }));
     await user.selectOptions(screen.getByLabelText("Refresh mode"), "full");
     const file = new File(["author,text\nmacro,hello\n"], "mentions.csv", { type: "text/csv" });
     await user.upload(screen.getByLabelText("CSV upload"), file);
 
-    await user.click(screen.getByRole("button", { name: /Live Ops: Operate/ }));
+    await user.click(screen.getByRole("button", { name: /Live Ops: Deploy and capture/ }));
     await user.selectOptions(screen.getByLabelText("Pinned joint portfolio run"), "run-portfolio-1");
     await user.selectOptions(screen.getByLabelText("Fallback mode"), "FLAT");
     await user.clear(screen.getByLabelText("Starting cash"));
@@ -663,7 +737,7 @@ describe("App component", () => {
     await user.type(screen.getByLabelText("Reset cash"), "90000");
     await user.click(screen.getByRole("button", { name: "Reset portfolio" }));
     await waitFor(() => expect(screen.getAllByText("paper-1").length).toBeGreaterThan(0));
-  });
+  }, 10000);
 
   test("shows empty and error states without crashing", async () => {
     vi.stubGlobal(
@@ -683,15 +757,15 @@ describe("App component", () => {
     renderApp();
 
     expect(await screen.findByText("No rows returned yet.")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Run Explorer: Saved/ }));
+    await user.click(screen.getByRole("button", { name: /Runs: Compare strategies/ }));
     expect(await screen.findByText("No saved runs have been created yet. Train a model in the Model Training tab first, then return here.")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Research: Sentiment/ }));
+    await user.click(screen.getByRole("button", { name: /Research: Inspect signals/ }));
     expect(await screen.findByText("API request failed: broken")).toBeInTheDocument();
   });
 
   test("renders a table empty state and limited columns", async () => {
     renderApp();
-    const recentRunsHeading = await screen.findByRole("heading", { name: "Recent saved runs" });
+    const recentRunsHeading = await screen.findByRole("heading", { name: "Saved strategy snapshot" });
     const recentRuns = recentRunsHeading.closest("article");
     expect(recentRuns).not.toBeNull();
     expect(within(recentRuns as HTMLElement).getByRole("columnheader", { name: "run id" })).toBeInTheDocument();

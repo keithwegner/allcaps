@@ -1050,10 +1050,16 @@ test.beforeEach(async ({ page }) => {
 test("renders the overview shell from API-backed data", async ({ page }) => {
   await page.goto("/");
 
-  await expect(page.getByRole("heading", { name: "Web-first decision workbench" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Signal research to portfolio decisions." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Turn political posts into a researched, tested, and monitored portfolio decision." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Prepare Data" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Research Signals" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Build Strategy" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Operate & Audit" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Inspect and deploy deliberately" })).toBeVisible();
   await expect(page.getByText("API base")).toBeVisible();
   await expect(page.getByText("truth_only (42 Truth, 0 X)")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Recent saved runs" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Saved strategy snapshot" })).toBeVisible();
   await expect(page.getByText("Portfolio Alpha")).toBeVisible();
 });
 
@@ -1061,24 +1067,25 @@ test("renders primary navigation with reduced motion enabled", async ({ page }) 
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/");
 
-  await expect(page.getByRole("heading", { name: "Web-first decision workbench" })).toBeVisible();
-  await expect(page.getByText("Workflow map", { exact: true })).toBeVisible();
-  await expect(page.getByText("Explore", { exact: true })).toBeVisible();
-  await expect(page.getByText("Build", { exact: true })).toBeVisible();
-  await expect(page.getByText("Operate", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Help: Workflow map" }).focus();
-  await expect(page.getByText(/Follow the flow from data and research/)).toBeVisible();
-  await page.getByRole("button", { name: /Research/ }).click();
-  await expect(page.getByRole("heading", { name: "Sentiment, narratives, and export pack" })).toBeVisible();
-  await expect(page.getByText(/Use this page to inspect filtered Trump Truth Social/).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Signal research to portfolio decisions." })).toBeVisible();
+  await expect(page.getByText("Product workflow", { exact: true })).toBeVisible();
+  await expect(page.locator("#workflow-Prepare")).toBeVisible();
+  await expect(page.locator("#workflow-Research")).toBeVisible();
+  await expect(page.locator("#workflow-Build")).toBeVisible();
+  await expect(page.locator("#workflow-Operate")).toBeVisible();
+  await page.getByRole("button", { name: "Help: Product workflow" }).focus();
+  await expect(page.getByText(/Prepare data, research the signal/)).toBeVisible();
+  await page.getByRole("button", { name: "Research: Inspect signals" }).click();
+  await expect(page.getByRole("heading", { name: "Inspect signals" })).toBeVisible();
+  await expect(page.getByText(/Inspect filtered Truth Social/).first()).toBeVisible();
   await expect(page.getByRole("link", { name: "Export research pack" })).toBeVisible();
 });
 
 test("shows data admin controls, health rows, and refresh jobs", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: /Data Admin/ }).click();
+  await page.getByRole("button", { name: "Data Admin: Prepare datasets" }).click();
 
-  await expect(page.getByRole("heading", { name: "Refresh jobs, watchlist, and data health" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Prepare datasets" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Data Admin Console" })).toBeVisible();
   await expect(page.getByText("Read-only until unlocked")).toBeVisible();
   await page.getByPlaceholder("Admin password").fill("secret");
@@ -1103,9 +1110,9 @@ test("shows data admin controls, health rows, and refresh jobs", async ({ page }
 
 test("shows the migrated research workspace with narratives and export", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: /Research/ }).click();
+  await page.getByRole("button", { name: "Research: Inspect signals" }).click();
 
-  await expect(page.getByRole("heading", { name: "Sentiment, narratives, and export pack" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Inspect signals" })).toBeVisible();
   await expect(page.getByText("Truth Social-only mode is active")).toBeVisible();
   await expect(page.getByRole("link", { name: "Export research pack" })).toHaveAttribute(
     "href",
@@ -1131,9 +1138,9 @@ test("shows the migrated research workspace with narratives and export", async (
 
 test("shows the migrated discovery workspace with rankings and overrides", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: /Discovery/ }).click();
+  await page.getByRole("button", { name: "Discovery: X account context" }).click();
 
-  await expect(page.getByRole("heading", { name: "Tracked account ranking workspace" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "X account context" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Discovery workspace" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Discovery admin overrides" })).toBeVisible();
   await expect(page.getByText("Admins can now pin or suppress accounts from this")).toBeVisible();
@@ -1161,9 +1168,9 @@ test("shows the migrated discovery workspace with rankings and overrides", async
 
 test("shows the migrated run explorer with detail and comparison tables", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: /Run Explorer/ }).click();
+  await page.getByRole("button", { name: "Runs: Compare strategies" }).click();
 
-  await expect(page.getByRole("heading", { name: "Saved model results and comparisons" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Compare strategies" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Run Explorer" })).toBeVisible();
   await expect(page.getByLabel("Selected run")).toHaveValue("run-portfolio-1");
   await expect(page.getByRole("heading", { name: "Run summary" })).toBeVisible();
@@ -1182,9 +1189,9 @@ test("shows the migrated run explorer with detail and comparison tables", async 
 
 test("shows historical replay metrics and attribution tables", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: /Replay/ }).click();
+  await page.getByRole("button", { name: "Replay: Audit old signals" }).click();
 
-  await expect(page.getByRole("heading", { name: "Historical signal reconstruction" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Audit old signals" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Historical Replay Workspace" })).toBeVisible();
   await expect(page.getByLabel("Replay template run")).toHaveValue("run-asset-1");
   await expect(page.getByLabel("Historical signal session")).toHaveValue("2025-03-03");
@@ -1203,7 +1210,7 @@ test("shows historical replay metrics and attribution tables", async ({ page }) 
 
 test("shows model training forms and submits an admin job", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: /Model Training/ }).click();
+  await page.getByRole("button", { name: "Training: Build model runs" }).click();
 
   await expect(page.getByRole("heading", { name: "Model Training Job Console" })).toBeVisible();
   await expect(page.getByText("Read-only until unlocked")).toBeVisible();
@@ -1231,7 +1238,7 @@ test("shows model training forms and submits an admin job", async ({ page }) => 
 
 test("shows live ops controls and supports admin actions", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: /Live Ops/ }).click();
+  await page.getByRole("button", { name: "Live Ops: Deploy and capture" }).click();
 
   await expect(page.getByRole("heading", { name: "Live Ops Console" })).toBeVisible();
   await expect(page.getByText("Stored-data capture only")).toBeVisible();
@@ -1255,7 +1262,7 @@ test("shows live ops controls and supports admin actions", async ({ page }) => {
 
 test("shows paper performance diagnostics and winner distribution", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: /Paper \+ Performance/ }).click();
+  await page.getByRole("button", { name: "Audit: Paper and drift" }).click();
 
   await expect(page.getByRole("heading", { name: "Portfolio selector" })).toBeVisible();
   await expect(page.getByRole("combobox")).toContainText("paper-1 - Portfolio Alpha");

@@ -6,6 +6,7 @@ const testBaseUrl = `http://127.0.0.1:${testPort}`;
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: true,
+  workers: 2,
   timeout: 30_000,
   expect: {
     timeout: 5_000,
