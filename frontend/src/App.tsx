@@ -17,6 +17,8 @@ import {
   type RecordRow,
   type ResearchAssetFilters,
   type ResearchFilters,
+  type RunsPayload,
+  type StatusPayload,
 } from "./api";
 import {
   deploymentParamRows,
@@ -60,7 +62,7 @@ type PageMeta = {
   key: PageKey;
   label: string;
   deck: string;
-  workflow: "Start" | "Explore" | "Build" | "Operate";
+  workflow: "Home" | "Prepare" | "Research" | "Build" | "Operate";
   help: string;
   nextStep: string;
 };
@@ -68,75 +70,75 @@ type PageMeta = {
 const pages: PageMeta[] = [
   {
     key: "overview",
-    label: "Overview",
-    deck: "API status and app posture",
-    workflow: "Start",
-    help: "Start here to confirm the API, data posture, and recent saved runs before choosing a workflow.",
-    nextStep: "If the app has data, continue to Research. If core datasets are missing, go to Data Admin first.",
+    label: "Home",
+    deck: "Guided workflow",
+    workflow: "Home",
+    help: "Start here for the shortest path through data readiness, research, model building, deployment, and audit.",
+    nextStep: "Follow the recommended next action, or jump directly into the workflow step that matches your current state.",
   },
   {
     key: "research",
     label: "Research",
-    deck: "Sentiment, narratives, and export pack",
-    workflow: "Explore",
-    help: "Use this page to inspect filtered Trump Truth Social or X-backed sentiment before building models.",
-    nextStep: "Use the export pack when you want a portable evidence bundle, or move to Model Training after validating the slice.",
+    deck: "Inspect signals",
+    workflow: "Research",
+    help: "Inspect filtered Truth Social or X-backed sentiment, narratives, asset reactions, and exportable evidence.",
+    nextStep: "If the signal slice is credible, move to Model Training. If the data looks stale, go back to Data Admin.",
   },
   {
     key: "discovery",
     label: "Discovery",
-    deck: "Tracked account ranking workspace",
-    workflow: "Explore",
-    help: "Discovery ranks non-Trump X accounts that mention Trump. It is optional for Truth Social-only analysis.",
-    nextStep: "Use overrides only when X mention data is loaded and you want to pin or suppress tracked accounts.",
+    deck: "X account context",
+    workflow: "Research",
+    help: "Rank and manage non-Trump X accounts that mention Trump. Skip this for Truth Social-only review.",
+    nextStep: "Use overrides only when X mention data exists and tracked account context should affect downstream features.",
   },
   {
     key: "runs",
-    label: "Run Explorer",
-    deck: "Saved model results and comparisons",
+    label: "Runs",
+    deck: "Compare strategies",
     workflow: "Build",
-    help: "Inspect saved model and portfolio runs. This is analysis, not deployment.",
-    nextStep: "After choosing a portfolio run, deploy it explicitly from Live Ops.",
+    help: "Compare saved model and portfolio runs before choosing a deployment candidate.",
+    nextStep: "After choosing a portfolio run, deploy it explicitly from Live Ops rather than assuming the newest run is live.",
   },
   {
     key: "replay",
     label: "Replay",
-    deck: "Historical signal reconstruction",
-    workflow: "Explore",
-    help: "Replay rebuilds an old asset-model signal using only prior rows so you can audit drift and leakage.",
-    nextStep: "Use replay findings to decide whether a saved asset model is still trustworthy.",
+    deck: "Audit old signals",
+    workflow: "Research",
+    help: "Rebuild an old asset-model signal using only prior rows to audit drift and leakage.",
+    nextStep: "Use replay to explain suspicious sessions before trusting or retraining a model.",
   },
   {
     key: "models",
-    label: "Model Training",
-    deck: "Train and save model runs",
+    label: "Training",
+    deck: "Build model runs",
     workflow: "Build",
     help: "Create single-asset runs, saved-run allocators, or joint portfolio models from stored datasets.",
-    nextStep: "After training finishes, inspect the run in Run Explorer before deploying it in Live Ops.",
+    nextStep: "After training finishes, inspect the saved run before deploying it in Live Ops.",
   },
   {
     key: "data",
     label: "Data Admin",
-    deck: "Refresh jobs, watchlist, and data health",
-    workflow: "Operate",
-    help: "Owns dataset refreshes, watchlist edits, source inputs, manifests, and health checks.",
-    nextStep: "Refresh or fix data here before using Research, Model Training, or Live Ops.",
+    deck: "Prepare datasets",
+    workflow: "Prepare",
+    help: "Refresh datasets, edit the watchlist, check source manifests, and review health warnings.",
+    nextStep: "Once health is acceptable, go to Research to inspect whether the stored posts and market rows are useful.",
   },
   {
     key: "live",
     label: "Live Ops",
-    deck: "Operate deployed portfolio",
+    deck: "Deploy and capture",
     workflow: "Operate",
-    help: "Pin a portfolio run, capture stored-data live boards, and manage paper trading for the deployed strategy.",
-    nextStep: "Use Data Admin for fresh data. Live Ops only captures decisions from currently stored datasets.",
+    help: "Pin a portfolio run, capture stored-data live boards, and manage the deployed paper strategy.",
+    nextStep: "Use Data Admin for fresh data. Live Ops captures decisions only from currently stored datasets.",
   },
   {
     key: "paper",
-    label: "Paper + Performance",
-    deck: "Portfolio audit and drift",
+    label: "Audit",
+    deck: "Paper and drift",
     workflow: "Operate",
-    help: "Review paper portfolio outcomes, benchmark comparison, diagnostics, and drift warnings.",
-    nextStep: "If performance degrades, inspect the deployed run and retrain from Model Training rather than changing live logic here.",
+    help: "Review paper outcomes, benchmark comparison, diagnostics, and deployed-model drift warnings.",
+    nextStep: "If performance degrades, inspect the deployed run and retrain instead of changing live logic here.",
   },
 ];
 
@@ -145,11 +147,70 @@ const workflowGroups: Array<{
   description: string;
   pageKeys: PageKey[];
 }> = [
-  { label: "Start", description: "Check app posture", pageKeys: ["overview"] },
-  { label: "Explore", description: "Inspect signals and context", pageKeys: ["research", "discovery", "replay"] },
-  { label: "Build", description: "Train, compare, and select", pageKeys: ["models", "runs"] },
-  { label: "Operate", description: "Refresh data and run live audit", pageKeys: ["data", "live", "paper"] },
+  { label: "Home", description: "Follow the guided path", pageKeys: ["overview"] },
+  { label: "Prepare", description: "Make datasets trustworthy", pageKeys: ["data"] },
+  { label: "Research", description: "Understand the signal", pageKeys: ["research", "discovery", "replay"] },
+  { label: "Build", description: "Train and compare", pageKeys: ["models", "runs"] },
+  { label: "Operate", description: "Deploy and audit", pageKeys: ["live", "paper"] },
 ];
+
+type WorkflowStep = {
+  id: string;
+  number: string;
+  title: string;
+  summary: string;
+  doneLooksLike: string;
+  primaryPage: PageKey;
+  primaryLabel: string;
+  secondaryPages: PageKey[];
+};
+
+const workflowSteps: WorkflowStep[] = [
+  {
+    id: "prepare-data",
+    number: "1",
+    title: "Prepare Data",
+    summary: "Load Truth Social and optional X mention data, refresh market rows, and confirm health before analysis.",
+    doneLooksLike: "Core datasets are present, source mode is clear, and health warnings are understood.",
+    primaryPage: "data",
+    primaryLabel: "Open Data Admin",
+    secondaryPages: [],
+  },
+  {
+    id: "research-signals",
+    number: "2",
+    title: "Research Signals",
+    summary: "Review filtered sentiment, narratives, asset reactions, Discovery context, and historical replay evidence.",
+    doneLooksLike: "You know which posts, accounts, narratives, and sessions are worth modeling.",
+    primaryPage: "research",
+    primaryLabel: "Open Research",
+    secondaryPages: ["discovery", "replay"],
+  },
+  {
+    id: "build-strategy",
+    number: "3",
+    title: "Build Strategy",
+    summary: "Train single-asset or portfolio models, compare saved runs, and choose a candidate deliberately.",
+    doneLooksLike: "A saved portfolio run has explainable validation results and a clear deployment winner.",
+    primaryPage: "models",
+    primaryLabel: "Open Training",
+    secondaryPages: ["runs"],
+  },
+  {
+    id: "operate-audit",
+    number: "4",
+    title: "Operate & Audit",
+    summary: "Pin the selected portfolio run, capture stored-data decisions, and monitor paper-trading performance.",
+    doneLooksLike: "Live Ops has one pinned run, paper trading is configured, and drift/performance are visible.",
+    primaryPage: "live",
+    primaryLabel: "Open Live Ops",
+    secondaryPages: ["paper"],
+  },
+];
+
+function pageByKey(pageKey: PageKey): PageMeta {
+  return pages.find((page) => page.key === pageKey) ?? pages[0];
+}
 
 function HelpTip({ label, children }: { label: string; children: ReactNode }) {
   const tooltipId = useId();
@@ -1396,43 +1457,133 @@ function RunExplorerPage() {
   );
 }
 
-function OverviewPage() {
+function OverviewPage({ onNavigate }: { onNavigate: (page: PageKey) => void }) {
   const status = useQuery({ queryKey: ["status"], queryFn: api.status });
   const runs = useQuery({ queryKey: ["runs"], queryFn: api.runs });
 
   if (status.isLoading || runs.isLoading) {
-    return <LoadingBlock label="Loading API status..." />;
+    return <LoadingBlock label="Loading workflow home..." />;
   }
   if (status.error || runs.error) {
     return <ErrorBlock error={status.error ?? runs.error} />;
   }
 
-  const payload = status.data;
+  const payload = status.data as StatusPayload | undefined;
+  const savedRuns = runs.data as RunsPayload | undefined;
+  const missingCoreCount = payload?.missing_core_datasets.length ?? 0;
+  const savedRunCount = savedRuns?.count ?? 0;
+  const sourceMode = payload?.source_mode.mode === "truth_only" ? "Truth Social-only" : "Truth Social + X";
+  const recommended =
+    missingCoreCount > 0
+      ? {
+          title: "Prepare the datasets first",
+          summary: `${missingCoreCount} core dataset${missingCoreCount === 1 ? " is" : "s are"} missing. Start with refresh and health checks before interpreting signals.`,
+          page: "data" as PageKey,
+          label: "Go to Data Admin",
+          tone: "warn" as const,
+        }
+      : savedRunCount === 0
+        ? {
+            title: "Train the first strategy",
+            summary: "The data looks present, but there are no saved runs yet. Train a model before using Live Ops.",
+            page: "models" as PageKey,
+            label: "Go to Model Training",
+            tone: "neutral" as const,
+          }
+        : {
+            title: "Inspect and deploy deliberately",
+            summary: `${savedRunCount} saved run${savedRunCount === 1 ? " is" : "s are"} available. Compare results first, then pin the portfolio run in Live Ops.`,
+            page: "runs" as PageKey,
+            label: "Go to Run Explorer",
+            tone: "ok" as const,
+          };
+
   return (
-    <section className="page-grid">
-      <div className="metric-grid">
+    <section className="workflow-home">
+      <article className="panel panel--wide workflow-home__intro">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Guided workflow</p>
+            <h2>Turn political posts into a researched, tested, and monitored portfolio decision.</h2>
+          </div>
+          <StatusPill label={sourceMode} tone="ok" />
+        </div>
+        <p>
+          Use the workflow below as the shortest safe path through the app: prepare trustworthy data, inspect the signal,
+          build and compare models, then operate one pinned portfolio run with paper-trading audit.
+        </p>
+        <div className="home-action-row">
+          <button type="button" className="action-button" onClick={() => onNavigate(recommended.page)}>
+            {recommended.label}
+          </button>
+          {recommended.page === "runs" ? (
+            <button type="button" className="action-button action-button--secondary" onClick={() => onNavigate("live")}>
+              Go to Live Ops
+            </button>
+          ) : null}
+        </div>
+      </article>
+
+      <article className={`panel panel--wide recommendation-card recommendation-card--${recommended.tone}`}>
+        <div>
+          <p className="eyebrow">Recommended next action</p>
+          <h2>{recommended.title}</h2>
+          <p>{recommended.summary}</p>
+        </div>
+        <button type="button" className="action-button" onClick={() => onNavigate(recommended.page)}>
+          {recommended.label}
+        </button>
+      </article>
+
+      <div className="metric-grid home-status-grid">
         <MetricCard label="App mode" value={payload?.mode} />
         <MetricCard label="Datasets tracked" value={payload?.dataset_count ?? 0} />
-        <MetricCard label="Missing core datasets" value={payload?.missing_core_datasets.length ?? 0} />
-        <MetricCard label="Saved runs" value={runs.data?.count ?? 0} />
+        <MetricCard label="Missing core datasets" value={missingCoreCount} />
+        <MetricCard label="Saved runs" value={savedRunCount} />
       </div>
+
+      <div className="workflow-steps" aria-label="Primary workflow">
+        {workflowSteps.map((step) => (
+          <motion.article className="workflow-step-card" key={step.id} variants={revealVariants} whileHover={surfaceHover}>
+            <div className="workflow-step-card__number">{step.number}</div>
+            <div>
+              <p className="eyebrow">Step {step.number}</p>
+              <h2>{step.title}</h2>
+              <p>{step.summary}</p>
+            </div>
+            <div className="workflow-step-card__done">
+              <strong>Done when</strong>
+              <span>{step.doneLooksLike}</span>
+            </div>
+            <div className="workflow-step-card__actions">
+              <button type="button" className="action-button" onClick={() => onNavigate(step.primaryPage)}>
+                {step.primaryLabel}
+              </button>
+              {step.secondaryPages.map((pageKey) => {
+                const page = pageByKey(pageKey);
+                return (
+                  <button key={pageKey} type="button" className="action-button action-button--secondary" onClick={() => onNavigate(pageKey)}>
+                    Open {page.label}
+                  </button>
+                );
+              })}
+            </div>
+          </motion.article>
+        ))}
+      </div>
+
       <article className="panel panel--wide">
         <div className="panel-heading">
           <div>
-            <p className="eyebrow">React primary checkpoint</p>
-            <h2>React + FastAPI is now the primary app surface.</h2>
+            <p className="eyebrow">System posture</p>
+            <h2>Current data and run snapshot</h2>
           </div>
-          <StatusPill label="Read/write API" tone="ok" />
+          <StatusPill label={`${payload?.source_mode.truth_post_count ?? 0} Truth / ${payload?.source_mode.x_post_count ?? 0} X`} />
         </div>
-        <p>
-          This web app covers the main research, dataset administration, model training,
-          run inspection, Discovery override, live ops, paper-trading, and performance workflows.
-          Streamlit remains available as a fallback shell while the legacy-only surfaces are retired.
-        </p>
         <dl className="detail-list">
           <div>
             <dt>API base</dt>
-            <dd>{api.baseUrl}</dd>
+            <dd>{api.baseUrl || "same origin"}</dd>
           </div>
           <div>
             <dt>State root</dt>
@@ -1446,12 +1597,10 @@ function OverviewPage() {
             </dd>
           </div>
         </dl>
-      </article>
-      <article className="panel panel--wide">
-        <div className="panel-heading">
-          <h2>Recent saved runs</h2>
+        <div className="compact-table-section">
+          <h3>Saved strategy snapshot</h3>
+          <DataTable rows={savedRuns?.runs ?? []} />
         </div>
-        <DataTable rows={runs.data?.runs ?? []} />
       </article>
     </section>
   );
@@ -2626,7 +2775,7 @@ export function App() {
   const activeMeta = pages.find((page) => page.key === activePage) ?? pages[0];
   const pageContent =
     activePage === "overview" ? (
-      <OverviewPage />
+      <OverviewPage onNavigate={setActivePage} />
     ) : activePage === "research" ? (
       <ResearchPage />
     ) : activePage === "discovery" ? (
@@ -2650,26 +2799,35 @@ export function App() {
       <motion.main className="app-shell" initial="initial" animate="animate" variants={pageVariants}>
         <motion.header className="hero" variants={revealVariants}>
           <motion.div variants={revealVariants}>
-            <p className="eyebrow">AllCaps Web App</p>
-            <h1>Web-first decision workbench</h1>
+            <p className="eyebrow">AllCaps</p>
+            <h1>Signal research to portfolio decisions.</h1>
             <p>
-              A React and FastAPI decision workbench backed by the existing Python analytics engine.
+              A workflow-first product for reviewing political social posts, testing market signals, and monitoring one
+              explicit portfolio strategy.
             </p>
+            <div className="hero-actions">
+              <button type="button" className="action-button" onClick={() => setActivePage("overview")}>
+                Start workflow
+              </button>
+              <button type="button" className="action-button action-button--secondary" onClick={() => setActivePage("data")}>
+                Check data
+              </button>
+            </div>
           </motion.div>
           <motion.div className="hero-card" variants={revealVariants} whileHover={surfaceHover}>
-            <span>Milestone</span>
-            <strong>React primary cutover</strong>
-            <small>Streamlit fallback retained</small>
+            <span>Workflow</span>
+            <strong>{"Prepare -> Research -> Build -> Operate"}</strong>
+            <small>Start with data readiness. End with an audited live portfolio decision.</small>
           </motion.div>
         </motion.header>
 
         <div className="workspace-layout">
           <motion.nav className="workflow-rail page-tabs" aria-label="Guided workflow navigation" variants={revealVariants}>
             <div className="workflow-rail__intro">
-              <p className="eyebrow">Workflow map</p>
-              <strong>Choose where you are in the process.</strong>
-              <HelpTip label="Workflow map">
-                Follow the flow from data and research through model building, then operate the selected portfolio run.
+              <p className="eyebrow">Product workflow</p>
+              <strong>Move through the app in order, or jump to the step you need.</strong>
+              <HelpTip label="Product workflow">
+                Prepare data, research the signal, build and compare strategy runs, then operate the selected portfolio.
               </HelpTip>
             </div>
             {workflowGroups.map((group) => (
