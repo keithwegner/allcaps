@@ -172,11 +172,13 @@ Streamlit remains available for fallback validation and the legacy Alpha Vantage
 
 ## Run With Docker
 
-The repo includes local Docker packaging for a single-user browser workflow. The current Compose package serves the fallback Streamlit shell on port `8501`; use the Quick Start commands above for the primary React + FastAPI development workflow.
+The repo includes local Docker packaging for a single-user browser workflow. The default Compose package now serves the **React + FastAPI web app** from one container.
 
 Default behavior:
 
-- runs the fallback Streamlit shell on [http://127.0.0.1:8501](http://127.0.0.1:8501)
+- builds the React frontend during the Docker image build
+- serves the built frontend from FastAPI with `/api/*` handled by the backend
+- opens on [http://127.0.0.1:8000](http://127.0.0.1:8000)
 - keeps the app private and writable by default
 - stores runtime state in a named Docker volume mounted at `/var/data`
 - leaves the scheduler off by default
@@ -189,7 +191,7 @@ docker compose up --build
 
 Open:
 
-- [http://127.0.0.1:8501](http://127.0.0.1:8501)
+- [http://127.0.0.1:8000](http://127.0.0.1:8000)
 
 Stop it:
 
@@ -232,6 +234,21 @@ volumes:
 ```
 
 That will store DuckDB, parquet data, cache files, and run artifacts in `./docker-state`.
+
+Optional Streamlit fallback in Docker:
+
+The image still includes the Streamlit shell. To run it instead of the web-first UI, override the runtime and port:
+
+```bash
+docker build -t allcaps .
+docker run --rm -p 127.0.0.1:8501:8501 \
+  -v allcaps_state:/var/data \
+  -e ALLCAPS_RUNTIME=streamlit \
+  -e PORT=8501 \
+  allcaps
+```
+
+Then open [http://127.0.0.1:8501](http://127.0.0.1:8501).
 
 ## Hosting On Render
 
