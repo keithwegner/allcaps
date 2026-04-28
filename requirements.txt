@@ -9,6 +9,6 @@ requests>=2.31
 pandas-datareader>=0.10
 yfinance>=0.2.52
 vaderSentiment>=3.3.2
-duckdb>=1.1
+duckdb>=1.5.2
 pyarrow>=15.0
 scikit-learn>=1.5
